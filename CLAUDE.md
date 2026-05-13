@@ -2,8 +2,8 @@
 
 ## Before Starting
 
-1. **TradingView Desktop must be running** with the Tri-City Inator ENHANCED indicator
-   visible on the active chart before 8:00 AM CT
+1. **TradingView Desktop must be running** with the **Tri-City Inator** scanner visible on
+   the **TRI CITY INATOR III** layout before 8:00 AM CT
 2. `.env` must contain valid Alpaca API keys
 3. Start in paper trading mode until you have validated signals live
 
@@ -22,16 +22,17 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 > All times are Central (CT). Eastern Time users add 1 hour.
 
 ```
-7:30 AM CT         Premarket scanner  →  gap-up candidates ranked by score, pushed to TV watchlist
-8:30 AM CT         Market opens       →  opening range begins
+7:30 AM CT         Premarket scanner  →  gap-up candidates ranked by score, saved + pushed to TV watchlist
+8:30 AM CT         Symbol swap        →  top 15 candidates pushed into Tri-City scanner inputs
 8:30 + ORB_MINUTES Level lock         →  ORH/ORL finalize once opening range closes
-8:30 + ORB_MINUTES Signal monitor     →  every 3 min, checks all candidates for signals
-                   Position manager   →  T1 breakeven, T2 lock, trailing stop
-2:45 PM CT         EOD close          →  all positions closed automatically
+8:30 + ORB_MINUTES Signal monitor     →  every 3 min, checks all symbols for BREAKOUT/CONT/PULLBACK
+                   Position manager   →  T1 breakeven, T2 lock, T3 trail, EOD close
                    Journal            →  every exit auto-logged (P&L, R, outcome)
 ```
 
-> **ORB timeframe:** Set `ORB_MINUTES` in `.env` (5, 15, or 30 — default 15). Claude reads this at session start and automatically schedules the level lock and monitor at the right time. The Dr Heinz indicator on your TradingView chart must be set to the same timeframe.
+> **ORB timeframe:** Set `ORB_MINUTES` in `.env` (5, 15, or 30 — default 15). Claude reads this
+> at session start and schedules level lock + monitor at the right time.
+> The Tri-City Inator scanner on your TradingView chart must be set to the same timeframe.
 
 ---
 
@@ -47,27 +48,69 @@ Read the file `~/tri-city-inator/.env`. Look for a line like `ORB_MINUTES=15`.
 Calculate the level lock time: market open (8:30 AM CT) + ORB_MINUTES.
 Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 → 9:00 AM.
 
-**Step 2 — Register three crons silently**
+**Step 2 — Register four crons silently**
 
 1. Premarket scanner — weekdays at 7:30 AM CT:
-   /loop 7:30am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table. Then read the "TV WATCHLIST" line at the bottom of the output and add each of those symbols to the TradingView watchlist using watchlist_add (one call per symbol). The active watchlist in TradingView's right sidebar is where they will appear — the user can click any symbol there to pull up the chart and see more detail.
+   /loop 7:30am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table and any parabolic warnings. Then read the "TV WATCHLIST" line at the bottom of the output and add each symbol to the TradingView watchlist using watchlist_add (one call per symbol).
 
-2. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
-   /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator ENHANCED table using data_get_pine_tables with study_filter="Tri-City". Extract entry levels for all symbols and save to shared/tri-city-levels.json. Report symbols loaded.
+2. Symbol swap — weekdays at 8:30 AM CT:
+   /loop 8:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 15 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Build an inputs dict mapping in_7 through in_21 to those symbols (in_7=sym[0], in_8=sym[1], ..., in_21=sym[14]; omit keys for positions beyond the available count). Call indicator_set_inputs with entity_id="gIyd0u" and that inputs dict. Report: how many symbols were pushed and list them.
 
-3. Signal monitor — weekdays at the computed level lock time (same time as level lock, runs after):
-   /loop {LEVEL_LOCK_TIME}am weekdays Execute `python -W ignore ~/tri-city-inator/scripts/tri_city_monitor.py` via Bash. If there is output, print it. If there is no output, stay silent.
+3. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
+   /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Extract ORH and ORL for every symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json. Report symbols loaded.
+
+4. Signal monitor — weekdays every 3 minutes (starts at level lock time):
+   /loop 3m Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Use the ORH and ORL values from the table directly for each symbol — do NOT use hardcoded levels. Check every symbol for THREE setup types. For each qualifying setup: (1) report it, (2) immediately execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {SYMBOL} --price {PRICE} --orh {ORH} --orl {ORL} --rsi {RSI} --ema_dev {EMA_DEV} --signal "{SIGNAL}" --setup {SETUP_TYPE} {--cup if CUP=YES}`. If nothing qualifies, stay silent.
+
+   --- SETUP 1: BREAKOUT (--setup BREAKOUT) ---
+   All 4 required:
+   1. SIGNAL = "BREAKOUT"
+   2. Price above ORH
+   3. RSI > 50
+   4. EMA Dev% > 0
+   Stop: 13 cents below ORH. Add --cup if CUP column = "YES". Confidence: HIGH
+
+   --- SETUP 2: CONTINUATION (--setup CONTINUATION) ---
+   All 3 required:
+   1. SIGNAL = "CONTINUATION"
+   2. Price above ORH
+   3. EMA Dev% between 0% and +1.0%
+   Stop: 13 cents below ORH. Add --cup if CUP column = "YES". Confidence: HIGH
+
+   --- SETUP 3: PULLBACK (--setup PULLBACK) ---
+   All 3 required:
+   1. SIGNAL = "PULLBACK"
+   2. EMA Dev% between -0.5% and +0.8%
+   3. RSI between 38 and 55
+   Stop: 13 cents below ORH (if price within 2% above ORH), else 5% below entry. Add --cup if CUP column = "YES". Confidence: MEDIUM
+
+   If nothing qualifies AND no POST_CUTOFF_SIGNAL output, stay silent.
+
+   POST_CUTOFF_SIGNAL handling: If the execute output contains "POST_CUTOFF_SIGNAL", do NOT stay silent. Parse the output and alert the user: "@user — [SYMBOL] met [SETUP_TYPE] conditions at $[PRICE] after the [CUTOFF] entry cutoff. RSI [RSI], EMA Dev% [EMA_DEV], ORH $[ORH], Stop $[STOP], Risk/share $[RISK_PER_SHARE], Size [SHARES] shares. Cup: [YES/NO]. Take the trade? Reply 'yes [SYMBOL]' to execute with --override-cutoff."
+
+   Run `python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py` via Bash and print any output. If there is no output, stay silent.
 
 **Step 3 — Confirm with one line only:**
-"Session ready. Scanner 7:30 AM, levels lock + monitor start {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), all CT."
+"Session ready. Scanner 7:30 AM, symbol swap 8:30 AM, levels lock + monitor start {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), all CT."
 
 Do not show the /loop commands to the user. Do not ask them to paste anything.
 
-The monitor automatically:
-- Checks all watchlist + scanner candidate symbols for ENTER/CONV/SETUP signals
-- Calls `tri_city_execute.py` for any qualifying ENTER or CONV signal
-- Runs `tri_city_position_manager.py` to manage open positions
-- Silences itself after 4:00 PM CT (market close)
+---
+
+## TradingView Scanner
+
+| Item | Value |
+|------|-------|
+| Layout | **TRI CITY INATOR III** (ID 168250176) |
+| Indicator | **Tri-City Inator** (Pine shorttitle: "Tri-City") |
+| Entity ID | `gIyd0u` |
+| Symbol inputs | `in_7` through `in_21` (15 slots) |
+| Table columns | SYMBOL · PRICE · RSI · EMA DEV% · ORH/ORL · CUP · SIGNAL |
+
+To read the live scanner table:
+```
+data_get_pine_tables with study_filter="Tri-City"
+```
 
 ---
 
@@ -75,7 +118,7 @@ The monitor automatically:
 
 | # | Guard | Default | Effect |
 |---|-------|---------|--------|
-| 1 | Already executed today | — | No duplicate signals per symbol |
+| 1 | Already executed today | — | No duplicate setups per symbol |
 | 2 | Already in position | — | No duplicate symbols |
 | 3 | Max positions | 3 | No more than 3 concurrent trades |
 | 4 | Daily loss limit | -$300 | Circuit breaker |
@@ -89,14 +132,13 @@ Override any default by editing the values in `.env`.
 
 ## Signal Types
 
-| Signal | Action | Execution |
-|--------|--------|-----------|
-| 🚀 ENTER | All conditions met | Auto-execute |
-| 💎 CONV | MA convergence breakout | Auto-execute |
-| ⚠️ SETUP | Almost ready | Print alert only |
-| 🔵 ACCUM | Base forming | Print alert only |
-| 🟢 RE-ENTRY | Pullback opportunity | Auto-execute (half size) |
-| ⛔ EXIT | Position manager fires | Close triggered |
+| Signal | Action | Notes |
+|--------|--------|-------|
+| BREAKOUT | Auto-execute | Price above ORH, high vol, RSI > 50, EMA Dev > 0 |
+| CONTINUATION | Auto-execute | Above ORH pullback, EMA dev 0–1%, RSI 50–65 |
+| PULLBACK | Auto-execute | Above EMA, dev -0.5–0.8%, RSI 38–55 |
+| --- | Silent | No signal — skip |
+| CUP = YES | +cup flag | Add --cup to execute call for high-conviction log |
 
 ---
 
@@ -106,7 +148,7 @@ Override any default by editing the values in `.env`.
 Entry → T1 (+10%): sell 50% → move stop to breakeven
        → T2 (+20%): sell 25% → move stop to T2 price
        → T3 (+30%): trail 25% → exits on EMA20 + VWAP breach or EOD
-       → Stop (-5%): all shares exit
+       → Stop (-5%):  all shares exit
 ```
 
 ---
@@ -128,8 +170,8 @@ tricity-scan
 
 # Dry-run a signal without executing
 python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py \
-  --symbol NVDA --price 142.50 --rsi 62 --rvol 2.1 \
-  --signal ENTER --setup ENTER --dry-run
+  --symbol TSEM --price 270.00 --orh 267.42 --orl 252.70 \
+  --rsi 55.0 --ema_dev 0.35 --signal "BREAKOUT" --setup BREAKOUT --cup --dry-run
 
 # Backtest a symbol
 python -W ignore ~/tri-city-inator/scripts/tri_city_backtest.py \
@@ -145,10 +187,11 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 
 | Script | Trigger | Action |
 |--------|---------|--------|
-| `tri_city_scanner.py` | 7:00 AM cron | Gap-up candidates ranked by score |
-| `tri_city_monitor.py` | 3-min cron | Alpaca snapshot scan → signals → execute |
-| `tri_city_execute.py` | Called by monitor | 7-guard gate → 3-bracket Alpaca orders |
-| `tri_city_position_manager.py` | Called by monitor | T1/T2/T3 management + EOD close |
+| `tri_city_scanner.py` | 7:30 AM cron | Gap-up candidates ranked by score, saved to tri-city-candidates.json |
+| Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on gIyd0u (in_7–in_21) |
+| Level lock (inline) | ORB_MINUTES cron | Reads Tri-City table → saves ORH/ORL to tri-city-levels.json |
+| `tri_city_execute.py` | Signal monitor | 7-guard gate → 50-25-25 bracket orders via Alpaca → logs to tri-city-executions.json |
+| `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 3:45 PM → EOD close all |
 | `tri_city_backtest.py` | Manual | Historical simulation with P&L report |
 | `journal_report.py` | Manual | Performance report from trade journal |
 
@@ -156,12 +199,12 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 
 ## TradingView Indicator
 
-The Tri-City Inator ENHANCED Pine Script should be visible on the active chart.
-It provides visual confirmation of signals and the Trend Strength score.
+The **Tri-City Inator** scanner must be visible on the **TRI CITY INATOR III** layout.
+It shows a live table with BREAKOUT / CONTINUATION / PULLBACK signals and cup detection for all 15 symbols.
 
-The Python monitor handles all auto-execution — TradingView is for visualization only.
+The Python monitor handles all auto-execution — TradingView is for visualization and signal generation only.
 
-If you want to check the live indicator dashboard, use:
+To switch to the Tri-City layout:
 ```
-Read the Tri-City Inator table using data_get_pine_tables with study_filter="Tri-City"
+layout_switch("TRI CITY INATOR III")
 ```

@@ -124,8 +124,11 @@ def fetch_gappers() -> list[dict]:
             else:
                 float_cat = "large"
 
+            tv_symbol = raw_ticker if ":" in raw_ticker else f"NASDAQ:{ticker}"
+
             stocks.append({
                 "symbol":       ticker,
+                "tv_symbol":    tv_symbol,
                 "price":        round(price, 2),
                 "gap_pct":      round(gap_pct, 2),
                 "rvol":         round(rel_vol, 2),
@@ -220,10 +223,14 @@ def main():
         print(f"  ⚠️  PARABOLIC (>10x RVol — avoid): {parabolic}")
     print(f"{'─'*82}")
 
-    # Print TV watchlist push list (top 20 non-parabolic, for Claude to add to TV)
-    clean = [s["symbol"] for s in ranked if not s["parabolic"]][:20]
-    print(f"\n  TV WATCHLIST (top 20, parabolic excluded):")
-    print(f"  {', '.join(clean)}")
+    # Top 15 non-parabolic exchange-prefixed symbols for TradingView indicator swap
+    tv_symbols = [
+        s.get("tv_symbol", f"NASDAQ:{s['symbol']}")
+        for s in ranked if not s["parabolic"]
+    ][:15]
+
+    print(f"\n  TV WATCHLIST (top 15, parabolic excluded, exchange-prefixed):")
+    print(f"  {', '.join(tv_symbols)}")
 
     if not args.dry_run:
         CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +238,7 @@ def main():
             "date":       now.strftime("%Y-%m-%d"),
             "scanned_at": now.strftime("%H:%M CT"),
             "total":      len(ranked),
+            "tv_symbols": tv_symbols,
             "candidates": ranked,
         }
         CANDIDATES.write_text(json.dumps(payload, indent=2))
