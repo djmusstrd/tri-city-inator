@@ -22,13 +22,18 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 > All times are Central (CT). Eastern Time users add 1 hour.
 
 ```
-7:30 AM CT   Premarket scanner  →  gap-up candidates ranked by score
-8:00 AM CT   Level lock         →  reads Tri-City indicator, locks today's entry levels
-8:30 AM CT   Signal monitor     →  every 3 min, checks all watchlist symbols
-8:30 AM CT+  Position manager   →  T1 breakeven, T2 lock, trailing stop
-2:45 PM CT   EOD close          →  all positions closed automatically
-             Journal            →  every exit auto-logged (P&L, R, outcome)
+7:30 AM CT         Premarket scanner  →  gap-up candidates ranked by score, pushed to TV watchlist
+8:30 AM CT         Market opens       →  opening range begins
+8:30 + ORB_MINUTES Level lock         →  ORH/ORL finalize once opening range closes
+                                          Default: 8:45 AM CT (15-min ORB)
+                                          Set ORB_MINUTES in .env to change (5, 15, or 30)
+8:30 + ORB_MINUTES Signal monitor     →  every 3 min, checks all candidates for signals
+8:30 AM CT+        Position manager   →  T1 breakeven, T2 lock, trailing stop
+2:45 PM CT         EOD close          →  all positions closed automatically
+                   Journal            →  every exit auto-logged (P&L, R, outcome)
 ```
+
+> **ORB timeframe note:** The Dr Heinz indicator on your TradingView chart and `ORB_MINUTES` in `.env` must match. If the indicator is set to 15-min ORB, use `ORB_MINUTES=15`. Mismatch means the ORH/ORL levels the monitor uses will differ from what the chart shows.
 
 ---
 
@@ -41,14 +46,15 @@ Register all three in order:
 1. Premarket scanner — weekdays at 7:30 AM CT:
    /loop 7:30am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table. Then read the "TV WATCHLIST" line at the bottom of the output and add each of those symbols to the TradingView watchlist using watchlist_add (one call per symbol). The active watchlist in TradingView's right sidebar is where they will appear — the user can click any symbol there to pull up the chart and see more detail.
 
-2. Level lock — weekdays at 8:00 AM CT:
-   /loop 8am weekdays Read the Tri-City Inator ENHANCED table using data_get_pine_tables with study_filter="Tri-City". Extract entry levels for all symbols and save to shared/tri-city-levels.json. Report symbols loaded.
+2. Level lock — weekdays at 8:45 AM CT (after 15-min opening range closes):
+   /loop 8:45am weekdays Read the Tri-City Inator ENHANCED table using data_get_pine_tables with study_filter="Tri-City". Extract entry levels for all symbols and save to shared/tri-city-levels.json. Report symbols loaded.
+   NOTE: This fires at 8:45 AM CT by default, which matches a 15-min opening range (market open 8:30 AM CT + 15 min). If the user has set ORB_MINUTES=5 in .env, this cron should be registered at 8:35 AM instead. If ORB_MINUTES=30, register at 9:00 AM.
 
 3. Signal monitor — weekdays at 8:30 AM CT:
    /loop 8:30am weekdays Execute `python -W ignore ~/tri-city-inator/scripts/tri_city_monitor.py` via Bash. If there is output, print it. If there is no output, stay silent.
 
 After registering, print one line only:
-"Session ready. Scanner fires 7:30 AM, levels lock 8:00 AM, monitor starts 8:30 AM (all CT)."
+"Session ready. Scanner 7:30 AM, levels lock 8:45 AM (15-min ORB), monitor 8:30 AM (all CT). Change ORB_MINUTES in .env to adjust level lock time."
 
 Do not show the /loop commands to the user. Do not ask them to paste anything.
 
