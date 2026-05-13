@@ -52,7 +52,7 @@ fi
 # ── 2. Dependencies ───────────────────────────────────────────────────────────
 echo "Installing Python dependencies..."
 pip3 install -q --upgrade pip
-pip3 install -q alpaca-py python-dotenv requests pandas yfinance
+pip3 install -q alpaca-py python-dotenv requests pandas yfinance tvscreener
 ok "Dependencies installed"
 
 # ── 3. Directories ────────────────────────────────────────────────────────────

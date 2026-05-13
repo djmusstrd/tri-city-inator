@@ -156,21 +156,24 @@ def fetch_snapshots(symbols: list[str]) -> dict:
 
 
 def fetch_intraday_bars(symbol: str, minutes_back: int = 120) -> list[float]:
-    client = get_data_client()
-    if not client:
-        return []
+    """Fetch 5-min intraday closes using yfinance (free, no SIP subscription needed)."""
     try:
-        from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import TimeFrame
+        import yfinance as yf
         now = datetime.now(CT)
-        bars = client.get_stock_bars(StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
-            start=now - timedelta(minutes=minutes_back),
-            end=now,
-        ))
-        df = bars.df
-        return list(df["close"]) if not df.empty else []
+        start = (now - timedelta(minutes=minutes_back)).strftime("%Y-%m-%d %H:%M:%S")
+        df = yf.download(
+            symbol,
+            start=start,
+            interval="5m",
+            progress=False,
+            auto_adjust=True,
+        )
+        if df.empty:
+            return []
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        return list(df["close"].dropna())
     except Exception as e:
         logger.warning(f"fetch_intraday_bars {symbol}: {e}")
         return []
@@ -365,14 +368,15 @@ def build_symbol_data(sym: str, snap, spy_chg: float | None) -> dict | None:
 # ── Watchlist loader ───────────────────────────────────────────────────────────
 
 def load_watchlist() -> list[str]:
+    """
+    Build scan list from today's scanner candidates (primary) +
+    a small permanent base list (SPY, QQQ for regime context).
+    The static default-watchlist.txt is NOT used — the scanner
+    generates a fresh list every morning from TradingView hotlists.
+    """
     symbols = set()
-    wl = WORKSPACE / "watchlists" / "default-watchlist.txt"
-    if wl.exists():
-        for line in wl.read_text().splitlines():
-            sym = line.strip().upper()
-            if sym and not sym.startswith("#"):
-                symbols.add(sym)
 
+    # Today's scanner candidates (primary source)
     candidates_file = WORKSPACE / "shared" / "tri-city-candidates.json"
     if candidates_file.exists():
         try:
@@ -383,6 +387,19 @@ def load_watchlist() -> list[str]:
                     symbols.add(c["symbol"])
         except Exception:
             pass
+
+    # Permanent base — SPY/QQQ for regime checks always included
+    for sym in ["SPY", "QQQ"]:
+        symbols.add(sym)
+
+    # Fallback: if scanner hasn't run yet today, use static list
+    if len(symbols) <= 2:
+        wl = WORKSPACE / "watchlists" / "default-watchlist.txt"
+        if wl.exists():
+            for line in wl.read_text().splitlines():
+                sym = line.strip().upper()
+                if sym and not sym.startswith("#"):
+                    symbols.add(sym)
 
     return sorted(symbols)
 
