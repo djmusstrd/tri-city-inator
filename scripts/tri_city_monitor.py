@@ -248,9 +248,9 @@ def get_spy_regime() -> tuple[str, float | None]:
         from alpaca.data.requests import StockSnapshotRequest
         snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols="SPY"))
         s = snap.get("SPY")
-        if not s or not s.daily_bar or not s.prev_daily_bar:
+        if not s or not s.daily_bar or not s.previous_daily_bar:
             return "UNKNOWN", None
-        prev = float(s.prev_daily_bar.close)
+        prev = float(s.previous_daily_bar.close)
         curr = float(s.daily_bar.close)
         chg  = round((curr - prev) / prev * 100, 2)
         regime = "BEAR" if chg <= -1.5 else ("BULL" if chg >= 0.5 else "NEUTRAL")
@@ -274,9 +274,9 @@ def get_spy_change() -> float | None:
         from alpaca.data.requests import StockSnapshotRequest
         snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols="SPY"))
         s = snap.get("SPY")
-        if not s or not s.prev_daily_bar:
+        if not s or not s.previous_daily_bar:
             return None
-        prev = float(s.prev_daily_bar.close)
+        prev = float(s.previous_daily_bar.close)
         curr = float(s.latest_trade.price)
         return round((curr - prev) / prev * 100, 2)
     except Exception:
