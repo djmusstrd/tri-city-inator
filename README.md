@@ -18,9 +18,39 @@ Every 3 minutes during market hours, the system:
 
 ---
 
-## Prerequisites
+## Before You Start — New to This?
 
-Before installing, you need:
+This system uses **Claude Code** as its brain. Claude Code is Anthropic's AI assistant that runs in your computer's terminal (the black text window). It's free to get started and you don't need any coding experience to use it — you just talk to it in plain English.
+
+If you've never used a terminal before, follow these steps first:
+
+### Step 0: Install the prerequisites (do this before anything else)
+
+**A. Install Python**
+1. Go to [python.org/downloads](https://python.org/downloads)
+2. Download the latest version for your operating system (Mac or Windows)
+3. Run the installer — check the box that says "Add Python to PATH" if you see it
+4. To verify: open Terminal (Mac) or Command Prompt (Windows) and type `python3 --version`. You should see a version number.
+
+**B. Install Claude Code**
+1. Go to [claude.ai/code](https://claude.ai/code)
+2. Follow the installation instructions for your operating system
+3. When installation is complete, type `claude` in your terminal. It should open a chat prompt.
+4. You can close it for now with `Ctrl+C`
+
+**C. Install Git**
+- Mac: Git is usually pre-installed. Type `git --version` to check. If not found, it will prompt you to install it.
+- Windows: Download from [git-scm.com](https://git-scm.com/downloads) and run the installer.
+
+**D. Open TradingView Desktop**
+- Download from [tradingview.com](https://tradingview.com) if you haven't already
+- A Pro plan or higher is required for real-time data
+
+Once all four are installed, come back here and continue with the installation below.
+
+---
+
+## Prerequisites
 
 | Requirement | Cost | Link |
 |-------------|------|------|
@@ -40,7 +70,7 @@ Before installing, you need:
 
 ```bash
 cd ~
-git clone https://github.com/yourusername/tri-city-inator.git
+git clone https://github.com/djmusstrd/tri-city-inator.git
 cd tri-city-inator
 ```
 
