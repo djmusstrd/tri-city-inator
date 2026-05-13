@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-TRI-CITY BACKTEST — Historical performance simulation using Alpaca data.
+TRI-CITY BACKTEST — Historical performance simulation using yfinance data.
 
 Simulates Tri-City entry conditions on daily OHLCV data for a date range.
 Uses simplified daily-bar conditions (not intraday RSI/EMA) suitable for
 validating the strategy concept and adjusting parameters.
 
+Data source: yfinance (free, no API key required)
+
 Conditions simulated:
   - Gap >= MIN_GAP_PCT from previous close
   - Volume > MIN_VOL_MULTIPLIER * 20-day avg
   - Price above SMA50
-  - SPY not in BEAR regime (daily change > -1.5%)
   - Entry at open price (next day after signal)
 
 Exit simulation:
@@ -65,45 +66,36 @@ logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-# ── Data fetching ──────────────────────────────────────────────────────────────
-
-def get_data_client():
-    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
-        print("ERROR: Set ALPACA_API_KEY and ALPACA_SECRET_KEY in .env")
-        return None
-    try:
-        from alpaca.data.historical import StockHistoricalDataClient
-        return StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-    except ImportError:
-        print("ERROR: alpaca-py not installed. Run: pip install alpaca-py")
-        return None
-
+# ── Data fetching (yfinance — free, no API key needed) ────────────────────────
 
 def fetch_daily_bars_df(symbol: str, start: datetime, end: datetime):
-    """Return pandas DataFrame of daily bars for the symbol."""
-    client = get_data_client()
-    if not client:
-        return None
+    """Return pandas DataFrame of daily bars using yfinance (free, no API key)."""
     try:
-        from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import TimeFrame
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Day,
-            start=start - timedelta(days=80),   # Extra buffer for SMA50 warm-up
-            end=end,
+        import yfinance as yf
+        fetch_start = start - timedelta(days=80)  # Buffer for SMA50 warm-up
+        df = yf.download(
+            symbol,
+            start=fetch_start.strftime("%Y-%m-%d"),
+            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=True,
         )
-        bars = client.get_stock_bars(req)
-        df = bars.df
         if df.empty:
             return None
-        # Flatten multi-index if needed
-        if isinstance(df.index, type(None)):
+        # Flatten multi-level columns (newer yfinance returns Price/Ticker headers)
+        if isinstance(df.columns, type(None)):
             return None
-        if hasattr(df.index, 'levels'):
-            df = df.reset_index(level=0, drop=True)
+        if hasattr(df.columns, 'levels'):
+            df.columns = df.columns.get_level_values(0)
+        # Normalize to lowercase
+        df.columns = [c.lower() for c in df.columns]
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
         df = df.sort_index()
         return df
+    except ImportError:
+        print("ERROR: yfinance not installed. Run: pip install yfinance")
+        return None
     except Exception as e:
         print(f"ERROR fetching {symbol}: {e}")
         return None

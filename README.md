@@ -324,25 +324,28 @@ All settings are optional. Defaults work for most traders.
 ```
 tri-city-inator/
 ├── scripts/
-│   ├── tri_city_scanner.py         Morning gap scanner
-│   ├── tri_city_monitor.py         Intraday signal loop
-│   ├── tri_city_execute.py         Order execution + 7-guard gate
+│   ├── tri_city_scanner.py          Morning gap scanner
+│   ├── tri_city_monitor.py          Intraday signal loop (strategy-agnostic)
+│   ├── tri_city_execute.py          Order execution + 7-guard gate
 │   ├── tri_city_position_manager.py T1/T2/T3 management + EOD close
-│   ├── tri_city_backtest.py        Historical backtesting
-│   └── journal_report.py           P&L performance report
+│   ├── tri_city_backtest.py         Historical backtesting
+│   └── journal_report.py            P&L performance report
+├── strategies/
+│   ├── tri_city_strategy.py         Default — Tri-City Inator ENHANCED logic
+│   └── custom_template.py           Starting point for your own strategy
 ├── managers/
-│   ├── trade_executor.py           Alpaca order placement
-│   └── trade_journal.py            Trade logging + metrics
+│   ├── trade_executor.py            Alpaca order placement
+│   └── trade_journal.py             Trade logging + metrics
 ├── watchlists/
-│   └── default-watchlist.txt       Symbols to monitor
+│   └── default-watchlist.txt        Symbols to monitor
 ├── pine/
-│   └── README.md                   Pine Script setup guide
-├── shared/                         Runtime data (gitignored)
-├── logs/                           Trade logs (gitignored)
-├── .env.example                    Config template
-├── .mcp.json.example               TradingView MCP template
-├── install.sh                      One-shot installer
-└── CLAUDE.md                       Claude session instructions
+│   └── README.md                    Pine Script setup guide
+├── shared/                          Runtime data (gitignored)
+├── logs/                            Trade logs (gitignored)
+├── .env.example                     Config template
+├── .mcp.json.example                TradingView MCP template
+├── install.sh                       One-shot installer
+└── CLAUDE.md                        Claude session instructions
 ```
 
 ---
@@ -373,6 +376,64 @@ tri-city-inator/
 - Verify the symbol appears in `logs/tri-city-executions.json`
 - Check that the execution `success` field is `true`
 - Confirm the current price has actually reached T1
+
+---
+
+## Using Your Own Strategy
+
+The execution engine (position sizing, bracket orders, stop management, journaling) is completely independent of the signal logic. You can plug in any indicator or strategy without touching any of the execution code.
+
+### How it works
+
+The monitor fetches real-time data (price, RSI, EMA, RVol, VWAP, 52W high) and passes it to the active strategy. The strategy's only job is to look at that data and return a signal type — `ENTER`, `CONV`, `SETUP`, or `None`. Everything else is handled automatically.
+
+### Steps
+
+**1. Copy the template**
+
+```bash
+cp ~/tri-city-inator/strategies/custom_template.py \
+   ~/tri-city-inator/strategies/my_strategy.py
+```
+
+**2. Edit your signal conditions**
+
+Open `strategies/my_strategy.py` and replace the example logic in `classify_signal()` with your own entry conditions. The template is fully commented with all available data fields.
+
+**3. Activate it in `.env`**
+
+```env
+CUSTOM_STRATEGY=true
+STRATEGY_FILE=strategies/my_strategy.py
+```
+
+**4. Restart the monitor loop**
+
+That's it. The position manager, journaling, and scale-out targets all continue working exactly the same.
+
+### What data is available to your strategy
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `price` | float | Current price |
+| `vwap` | float | VWAP |
+| `ema20` | float | EMA(20) from 5-min bars |
+| `rsi` | float | RSI(14) from 5-min bars |
+| `rvol` | float | Relative volume vs 20-day avg |
+| `gap_pct` | float | Gap % from previous close |
+| `from_open` | float | % move from today's open |
+| `dist_52w` | float | % below 52-week high |
+| `above_vwap` | bool | Price above VWAP? |
+| `above_ema20` | bool | Price above EMA20? |
+| `momentum_ok` | bool | Gap or intraday move meets minimum |
+| `near_high` | bool | Within `MAX_52W_DIST` of 52-week high |
+| `rvol_ok` | bool | RVol meets minimum |
+| `rs_vs_spy` | bool | Outperforming SPY today? |
+| `is_conv` | bool | EMA20/SMA50 convergence? |
+
+### Default strategy
+
+If `CUSTOM_STRATEGY` is not set (or set to `false`), the system uses `strategies/tri_city_strategy.py` — the full Tri-City Inator ENHANCED signal logic. No configuration needed.
 
 ---
 
