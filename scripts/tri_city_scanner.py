@@ -109,6 +109,7 @@ def fetch_gappers() -> list[dict]:
             rsi          = safe("Relative Strength Index (14)", 50.0)
             rel_vol      = safe("Relative Volume", volume / avg_vol if avg_vol > 0 else 1.0)
             float_shares = safe("Float Shares Outstanding") * 1e6 if safe("Float Shares Outstanding") else 0.0
+            pm_volume    = safe("Pre-market Volume")
 
             if ma_rating >= 0.5:    tech_rating = "strong_buy"
             elif ma_rating >= 0.1:  tech_rating = "buy"
@@ -138,6 +139,7 @@ def fetch_gappers() -> list[dict]:
                 "tech_rating":  tech_rating,
                 "volume":       int(volume),
                 "avg_volume":   int(avg_vol),
+                "pm_volume":    int(pm_volume),
             })
 
         return stocks
@@ -192,25 +194,36 @@ def main():
 
     parabolic = [s["symbol"] for s in ranked if s["parabolic"]]
 
+    def fmt_vol(v: int) -> str:
+        if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
+        if v >= 1_000:     return f"{v/1_000:.0f}K"
+        return str(v) if v > 0 else "---"
+
     # Print ranked table
     print(f"\n{'RK':<4} {'SYMBOL':<7} {'PRICE':>7} {'GAP%':>7} {'RVOL':>6} "
-          f"{'RSI':>5} {'STAGE2':>7} {'FLOAT':>6} {'SCORE':>7} {'RATING'}")
-    print("-" * 72)
+          f"{'RSI':>5} {'PM VOL':>8} {'STAGE2':>7} {'FLOAT':>6} {'SCORE':>7} {'RATING'}")
+    print("-" * 82)
 
     for s in ranked:
         stage  = "YES" if s["stage2"] else "---"
         fcat   = s["float_cat"][0].upper()
         para   = "⚠" if s["parabolic"] else " "
+        pmv    = fmt_vol(s["pm_volume"])
         print(f"{s['rank']:<4} {s['symbol']:<7} ${s['price']:>6.2f} "
               f"{s['gap_pct']:>+6.1f}% {s['rvol']:>5.1f}x "
-              f"{s['rsi']:>5.1f} {stage:>7} "
+              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>7} "
               f"{fcat:>6} {para}{s['score']:>6.4f}  {s['tech_rating']}")
 
-    print(f"\n{'─'*72}")
+    print(f"\n{'─'*82}")
     print(f"  {len(ranked)} candidates ranked.")
     if parabolic:
         print(f"  ⚠️  PARABOLIC (>10x RVol — avoid): {parabolic}")
-    print(f"{'─'*72}")
+    print(f"{'─'*82}")
+
+    # Print TV watchlist push list (top 20 non-parabolic, for Claude to add to TV)
+    clean = [s["symbol"] for s in ranked if not s["parabolic"]][:20]
+    print(f"\n  TV WATCHLIST (top 20, parabolic excluded):")
+    print(f"  {', '.join(clean)}")
 
     if not args.dry_run:
         CANDIDATES.parent.mkdir(parents=True, exist_ok=True)

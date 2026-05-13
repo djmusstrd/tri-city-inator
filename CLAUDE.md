@@ -39,7 +39,7 @@ When a session starts, immediately and silently register these three crons witho
 Register all three in order:
 
 1. Premarket scanner — weekdays at 7:00 AM CT:
-   /loop 7am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table.
+   /loop 7am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table. Then read the "TV WATCHLIST" line at the bottom of the output and add each of those symbols to the TradingView watchlist using watchlist_add (one call per symbol). The active watchlist in TradingView's right sidebar is where they will appear — the user can click any symbol there to pull up the chart and see more detail.
 
 2. Level lock — weekdays at 8:00 AM CT:
    /loop 8am weekdays Read the Tri-City Inator ENHANCED table using data_get_pine_tables with study_filter="Tri-City". Extract entry levels for all symbols and save to shared/tri-city-levels.json. Report symbols loaded.
