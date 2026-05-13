@@ -81,7 +81,8 @@ if ! grep -q "$ALIAS_MARKER" "$SHELL_RC" 2>/dev/null; then
     cat >> "$SHELL_RC" << 'ALIASES'
 
 # Tri-City Inator aliases
-alias tricity="cd ~/tri-city-inator && python -W ignore scripts/journal_report.py --today"
+alias tricity="open -a TradingView && cd ~/tri-city-inator && claude"
+alias tricity-report="cd ~/tri-city-inator && python -W ignore scripts/journal_report.py --today"
 alias tricity-all="cd ~/tri-city-inator && python -W ignore scripts/journal_report.py"
 alias tricity-scan="cd ~/tri-city-inator && python -W ignore scripts/tri_city_scanner.py"
 alias tricity-status="cd ~/tri-city-inator && python -W ignore scripts/tri_city_position_manager.py --status"

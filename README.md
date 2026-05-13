@@ -13,7 +13,7 @@ Every 3 minutes during market hours, the system:
 2. Checks 8 entry conditions (RSI, EMA, VWAP, relative strength, market regime, and more)
 3. Automatically places bracket orders through Alpaca when conditions are met
 4. Manages open positions: moves stop to breakeven at T1, locks gains at T2, trails at T3
-5. Closes all positions at 3:45 PM CT
+5. Closes all positions at 2:45 PM CT
 6. Logs every trade with P&L and R-multiple
 
 ---
@@ -145,35 +145,47 @@ You should see a signal breakdown with entry, stop, and target prices printed. I
 
 ## Daily Workflow
 
-### Morning (7:00 AM CT)
+> All times are Central (CT). Eastern Time users add 1 hour.
 
-**Start Claude:**
+### Every morning — two steps, then walk away
+
+**Step 1 — Open your terminal and type:**
 ```bash
-tv                 # Open TradingView Desktop
-cd ~/tri-city-inator && claude
+tricity
 ```
+This opens TradingView Desktop and starts Claude in one command. That's all you type.
 
-**Inside Claude, start the premarket scanner cron:**
+**Step 2 — Inside Claude, paste this once and press Enter:**
 ```
 /loop 7am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table.
 ```
 
-The scanner will rank today's gap-up candidates. Add the top 3-5 to your TradingView watchlist.
+From here, everything runs automatically on this schedule:
 
 ---
 
-### Market Open (9:30 AM CT)
+### What happens automatically
 
-**Start the signal monitor:**
-```
-/loop 3m Execute `python -W ignore ~/tri-city-inator/scripts/tri_city_monitor.py` via Bash. If there is output, print it. If there is no output, stay silent.
-```
+| Time (CT) | What Claude does |
+|-----------|-----------------|
+| 7:00 AM | Scans for today's gap-up candidates and ranks them — review the list in your terminal |
+| 8:00 AM | Reads the Tri-City Inator indicator on your TradingView chart and locks in today's entry levels |
+| 8:30 AM | Market opens — signal monitor starts, watching every 3 minutes for qualifying setups |
+| During session | Executes trades automatically when all conditions are met |
+| During session | Manages open positions: moves stop to breakeven at T1, locks gains at T2, trails at T3 |
+| 2:45 PM | All positions closed automatically — session complete |
 
-From this point, the system runs automatically. You will see output only when:
+> **Important:** TradingView Desktop must be open with the Tri-City Inator ENHANCED indicator visible on your chart before 8:00 AM. The system reads levels directly from your chart at that time.
+
+---
+
+### What you will see
+
+The terminal stays silent unless something happens. You will only see output when:
 - A qualifying ENTER or CONV signal is detected
 - A position reaches T1, T2, or T3
 - The trailing stop triggers
-- EOD close fires at 3:45 PM CT
+- EOD close fires at 2:45 PM CT
 
 ---
 
