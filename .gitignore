@@ -1,0 +1,40 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude Code
+.claude/
+.mcp.json
+
+# Runtime data (generated each session — not source)
+shared/
+logs/*.json
+logs/*.log
+logs/*.gz
+
+# Spreadsheets / exports
+*.numbers
+*.csv
+*.xlsx
+
+# IDE
+.vscode/
+.idea/
+*.swp

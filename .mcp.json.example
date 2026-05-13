@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "tradingview": {
+      "command": "node",
+      "args": ["/path/to/your/tradingview-mcp/src/server.js"],
+      "env": { "RULES_PATH": "/path/to/your/tradingview-mcp/rules.json" }
+    }
+  }
+}

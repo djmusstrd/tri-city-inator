@@ -1,0 +1,31 @@
+# Tri-City Inator — Default Watchlist
+# Add one symbol per line. Lines starting with # are comments.
+# The premarket scanner adds candidates automatically each morning.
+#
+# Tip: Keep this list to 20-30 symbols. Focus on liquid stocks
+# with clear momentum characteristics.
+
+# ── Momentum / Growth ─────────────────────────────────────────────────────────
+NVDA
+TSLA
+META
+GOOGL
+AMZN
+AAPL
+MSFT
+AMD
+
+# ── Mid-Cap Momentum ─────────────────────────────────────────────────────────
+RKLB
+NBIS
+AEHR
+NEXT
+
+# ── Energy ────────────────────────────────────────────────────────────────────
+OXY
+XOM
+CVX
+
+# ── ETFs (market and sector proxies) ─────────────────────────────────────────
+SPY
+QQQ
