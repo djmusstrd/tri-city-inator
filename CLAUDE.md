@@ -3,14 +3,14 @@
 ## Before Starting
 
 1. **TradingView Desktop must be running** with the Tri-City Inator ENHANCED indicator
-   visible on the active chart
+   visible on the active chart before 8:00 AM CT
 2. `.env` must contain valid Alpaca API keys
 3. Start in paper trading mode until you have validated signals live
 
 ## Start a Session
 
 ```bash
-cd ~/tri-city-inator && claude
+tricity   # opens TradingView Desktop + Claude in one command
 ```
 
 The `.mcp.json` in this directory auto-connects the TradingView MCP server.
@@ -19,25 +19,34 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 
 ## Full Session Pipeline
 
+> All times are Central (CT). Eastern Time users add 1 hour.
+
 ```
 7:00 AM CT   Premarket scanner  →  gap-up candidates ranked by score
-9:30 AM+     Signal monitor     →  every 3 min, checks all watchlist symbols
-9:30 AM+     Position manager   →  T1 breakeven, T2 lock, trailing stop, 3:45 PM EOD close
+8:00 AM CT   Level lock         →  reads Tri-City indicator, locks today's entry levels
+8:30 AM CT   Signal monitor     →  every 3 min, checks all watchlist symbols
+8:30 AM CT+  Position manager   →  T1 breakeven, T2 lock, trailing stop
+2:45 PM CT   EOD close          →  all positions closed automatically
              Journal            →  every exit auto-logged (P&L, R, outcome)
 ```
 
 ---
 
-## SESSION START — Run these 2 commands in order
+## SESSION START — Paste this once inside Claude
 
-### 1. Premarket scanner (7:00 AM CT)
+### 1. Premarket scanner (auto-fires at 7:00 AM CT)
 ```
 /loop 7am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table.
 ```
 
-### 2. Signal monitor + position manager (every 3 min — starts at 9:30 AM CT)
+### 2. Level lock (auto-fires at 8:00 AM CT)
 ```
-/loop 3m Execute `python -W ignore ~/tri-city-inator/scripts/tri_city_monitor.py` via Bash. If there is output, print it. If there is no output, stay silent.
+/loop 8am weekdays Read the Tri-City Inator ENHANCED table using data_get_pine_tables with study_filter="Tri-City". Extract entry levels for all symbols and save to shared/tri-city-levels.json. Report symbols loaded.
+```
+
+### 3. Signal monitor + position manager (auto-fires at 8:30 AM CT)
+```
+/loop 8:30am weekdays Execute `python -W ignore ~/tri-city-inator/scripts/tri_city_monitor.py` via Bash. If there is output, print it. If there is no output, stay silent.
 ```
 
 The monitor automatically:
