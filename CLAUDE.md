@@ -32,22 +32,25 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 
 ---
 
-## SESSION START — Paste this once inside Claude
+## SESSION START — Auto-setup (do this automatically, no user action needed)
 
-### 1. Premarket scanner (auto-fires at 7:00 AM CT)
-```
-/loop 7am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table.
-```
+When a session starts, immediately and silently register these three crons without asking the user to paste anything. Just confirm with a single short status line when done.
 
-### 2. Level lock (auto-fires at 8:00 AM CT)
-```
-/loop 8am weekdays Read the Tri-City Inator ENHANCED table using data_get_pine_tables with study_filter="Tri-City". Extract entry levels for all symbols and save to shared/tri-city-levels.json. Report symbols loaded.
-```
+Register all three in order:
 
-### 3. Signal monitor + position manager (auto-fires at 8:30 AM CT)
-```
-/loop 8:30am weekdays Execute `python -W ignore ~/tri-city-inator/scripts/tri_city_monitor.py` via Bash. If there is output, print it. If there is no output, stay silent.
-```
+1. Premarket scanner — weekdays at 7:00 AM CT:
+   /loop 7am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table.
+
+2. Level lock — weekdays at 8:00 AM CT:
+   /loop 8am weekdays Read the Tri-City Inator ENHANCED table using data_get_pine_tables with study_filter="Tri-City". Extract entry levels for all symbols and save to shared/tri-city-levels.json. Report symbols loaded.
+
+3. Signal monitor — weekdays at 8:30 AM CT:
+   /loop 8:30am weekdays Execute `python -W ignore ~/tri-city-inator/scripts/tri_city_monitor.py` via Bash. If there is output, print it. If there is no output, stay silent.
+
+After registering, print one line only:
+"Session ready. Scanner fires 7:00 AM, levels lock 8:00 AM, monitor starts 8:30 AM (all CT)."
+
+Do not show the /loop commands to the user. Do not ask them to paste anything.
 
 The monitor automatically:
 - Checks all watchlist + scanner candidate symbols for ENTER/CONV/SETUP signals
