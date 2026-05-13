@@ -109,26 +109,23 @@ def fetch_snapshots(symbols: list[str]) -> dict:
         return {}
 
 
-def fetch_daily_bars(symbol: str, lookback_days: int = 60) -> list[float]:
-    """Return list of daily closes (oldest → newest) for SMA / 52W high calc."""
-    client = get_data_client()
-    if not client:
-        return []
+def fetch_daily_bars(symbol: str, lookback_days: int = 260) -> list[float]:
+    """Return list of daily closes (oldest → newest) using yfinance (free, no API key)."""
     try:
-        from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import TimeFrame
+        import yfinance as yf
         now = datetime.now(CT)
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Day,
-            start=now - timedelta(days=lookback_days + 10),
-            end=now,
-            limit=lookback_days,
+        df = yf.download(
+            symbol,
+            start=(now - timedelta(days=lookback_days + 10)).strftime("%Y-%m-%d"),
+            end=(now + timedelta(days=1)).strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=True,
         )
-        bars = client.get_stock_bars(req)
-        df = bars.df
         if df.empty:
             return []
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
         return list(df["close"])
     except Exception as e:
         logger.warning(f"fetch_daily_bars error for {symbol}: {e}")
@@ -136,25 +133,22 @@ def fetch_daily_bars(symbol: str, lookback_days: int = 60) -> list[float]:
 
 
 def fetch_avg_daily_volume(symbol: str, lookback: int = 20) -> float | None:
-    """Return 20-day average daily volume."""
-    client = get_data_client()
-    if not client:
-        return None
+    """Return 20-day average daily volume using yfinance (free, no API key)."""
     try:
-        from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import TimeFrame
+        import yfinance as yf
         now = datetime.now(CT)
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Day,
-            start=now - timedelta(days=lookback * 2),
-            end=now.replace(hour=0, minute=0, second=0),
-            limit=lookback,
+        df = yf.download(
+            symbol,
+            start=(now - timedelta(days=lookback * 3)).strftime("%Y-%m-%d"),
+            end=now.strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=True,
         )
-        bars = client.get_stock_bars(req)
-        df = bars.df
         if df.empty:
             return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
         vols = list(df["volume"])[-lookback:]
         return sum(vols) / len(vols) if vols else None
     except Exception as e:
