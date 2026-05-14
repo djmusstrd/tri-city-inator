@@ -64,23 +64,37 @@ def get_alpaca_client():
 
 
 def get_today_fills(date: str) -> list[dict]:
-    client = get_alpaca_client()
-    if not client:
+    """
+    Pull FILL activities from Alpaca for the given date via REST API.
+    Returns list of dicts with symbol, side, qty, price, time.
+    """
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return []
     try:
-        activities = client.get_activities(activity_types="FILL", date=date)
+        import requests as req
+        base = "https://paper-api.alpaca.markets" if ALPACA_PAPER else "https://api.alpaca.markets"
+        resp = req.get(
+            f"{base}/v2/account/activities/FILL",
+            headers={
+                "APCA-API-KEY-ID":     ALPACA_API_KEY,
+                "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+            },
+            params={"date": date, "page_size": 100},
+            timeout=10,
+        )
+        resp.raise_for_status()
         fills = []
-        for a in activities:
-            activity_date = str(a.transaction_time)[:10] if hasattr(a, "transaction_time") else ""
+        for a in resp.json():
+            activity_date = str(a.get("transaction_time", ""))[:10]
             if activity_date != date:
                 continue
             fills.append({
-                "symbol":   str(a.symbol),
-                "side":     str(a.side),
-                "qty":      float(a.qty),
-                "price":    float(a.price),
-                "time":     str(a.transaction_time),
-                "order_id": str(a.order_id) if hasattr(a, "order_id") else "",
+                "symbol":   a.get("symbol", ""),
+                "side":     a.get("side", ""),
+                "qty":      float(a.get("qty", 0)),
+                "price":    float(a.get("price", 0)),
+                "time":     a.get("transaction_time", ""),
+                "order_id": a.get("order_id", ""),
             })
         return fills
     except Exception as e:
@@ -100,8 +114,35 @@ def get_account_equity() -> float | None:
 
 # ── Sync logic ─────────────────────────────────────────────────────────────────
 
+def get_tricty_universe(date: str) -> set[str]:
+    """
+    Return the set of symbols Tri-City is allowed to trade.
+    Uses symbols already in the execution log for today, plus any morning watchlist.
+    """
+    known: set[str] = set()
+    exec_log = WORKSPACE / "logs" / "tri-city-executions.json"
+    try:
+        entries = json.loads(exec_log.read_text()) if exec_log.exists() else []
+        known.update(e["symbol"] for e in entries if e.get("date") == date)
+    except Exception:
+        pass
+    watchlist = WORKSPACE / "shared" / "morning-watchlist.json"
+    if watchlist.exists():
+        try:
+            data = json.loads(watchlist.read_text())
+            syms = data if isinstance(data, list) else data.get("symbols", [])
+            known.update(s.split(":")[-1] for s in syms)
+        except Exception:
+            pass
+    return known
+
+
 def sync_missing_entries(fills: list[dict], date: str, dry_run: bool) -> list[str]:
-    from managers.trade_journal import write_synthetic_entry
+    """
+    Flag any Tri-City-universe symbols with BUY fills today but no execution log entry.
+    Does NOT auto-write synthetic entries (shared account — fills are ambiguous between agents).
+    Use write_synthetic_entry() manually if needed.
+    """
     exec_log = WORKSPACE / "logs" / "tri-city-executions.json"
     try:
         existing = json.loads(exec_log.read_text()) if exec_log.exists() else []
@@ -113,59 +154,53 @@ def sync_missing_entries(fills: list[dict], date: str, dry_run: bool) -> list[st
         if e.get("date") == date and e.get("success")
     }
 
-    buy_fills = [f for f in fills if f["side"].lower() in ("buy", "buy_to_open")]
+    universe = get_tricty_universe(date)
+    if not universe:
+        return []
+
+    buy_symbols = {
+        f["symbol"] for f in fills
+        if f["side"].lower() in ("buy", "buy_to_open") and f["symbol"] in universe
+    }
+
     actions = []
-
-    for fill in buy_fills:
-        sym = fill["symbol"]
-        if sym in logged_symbols:
-            continue
-
-        entry_price = fill["price"]
-        stop_loss   = round(entry_price - 0.13, 2)
-        risk_ps     = round(entry_price - stop_loss, 2)
-        qty         = int(fill["qty"])
-        target_1    = round(entry_price * 1.10, 2)
-        target_2    = round(entry_price * 1.20, 2)
-        target_3    = round(entry_price * 1.30, 2)
-
-        msg = (
-            f"SYNTHETIC ENTRY: {sym} @ ${entry_price:.2f} "
-            f"({qty} shares) — reconstructed from Alpaca fill"
+    for sym in sorted(buy_symbols - logged_symbols):
+        actions.append(
+            f"WARNING: {sym} has Alpaca buy fills today but no tri-city-executions.json entry — "
+            f"possible logging gap; use write_synthetic_entry() to reconstruct manually"
         )
-        actions.append(msg)
-
-        if not dry_run:
-            write_synthetic_entry(
-                symbol=sym,
-                setup="UNKNOWN",
-                date=date,
-                entry_price=entry_price,
-                stop_loss=stop_loss,
-                target_1=target_1,
-                target_2=target_2,
-                target_3=target_3,
-                position_size=qty,
-                order_id=fill.get("order_id", ""),
-            )
 
     return actions
 
 
-def sync_missing_exits(date: str, dry_run: bool) -> list[str]:
-    from managers.trade_journal import get_open_entries, log_exit, fetch_exit_price
+def sync_missing_exits(fills: list[dict], date: str, dry_run: bool) -> list[str]:
+    """
+    For any successful execution log entry with no journal record, attempt to log the exit
+    using today's sell fills. Skips symbols with no sell fill today (still open).
+    """
+    from managers.trade_journal import get_open_entries, log_exit
     open_entries = get_open_entries(date)
-    actions = []
+    if not open_entries:
+        return []
 
+    # Build avg sell price from today's fills per symbol
+    sell_prices: dict[str, list[float]] = {}
+    for f in fills:
+        if f["side"].lower() in ("sell", "sell_to_close") and f["price"] > 0:
+            sell_prices.setdefault(f["symbol"], []).append(f["price"])
+    avg_sells = {sym: round(sum(ps) / len(ps), 4) for sym, ps in sell_prices.items()}
+
+    actions = []
     for e in open_entries:
         sym   = e["symbol"]
         setup = e.get("setup", "UNKNOWN")
-        exit_price = fetch_exit_price(sym)
-        if exit_price is None:
-            actions.append(f"SKIP EXIT: {sym} — no sell fill found in Alpaca")
+
+        if sym not in avg_sells:
+            actions.append(f"SKIP EXIT: {sym} — no sell fill on {date} (may still be open)")
             continue
 
-        msg = f"LOGGING EXIT: {sym} {setup} @ ${exit_price:.2f} (reconstructed)"
+        exit_price = avg_sells[sym]
+        msg = f"LOGGING EXIT: {sym} {setup} @ ${exit_price:.2f} (reconstructed from today's fills)"
         actions.append(msg)
 
         if not dry_run:
@@ -287,7 +322,7 @@ def main():
 
     sync_actions = []
     sync_actions += sync_missing_entries(fills, date, args.dry_run)
-    sync_actions += sync_missing_exits(date, args.dry_run)
+    sync_actions += sync_missing_exits(fills, date, args.dry_run)
 
     for a in sync_actions:
         print(f"  {a}")
