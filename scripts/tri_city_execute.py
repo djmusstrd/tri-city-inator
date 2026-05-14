@@ -267,15 +267,20 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str) -> dict:
     """
     # Stop
     pct_above_orh = (price - orh) / orh * 100 if orh > 0 else 999
-    if setup in ("BREAKOUT", "CONTINUATION") or (setup == "PULLBACK" and pct_above_orh <= 2.0):
+    if setup in ("BREAKOUT", "CONTINUATION") or (setup == "PULLBACK" and 0 < pct_above_orh <= 2.0):
         stop = round(orh - STOP_OFFSET, 2)
     else:
         stop = round(price * (1 - STOP_PCT / 100), 2)
 
+    # Safety guard: stop must always be below entry
+    if stop >= price:
+        logger.warning(f"Stop ${stop} >= entry ${price} — falling back to {STOP_PCT}% below entry")
+        stop = round(price * (1 - STOP_PCT / 100), 2)
+
     risk_per_share = round(price - stop, 4)
     if risk_per_share < 0.05:
-        logger.warning(f"Risk per share too small ({risk_per_share:.2f}) — flooring at $0.10")
-        risk_per_share = 0.10
+        logger.warning(f"Risk per share too small ({risk_per_share:.2f}) — skipping trade")
+        raise ValueError(f"Risk per share {risk_per_share:.2f} too small to size position safely")
 
     equity           = get_account_equity()
     max_risk_dollars = (equity * RISK_PCT / 100) if (equity and equity > 0) else FIXED_RISK

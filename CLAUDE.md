@@ -54,7 +54,7 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
    /loop 7:30am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table and any parabolic warnings. Then read the "TV WATCHLIST" line at the bottom of the output and add each symbol to the TradingView watchlist using watchlist_add (one call per symbol).
 
 2. Symbol swap — weekdays at 8:30 AM CT:
-   /loop 8:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 15 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Build an inputs dict mapping in_7 through in_21 to those symbols (in_7=sym[0], in_8=sym[1], ..., in_21=sym[14]; omit keys for positions beyond the available count). Call indicator_set_inputs with entity_id="gIyd0u" and that inputs dict. Report: how many symbols were pushed and list them.
+   /loop 8:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 15 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Build an inputs dict mapping in_7 through in_21 to those symbols (in_7=sym[0], in_8=sym[1], ..., in_21=sym[14]; omit keys for positions beyond the available count). Call indicator_set_inputs with entity_id="r4D8kP" and that inputs dict. Report: how many symbols were pushed and list them.
 
 3. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
    /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Extract ORH and ORL for every symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json. Report symbols loaded.
@@ -103,7 +103,7 @@ Do not show the /loop commands to the user. Do not ask them to paste anything.
 |------|-------|
 | Layout | **TRI CITY INATOR III** (ID 168250176) |
 | Indicator | **Tri-City Inator** (Pine shorttitle: "Tri-City") |
-| Entity ID | `gIyd0u` |
+| Entity ID | `r4D8kP` |
 | Symbol inputs | `in_7` through `in_21` (15 slots) |
 | Table columns | SYMBOL · PRICE · RSI · EMA DEV% · ORH/ORL · CUP · SIGNAL |
 
@@ -188,7 +188,7 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 | Script | Trigger | Action |
 |--------|---------|--------|
 | `tri_city_scanner.py` | 7:30 AM cron | Gap-up candidates ranked by score, saved to tri-city-candidates.json |
-| Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on gIyd0u (in_7–in_21) |
+| Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on r4D8kP (in_7–in_21) |
 | Level lock (inline) | ORB_MINUTES cron | Reads Tri-City table → saves ORH/ORL to tri-city-levels.json |
 | `tri_city_execute.py` | Signal monitor | 7-guard gate → 50-25-25 bracket orders via Alpaca → logs to tri-city-executions.json |
 | `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 3:45 PM → EOD close all |
