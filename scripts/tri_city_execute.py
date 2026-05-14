@@ -173,19 +173,37 @@ def check_time_window(now: datetime) -> bool:
 # ── Guard 6: SPY market regime ─────────────────────────────────────────────────
 
 def get_spy_regime() -> tuple[str, float | None]:
-    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
-        return "UNKNOWN", None
+    """
+    Returns (regime, spy_pct_change).
+    Uses yfinance for prev close (free tier safe), Alpaca snapshot for today's price.
+    """
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
-        from alpaca.data.requests import StockSnapshotRequest
-        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-        snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols="SPY"))
-        s = snap.get("SPY")
-        if not s or not s.daily_bar or not s.prev_daily_bar:
+        import yfinance as yf
+        df = yf.download("SPY", period="5d", interval="1d", progress=False, auto_adjust=True)
+        if df.empty or len(df) < 2:
             return "UNKNOWN", None
-        prev   = float(s.prev_daily_bar.close)
-        curr   = float(s.daily_bar.close)
-        change = round((curr - prev) / prev * 100, 2)
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        prev_close = float(df["close"].iloc[-2])
+
+        # Try Alpaca snapshot for today's current price; fall back to yfinance close
+        curr = None
+        if ALPACA_API_KEY and ALPACA_SECRET_KEY:
+            try:
+                from alpaca.data.historical import StockHistoricalDataClient
+                from alpaca.data.requests import StockSnapshotRequest
+                client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+                snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols="SPY"))
+                s = snap.get("SPY")
+                if s and s.daily_bar:
+                    curr = float(s.daily_bar.close)
+            except Exception:
+                pass
+        if curr is None:
+            curr = float(df["close"].iloc[-1])
+
+        change = round((curr - prev_close) / prev_close * 100, 2)
         if change <= SPY_BEAR_THRESHOLD:
             return "BEAR", change
         elif change >= 0.5:
