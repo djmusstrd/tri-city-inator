@@ -235,6 +235,19 @@ def check_trailing(positions: list, today: str) -> list[str]:
                     f"TRAIL EXIT: {ticker} @ ${curr_price:.2f} "
                     f"(below EMA20 ${ema20:.2f} + VWAP ${vwap:.2f})"
                 )
+                try:
+                    from managers.trade_journal import log_exit, fetch_exit_price
+                    exit_price = fetch_exit_price(ticker) or curr_price
+                    log_exit(
+                        symbol=ticker,
+                        setup=entry.get("setup", "UNKNOWN"),
+                        date=today,
+                        exit_price=exit_price,
+                        exit_reason="Trailing stop (EMA+VWAP breach)",
+                        shares=entry.get("position_size", 0),
+                    )
+                except Exception as _je:
+                    logger.warning(f"journal.log_exit failed for {ticker}: {_je}")
             else:
                 actions.append(f"TRAIL EXIT FAILED: {ticker} — check Alpaca manually")
 
@@ -253,6 +266,9 @@ def check_eod(positions: list, now: datetime) -> list[str]:
 
     logger.info(f"EOD at {now.strftime('%H:%M CT')} — closing {len(positions)} position(s)")
 
+    today   = now.strftime("%Y-%m-%d")
+    entries = load_executions()
+
     for pos in positions:
         ticker = pos["ticker"]
         cancel_all_orders(ticker)
@@ -260,6 +276,26 @@ def check_eod(positions: list, now: datetime) -> list[str]:
         success = close_position(ticker, reason="EOD auto-close 3:45 PM CT")
         if success:
             actions.append(f"EOD CLOSED: {ticker} (was ${pos['current_price']:.2f})")
+            try:
+                from managers.trade_journal import log_exit, fetch_exit_price
+                exec_entry = next(
+                    (e for e in reversed(entries)
+                     if e.get("symbol") == ticker and e.get("date") == today
+                     and e.get("success")),
+                    None,
+                )
+                if exec_entry:
+                    exit_price = fetch_exit_price(ticker) or pos["current_price"]
+                    log_exit(
+                        symbol=ticker,
+                        setup=exec_entry.get("setup", "UNKNOWN"),
+                        date=today,
+                        exit_price=exit_price,
+                        exit_reason="EOD auto-close",
+                        shares=exec_entry.get("position_size", pos["shares"]),
+                    )
+            except Exception as _je:
+                logger.warning(f"journal.log_exit failed for {ticker}: {_je}")
         else:
             actions.append(f"EOD CLOSE FAILED: {ticker} — close manually in Alpaca!")
 

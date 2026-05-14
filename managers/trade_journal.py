@@ -152,6 +152,57 @@ def fetch_exit_price(symbol: str) -> float | None:
     return None
 
 
+def write_synthetic_entry(symbol: str, setup: str, date: str,
+                          entry_price: float, stop_loss: float,
+                          target_1: float, target_2: float,
+                          position_size: int, order_id: str = "",
+                          target_3: float | None = None,
+                          risk_dollars: float | None = None) -> dict:
+    """
+    Write a synthetic execution log entry for a trade that executed in Alpaca
+    but was never captured by tri_city_execute.py.
+    Safe to call multiple times — will not duplicate.
+    """
+    if risk_dollars is None:
+        risk_dollars = round((entry_price - stop_loss) * position_size, 2)
+
+    entries = _load(ENTRY_LOG, [])
+    for e in entries:
+        if (e.get("symbol") == symbol and e.get("date") == date
+                and e.get("setup") == setup and e.get("success")):
+            logger.info(f"Synthetic entry already exists for {symbol}/{setup}/{date}")
+            return e
+
+    entry = {
+        "date":           date,
+        "time":           "SYNTHETIC",
+        "symbol":         symbol,
+        "setup":          setup,
+        "cup":            False,
+        "entry_price":    entry_price,
+        "stop_loss":      stop_loss,
+        "target_1":       target_1,
+        "target_2":       target_2,
+        "target_3":       target_3,
+        "position_size":  position_size,
+        "risk_dollars":   risk_dollars,
+        "rsi":            None,
+        "ema_dev":        None,
+        "scanner_signal": None,
+        "rvol":           None,
+        "spy_regime":     None,
+        "spy_change":     None,
+        "success":        True,
+        "order_id":       order_id,
+        "error":          None,
+        "synthetic":      True,
+    }
+    entries.append(entry)
+    _save(ENTRY_LOG, entries)
+    logger.info(f"Synthetic entry written: {symbol} {setup} {date} @ ${entry_price}")
+    return entry
+
+
 def get_all_trades() -> list:
     return _load(JOURNAL, [])
 

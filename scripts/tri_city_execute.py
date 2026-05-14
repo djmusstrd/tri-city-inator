@@ -309,30 +309,36 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
                   rvol: float | None = None,
                   spy_regime: str | None = None,
                   spy_change: float | None = None,
-                  cup: bool = False):
+                  cup: bool = False,
+                  rsi: float | None = None,
+                  ema_dev: float | None = None,
+                  scanner_signal: str | None = None):
     now = datetime.now(CT)
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
     entry = {
-        "date":          now.strftime("%Y-%m-%d"),
-        "time":          now.strftime("%H:%M:%S CT"),
-        "symbol":        symbol,
-        "setup":         setup,
-        "cup":           cup,
-        "entry_price":   signal["entry_price"],
-        "stop_loss":     signal["stop_loss"],
-        "target_1":      signal["target_1"],
-        "target_2":      signal["target_2"],
-        "target_3":      signal["target_3"],
-        "position_size": signal["position_size"],
-        "risk_dollars":  risk_dollars,
-        "rvol":          rvol,
-        "spy_regime":    spy_regime,
-        "spy_change":    spy_change,
-        "success":       result.success,
-        "order_id":      result.order_id,
-        "error":         result.error,
+        "date":           now.strftime("%Y-%m-%d"),
+        "time":           now.strftime("%H:%M:%S CT"),
+        "symbol":         symbol,
+        "setup":          setup,
+        "cup":            cup,
+        "entry_price":    signal["entry_price"],
+        "stop_loss":      signal["stop_loss"],
+        "target_1":       signal["target_1"],
+        "target_2":       signal["target_2"],
+        "target_3":       signal["target_3"],
+        "position_size":  signal["position_size"],
+        "risk_dollars":   risk_dollars,
+        "rsi":            rsi,
+        "ema_dev":        ema_dev,
+        "scanner_signal": scanner_signal,
+        "rvol":           rvol,
+        "spy_regime":     spy_regime,
+        "spy_change":     spy_change,
+        "success":        result.success,
+        "order_id":       result.order_id,
+        "error":          result.error,
     }
     log = load_log()
     log.append(entry)
@@ -457,7 +463,8 @@ def main():
     if result.success:
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
-                      cup=args.cup)
+                      cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
+                      scanner_signal=args.signal)
         print(f"\n✅ ORDERS PLACED")
         print(f"   Order ID: {result.order_id}")
         print(f"   Shares:   {result.shares_filled}")
@@ -467,7 +474,8 @@ def main():
         print(f"\n❌ EXECUTION FAILED: {result.error}")
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
-                      cup=args.cup)
+                      cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
+                      scanner_signal=args.signal)
         sys.exit(1)
 
 
