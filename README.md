@@ -6,6 +6,30 @@ An automated trading system built around the **Tri-City Inator ENHANCED** Tradin
 
 ---
 
+## Keeping Your Copy Up to Date
+
+When you clone this repo you get a snapshot. To pull in updates that have been pushed since:
+
+```bash
+cd ~/tri-city-inator
+git pull
+```
+
+Run this any time you want the latest scripts, scanner logic, or Pine Script code.
+
+**To update the TradingView indicator after a `git pull`:**
+1. Open TradingView Desktop
+2. Open Pine Editor → load `🚀 Tri-City Inator Universal` from My Scripts
+3. Replace the contents with `pine/tri_city_inator.pine` from this repo
+4. Save → click **Update on chart**
+
+**What `git pull` does NOT do:**
+- It does not update your TradingView cloud scripts automatically — you must paste manually
+- It does not touch your `.env` file (your Alpaca keys stay untouched)
+- It does not affect open positions or running crons
+
+---
+
 ## What This Does
 
 Every 3 minutes during market hours, the system:
