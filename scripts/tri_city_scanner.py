@@ -124,7 +124,19 @@ def fetch_gappers() -> list[dict]:
             else:
                 float_cat = "large"
 
-            tv_symbol = raw_ticker if ":" in raw_ticker else f"NASDAQ:{ticker}"
+            if ":" in raw_ticker:
+                tv_symbol = raw_ticker
+            else:
+                # yfinance exchange → TradingView prefix (PCX = NYSE Arca = AMEX in TV)
+                _YF_TO_TV = {"NYSE": "NYSE", "NMS": "NASDAQ", "NCM": "NASDAQ",
+                             "NGM": "NASDAQ", "PCX": "AMEX", "AMEX": "AMEX"}
+                try:
+                    import yfinance as yf
+                    _exch = yf.Ticker(ticker).fast_info.exchange or "NMS"
+                    tv_prefix = _YF_TO_TV.get(_exch, "NASDAQ")
+                except Exception:
+                    tv_prefix = "NASDAQ"
+                tv_symbol = f"{tv_prefix}:{ticker}"
 
             stocks.append({
                 "symbol":       ticker,
