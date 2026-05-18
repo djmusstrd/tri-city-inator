@@ -1,38 +1,27 @@
 // This file is the canonical source for the Tri-City Inator Pine Script.
 // Paste into TradingView Pine Editor → Save → Add to TRI CITY INATOR III layout.
 // ─────────────────────────────────────────────────────────────────────────────
+// v5 — inlined headers (no local fn inside if block), single-line request.security
+// Input layout: in_0–in_1 Display, in_2–in_6 Scanner, in_7–in_21 Symbols (15 slots)
+// ─────────────────────────────────────────────────────────────────────────────
 
-//@version=6
-indicator(
-  title     = "Tri-City Inator — Breakout + Continuation Scanner",
-  shorttitle= "Tri-City",
-  overlay   = false,          // own pane below chart (drag divider to resize)
-  max_boxes_count  = 500,
-  max_lines_count  = 500,
-  max_labels_count = 500
-)
+//@version=5
+indicator("Tri-City Inator - Breakout + Continuation Scanner", shorttitle="Tri-City", overlay=false, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
-// ── Display inputs ────────────────────────────────────────────────────────────
-i_size   = input.string("AUTO", "Table text size",
-             options = ["AUTO", "SMALL", "NORMAL", "LARGE"],
-             tooltip = "AUTO: adapts to chart zoom (recommended)\nSMALL: compact, more screen space\nNORMAL: readable\nLARGE: presentations / poor eyesight",
-             group   = "Display")
-i_pos    = input.string("Bottom Right", "Table position",
-             options = ["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"],
-             group   = "Display")
+// ── Display inputs (in_0, in_1) ────────────────────────────────────────────────
+i_size    = input.string("AUTO", "Table text size", options=["AUTO","SMALL","NORMAL","LARGE"], group="Display")
+i_pos     = input.string("Bottom Right", "Table position", options=["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"], group="Display")
 
-// ── Scanner inputs ────────────────────────────────────────────────────────────
-i_orb_min = input.int(15,   "ORB Minutes (5 / 15 / 30)", minval=1,   group="Scanner")
-i_rsi_len = input.int(14,   "RSI Length",                minval=1,   group="Scanner")
-i_ema_s   = input.int(9,    "EMA Short",                 minval=1,   group="Scanner")
-i_ema_m   = input.int(21,   "EMA Mid",                   minval=1,   group="Scanner")
-i_ema_l   = input.int(50,   "EMA Long",                  minval=1,   group="Scanner")
-i_hi_vol  = input.float(1.5,"High-Vol RVol threshold",   minval=0.1, group="Scanner")
+// ── Scanner inputs (in_2 … in_6) ──────────────────────────────────────────────
+i_orb_min = input.int(15,    "ORB Minutes (5 / 15 / 30)", minval=1,   group="Scanner")
+i_rsi_len = input.int(14,    "RSI Length",                minval=1,   group="Scanner")
+i_ema_m   = input.int(21,    "EMA Mid",                   minval=1,   group="Scanner")
+i_hi_vol  = input.float(1.5, "High-Vol RVol threshold",   minval=0.1, group="Scanner")
 i_tf      = input.timeframe("15", "Scanner timeframe",               group="Scanner")
 
 // ── Symbol inputs (in_7 … in_21) ──────────────────────────────────────────────
 sym1  = input.symbol("NASDAQ:RKLB", "Symbol 1",  group="Symbols")
-sym2  = input.symbol("NASDAQ:AGQ",  "Symbol 2",  group="Symbols")
+sym2  = input.symbol("AMEX:AGQ",    "Symbol 2",  group="Symbols")
 sym3  = input.symbol("NASDAQ:AEHR", "Symbol 3",  group="Symbols")
 sym4  = input.symbol("NASDAQ:NBIS", "Symbol 4",  group="Symbols")
 sym5  = input.symbol("NASDAQ:TSEM", "Symbol 5",  group="Symbols")
@@ -58,52 +47,30 @@ f_tpos() =>
      i_pos == "Top Right"    ? position.top_right   :
      i_pos == "Bottom Left"  ? position.bottom_left :
      i_pos == "Middle Left"  ? position.middle_left :
-     i_pos == "Middle Right" ? position.middle_right:
+     i_pos == "Middle Right" ? position.middle_right :
      position.bottom_right
 
-// Market open reference
 _session_open = timestamp("America/Chicago", year, month, dayofmonth, 8, 30, 0)
 _orb_close    = _session_open + i_orb_min * 60 * 1000
 
-// ── get_signal(sym) ───────────────────────────────────────────────────────────
+// ── get_signal ────────────────────────────────────────────────────────────────
 get_signal(sym) =>
-    [p, rsi_raw, ema_s_raw, ema_m_raw, vol_raw, avg_vol_raw, high_raw, low_raw, orb_high_raw, orb_low_raw] =
-        request.security(sym, i_tf,
-          [close,
-           ta.rsi(close, i_rsi_len),
-           ta.ema(close, i_ema_s),
-           ta.ema(close, i_ema_m),
-           volume,
-           ta.sma(volume, 10),
-           high,
-           low,
-           ta.highest(high, i_orb_min),
-           ta.lowest(low,  i_orb_min)],
-          lookahead = barmerge.lookahead_off)
-
-    rsi      = math.round(rsi_raw, 1)
-    ema_dev  = math.round((p - ema_m_raw) / ema_m_raw * 100, 2)
-    rel_vol  = avg_vol_raw > 0 ? vol_raw / avg_vol_raw : 1.0
-    hi_vol   = rel_vol >= i_hi_vol
-
-    // ORH / ORL locked after ORB period
-    _locked  = time >= _orb_close
-    orh      = _locked ? orb_high_raw : float(na)
-    orl      = _locked ? orb_low_raw  : float(na)
-
-    // Cup: 20-bar range < 6%, price ≥ 99% of 20-bar high
-    _h20     = ta.highest(high_raw, 20)
-    _l20     = ta.lowest(low_raw,   20)
-    cup      = _h20 > 0 and (_h20 - _l20) / _h20 < 0.06 and p >= _h20 * 0.99
-
-    // Signal
+    [p, rsi_raw, ema_m_raw, vol_raw, avg_vol_raw, high_raw, low_raw, orb_hi_raw, orb_lo_raw] = request.security(sym, i_tf, [close, ta.rsi(close, i_rsi_len), ta.ema(close, i_ema_m), volume, ta.sma(volume, 10), high, low, ta.highest(high, i_orb_min), ta.lowest(low, i_orb_min)], lookahead=barmerge.lookahead_off)
+    rsi     = math.round(rsi_raw, 1)
+    ema_dev = math.round((p - ema_m_raw) / ema_m_raw * 100, 2)
+    rel_vol = avg_vol_raw > 0 ? vol_raw / avg_vol_raw : 1.0
+    hi_vol  = rel_vol >= i_hi_vol
+    _locked = time >= _orb_close
+    orh     = _locked ? orb_hi_raw : float(na)
+    orl     = _locked ? orb_lo_raw : float(na)
+    _h20    = ta.highest(high_raw, 20)
+    _l20    = ta.lowest(low_raw,   20)
+    cup     = _h20 > 0 and (_h20 - _l20) / _h20 < 0.06 and p >= _h20 * 0.99
     _above_orh = not na(orh) and p > orh
     sig =
-         _above_orh and hi_vol and ema_dev > 0 and rsi > 50 ? 1 :    // BREAKOUT
-         _above_orh and ema_dev >= 0 and ema_dev <= 1.0     ? 2 :    // CONTINUATION
-         p > ema_m_raw and ema_dev >= -0.5 and ema_dev <= 0.8 and
-           rsi >= 38 and rsi <= 55 and rsi > rsi[1]         ? 3 : 0  // PULLBACK / --- (Fix D: RSI rising)
-
+         _above_orh and hi_vol and ema_dev > 0 and rsi > 50 ? 1 :
+         _above_orh and ema_dev >= 0 and ema_dev <= 1.0     ? 2 :
+         p > ema_m_raw and ema_dev >= -0.5 and ema_dev <= 0.8 and rsi >= 38 and rsi <= 55 and rsi > rsi[1] ? 3 : 0
     [p, rsi, ema_dev, nz(orh), nz(orl), cup ? 1 : 0, sig, math.round(rel_vol, 2)]
 
 // ── Fetch all 15 symbols ──────────────────────────────────────────────────────
@@ -134,7 +101,7 @@ cups  = array.from(c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15)
 sigs  = array.from(s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15)
 rvols = array.from(rv1,rv2,rv3,rv4,rv5,rv6,rv7,rv8,rv9,rv10,rv11,rv12,rv13,rv14,rv15)
 
-// ── Table ─────────────────────────────────────────────────────────────────────
+// ── Colors ────────────────────────────────────────────────────────────────────
 C_HDR  = color.new(#1a3a1a, 0)
 C_BG   = color.new(#0d1117, 0)
 C_ROW  = color.new(#111820, 0)
@@ -145,55 +112,57 @@ C_CONT = color.new(#0091ea, 0)
 C_PULL = color.new(#ff6f00, 0)
 C_CUP  = color.new(#ffd600, 0)
 
+// ── Table (8 cols × 17 rows) ──────────────────────────────────────────────────
 var tbl = table.new(f_tpos(), 8, 17, bgcolor=C_BG, border_color=color.new(#333333,0), border_width=1)
 
 if barstate.islast
     sz = f_tsize()
-    // Header row
-    _hdr(col, txt) => table.cell(tbl, col, 0, txt, text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    _hdr(0, "SYMBOL") , _hdr(1, "PRICE") , _hdr(2, "RSI")
-    _hdr(3, "EMA DEV%"), _hdr(4, "RVOL"), _hdr(5, "ORH/ORL"), _hdr(6, "CUP"), _hdr(7, "SIGNAL")
-
+    table.cell(tbl, 0, 0, "SYMBOL",   text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 1, 0, "PRICE",    text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 2, 0, "RSI",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 3, 0, "EMA DEV%", text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 4, 0, "RVOL",     text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 5, 0, "ORH/ORL",  text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 6, 0, "CUP",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 7, 0, "SIGNAL",   text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
     for i = 0 to 14
-        row  = i + 1
-        sym  = array.get(syms,  i)
-        tick = str.contains(sym, ":") ? str.substring(sym, str.pos(sym, ":") + 1, str.length(sym)) : sym
-        p    = array.get(prices, i)
-        rsi  = array.get(rsis,   i)
-        dev  = array.get(devs,   i)
-        orh  = array.get(orhs,   i)
-        orl  = array.get(orls,   i)
-        cup  = array.get(cups,   i)
-        sig  = array.get(sigs,   i)
-        rv   = array.get(rvols,  i)
-        bg   = i % 2 == 0 ? C_ROW : C_BG
-
-        sig_txt  = sig == 1 ? "BREAKOUT" : sig == 2 ? "CONTINUATION" : sig == 3 ? "PULLBACK" : "---"
-        sig_col  = sig == 1 ? C_BRK : sig == 2 ? C_CONT : sig == 3 ? C_PULL : C_DIM
-        cup_txt  = cup == 1 ? "YES" : "---"
-        cup_col  = cup == 1 ? C_CUP : C_DIM
-        orh_str  = orh > 0 ? str.tostring(orh, "#.##") + " / " + str.tostring(orl, "#.##") : "---"
-        dev_str  = dev >= 0 ? "+" + str.tostring(dev, "#.##") : str.tostring(dev, "#.##")
-        rv_str   = str.tostring(rv, "#.#") + "x"
-        rv_col   = rv < 1.5 ? color.red : rv < 2.5 ? C_CUP : color.new(#00c853, 0)
-
-        table.cell(tbl, 0, row, tick,                   text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_left)
-        table.cell(tbl, 1, row, str.tostring(p,"#.##"), text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 2, row, str.tostring(rsi,"#.#"),text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 3, row, dev_str,                text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 4, row, rv_str,                 text_color=rv_col, bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 5, row, orh_str,                text_color=C_DIM,  bgcolor=bg, text_size=sz, text_halign=text.align_center)
-        table.cell(tbl, 6, row, cup_txt,                text_color=cup_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
-        table.cell(tbl, 7, row, sig_txt,                text_color=sig_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        row     = i + 1
+        sym     = array.get(syms,  i)
+        tick    = str.contains(sym, ":") ? str.substring(sym, str.pos(sym, ":") + 1, str.length(sym)) : sym
+        p       = array.get(prices, i)
+        rsi     = array.get(rsis,   i)
+        dev     = array.get(devs,   i)
+        orh     = array.get(orhs,   i)
+        orl     = array.get(orls,   i)
+        cup     = array.get(cups,   i)
+        sig     = array.get(sigs,   i)
+        rv      = array.get(rvols,  i)
+        bg      = i % 2 == 0 ? C_ROW : C_BG
+        sig_txt = sig == 1 ? "BREAKOUT" : sig == 2 ? "CONTINUATION" : sig == 3 ? "PULLBACK" : "---"
+        sig_col = sig == 1 ? C_BRK : sig == 2 ? C_CONT : sig == 3 ? C_PULL : C_DIM
+        cup_txt = cup == 1 ? "YES" : "---"
+        cup_col = cup == 1 ? C_CUP : C_DIM
+        orh_str = orh > 0 ? str.tostring(orh, "#.##") + " / " + str.tostring(orl, "#.##") : "---"
+        dev_str = dev >= 0 ? "+" + str.tostring(dev, "#.##") : str.tostring(dev, "#.##")
+        rv_str  = str.tostring(rv, "#.#") + "x"
+        rv_col  = rv < 1.5 ? color.red : rv < 2.5 ? C_CUP : C_BRK
+        table.cell(tbl, 0, row, tick,                    text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 1, row, str.tostring(p,"#.##"),  text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 2, row, str.tostring(rsi,"#.#"), text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 3, row, dev_str,                 text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 4, row, rv_str,                  text_color=rv_col, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 5, row, orh_str,                 text_color=C_DIM,  bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tbl, 6, row, cup_txt,                 text_color=cup_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tbl, 7, row, sig_txt,                 text_color=sig_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
-_any_breakout    = s1==1 or s2==1 or s3==1 or s4==1 or s5==1 or s6==1 or s7==1 or s8==1 or s9==1 or s10==1 or s11==1 or s12==1 or s13==1 or s14==1 or s15==1
-_any_continuation= s1==2 or s2==2 or s3==2 or s4==2 or s5==2 or s6==2 or s7==2 or s8==2 or s9==2 or s10==2 or s11==2 or s12==2 or s13==2 or s14==2 or s15==2
-_any_pullback    = s1==3 or s2==3 or s3==3 or s4==3 or s5==3 or s6==3 or s7==3 or s8==3 or s9==3 or s10==3 or s11==3 or s12==3 or s13==3 or s14==3 or s15==3
-_cup_breakout    = (s1==1 and c1==1) or (s2==1 and c2==1) or (s3==1 and c3==1) or (s4==1 and c4==1) or (s5==1 and c5==1) or (s6==1 and c6==1) or (s7==1 and c7==1) or (s8==1 and c8==1) or (s9==1 and c9==1) or (s10==1 and c10==1) or (s11==1 and c11==1) or (s12==1 and c12==1) or (s13==1 and c13==1) or (s14==1 and c14==1) or (s15==1 and c15==1)
+_any_breakout     = s1==1 or s2==1 or s3==1 or s4==1 or s5==1 or s6==1 or s7==1 or s8==1 or s9==1 or s10==1 or s11==1 or s12==1 or s13==1 or s14==1 or s15==1
+_any_continuation = s1==2 or s2==2 or s3==2 or s4==2 or s5==2 or s6==2 or s7==2 or s8==2 or s9==2 or s10==2 or s11==2 or s12==2 or s13==2 or s14==2 or s15==2
+_any_pullback     = s1==3 or s2==3 or s3==3 or s4==3 or s5==3 or s6==3 or s7==3 or s8==3 or s9==3 or s10==3 or s11==3 or s12==3 or s13==3 or s14==3 or s15==3
+_cup_breakout     = (s1==1 and c1==1) or (s2==1 and c2==1) or (s3==1 and c3==1) or (s4==1 and c4==1) or (s5==1 and c5==1) or (s6==1 and c6==1) or (s7==1 and c7==1) or (s8==1 and c8==1) or (s9==1 and c9==1) or (s10==1 and c10==1) or (s11==1 and c11==1) or (s12==1 and c12==1) or (s13==1 and c13==1) or (s14==1 and c14==1) or (s15==1 and c15==1)
 
-alertcondition(_any_breakout,     "Breakout Signal",          "Tri-City: BREAKOUT detected")
-alertcondition(_any_continuation, "Continuation Signal",      "Tri-City: CONTINUATION detected")
-alertcondition(_any_pullback,     "Pullback Signal",          "Tri-City: PULLBACK detected")
-alertcondition(_cup_breakout,     "Breakout + Cup COMBO",     "Tri-City: BREAKOUT + CUP 🏆")
+alertcondition(_any_breakout,     "Breakout Signal",      "Tri-City: BREAKOUT detected")
+alertcondition(_any_continuation, "Continuation Signal",  "Tri-City: CONTINUATION detected")
+alertcondition(_any_pullback,     "Pullback Signal",       "Tri-City: PULLBACK detected")
+alertcondition(_cup_breakout,     "Breakout + Cup COMBO", "Tri-City: BREAKOUT + CUP")
 alertcondition(_any_breakout or _any_continuation or _any_pullback, "Any Signal", "Tri-City: Signal detected")
