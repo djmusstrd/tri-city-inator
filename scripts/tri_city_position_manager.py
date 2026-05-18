@@ -39,13 +39,17 @@ except ImportError:
     pass
 
 from managers.trade_executor import (
-    get_open_positions, close_position, set_stop_loss, cancel_all_orders
+    get_open_positions, close_position, set_stop_loss, cancel_all_orders,
+    sell_shares_at_market, place_trailing_stop
 )
 
-CT          = ZoneInfo("America/Chicago")
-EOD_HOUR    = int(os.getenv("EOD_HOUR",   "15"))
-EOD_MINUTE  = int(os.getenv("EOD_MINUTE", "45"))
-EXEC_LOG    = WORKSPACE / "logs" / "tri-city-executions.json"
+CT                  = ZoneInfo("America/Chicago")
+EOD_HOUR            = int(os.getenv("EOD_HOUR",             "15"))
+EOD_MINUTE          = int(os.getenv("EOD_MINUTE",           "45"))
+FREE_RIDE_PCT       = float(os.getenv("FREE_RIDE_PCT",       "3.0"))
+T3_TRAIL_PCT        = float(os.getenv("T3_TRAIL_PCT",        "5.0"))
+PULLBACK_TIMEOUT    = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))   # Fix A
+EXEC_LOG            = WORKSPACE / "logs" / "tri-city-executions.json"
 
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
@@ -110,6 +114,175 @@ def get_intraday_ema_vwap(symbol: str) -> tuple[float | None, float | None]:
     except Exception as e:
         logger.warning(f"get_intraday_ema_vwap {symbol}: {e}")
         return None, None
+
+
+# ── Action -1: Failed pullback exit (Fix A + Fix B) ───────────────────────────
+
+def check_failed_pullback(positions: list, today: str, now: datetime) -> list[str]:
+    """
+    Exit PULLBACK trades that have failed — runs first, before free-ride or targets.
+
+    Fix B: price < entry AND price < ORH  → setup broke down immediately, cut it.
+    Fix A: position open > PULLBACK_TIMEOUT min and still below ORH → no follow-through, exit.
+
+    Both require setup == "PULLBACK" and no breakeven/T2 stop already set.
+    ORH is read from the execution log (stored since today's session).
+    """
+    actions = []
+    entries = load_executions()
+
+    for pos in positions:
+        ticker      = pos["ticker"]
+        curr_price  = pos["current_price"]
+        entry_price = pos["entry_price"]
+
+        entry = None
+        for e in reversed(entries):
+            if e.get("symbol") == ticker and e.get("date") == today and e.get("success"):
+                entry = e
+                break
+
+        if not entry:
+            continue
+        if entry.get("setup") != "PULLBACK":
+            continue
+        if entry.get("breakeven_set") or entry.get("t2_stop_set"):
+            continue
+
+        orh = entry.get("orh", 0)
+
+        # ── Fix B: immediate breakdown — price fell below entry AND ORH ───────
+        if orh > 0 and curr_price < entry_price and curr_price < orh:
+            logger.info(
+                f"PULLBACK FAIL B: {ticker} ${curr_price:.2f} < "
+                f"entry ${entry_price:.2f} AND < ORH ${orh:.2f}"
+            )
+            cancel_all_orders(ticker)
+            success = close_position(ticker, reason="Failed pullback — below entry & ORH")
+            if success:
+                actions.append(
+                    f"PULLBACK FAIL: {ticker} @ ${curr_price:.2f} "
+                    f"— broke below entry ${entry_price:.2f} and ORH ${orh:.2f}"
+                )
+            else:
+                actions.append(f"PULLBACK FAIL CLOSE FAILED: {ticker} — check Alpaca")
+            continue
+
+        # ── Fix A: time-based — still below ORH after PULLBACK_TIMEOUT min ───
+        entry_time_str = entry.get("time", "")
+        if entry_time_str and orh > 0 and curr_price < orh:
+            try:
+                time_part = entry_time_str.replace(" CT", "")
+                entry_dt  = datetime.strptime(f"{today} {time_part}", "%Y-%m-%d %H:%M:%S")
+                entry_dt  = entry_dt.replace(tzinfo=CT)
+                mins_open = (now - entry_dt).total_seconds() / 60
+                if mins_open >= PULLBACK_TIMEOUT:
+                    logger.info(
+                        f"PULLBACK TIMEOUT A: {ticker} open {mins_open:.0f}min, "
+                        f"still below ORH ${orh:.2f}"
+                    )
+                    cancel_all_orders(ticker)
+                    success = close_position(
+                        ticker,
+                        reason=f"Pullback timeout — {PULLBACK_TIMEOUT}min no ORH reclaim"
+                    )
+                    if success:
+                        actions.append(
+                            f"PULLBACK TIMEOUT: {ticker} @ ${curr_price:.2f} "
+                            f"— {mins_open:.0f}min open, never reclaimed ORH ${orh:.2f}"
+                        )
+                    else:
+                        actions.append(f"PULLBACK TIMEOUT CLOSE FAILED: {ticker} — check Alpaca")
+            except Exception as e:
+                logger.warning(f"check_failed_pullback time parse {ticker}: {e}")
+
+    return actions
+
+
+# ── Action 0: Free-ride check ──────────────────────────────────────────────────
+
+def check_free_ride(positions: list, today: str) -> list[str]:
+    """
+    FREE RIDE: When price >= entry * (1 + FREE_RIDE_PCT%), automatically:
+      1. Cancel all open orders for the symbol
+      2. Sell T1 lot (50%) at market
+      3. Move stop to breakeven for remaining shares
+      4. Place trailing stop (T3_TRAIL_PCT%) on T3 lot (25%)
+
+    Runs before check_targets() every cycle. Disabled when FREE_RIDE_PCT <= 0.
+    """
+    if FREE_RIDE_PCT <= 0:
+        return []
+
+    actions  = []
+    entries  = load_executions()
+    modified = False
+
+    for pos in positions:
+        ticker      = pos["ticker"]
+        curr_price  = pos["current_price"]
+        entry_price = pos["entry_price"]
+        shares      = pos["shares"]
+
+        entry = None
+        for e in reversed(entries):
+            if e.get("symbol") == ticker and e.get("date") == today and e.get("success"):
+                entry = e
+                break
+
+        if not entry:
+            continue
+
+        # Skip if already at breakeven or beyond
+        if entry.get("breakeven_set") or entry.get("t2_stop_set"):
+            continue
+
+        trigger = entry_price * (1 + FREE_RIDE_PCT / 100)
+        if curr_price < trigger:
+            continue
+
+        # Split shares: T1=50%, T2=25%, T3=25%
+        t1_shares  = max(1, shares // 2)
+        t3_shares  = max(1, (shares - t1_shares) // 2)
+        remaining  = shares - t1_shares
+
+        logger.info(
+            f"FREE RIDE: {ticker} ${curr_price:.2f} >= trigger ${trigger:.2f} "
+            f"(+{FREE_RIDE_PCT}%) — selling {t1_shares} T1 shares"
+        )
+
+        cancel_all_orders(ticker)
+        time.sleep(1.5)
+
+        sold      = sell_shares_at_market(ticker, t1_shares)
+        time.sleep(1.0)
+        be_set    = set_stop_loss(
+            order_id=entry.get("order_id", ""),
+            ticker=ticker,
+            stop_price=entry_price,
+            shares=remaining,
+            direction="BULLISH",
+        )
+        trail_set = place_trailing_stop(ticker, t3_shares, T3_TRAIL_PCT)
+
+        if sold and be_set:
+            entry["breakeven_set"]       = True
+            entry["breakeven_price"]     = entry_price
+            entry["free_ride_triggered"] = True
+            entry["free_ride_price"]     = curr_price
+            modified = True
+            trail_note = f", trailing stop {T3_TRAIL_PCT}% on {t3_shares} shares" if trail_set else ""
+            actions.append(
+                f"FREE RIDE: {ticker} @ ${curr_price:.2f} (+{FREE_RIDE_PCT}%) "
+                f"— sold {t1_shares} shares, stop → entry ${entry_price:.2f}{trail_note}"
+            )
+        else:
+            actions.append(f"FREE RIDE FAILED: {ticker} — sold={sold} be={be_set}, check Alpaca")
+
+    if modified:
+        save_executions(entries)
+
+    return actions
 
 
 # ── Action 1 & 2: Target checks ────────────────────────────────────────────────
@@ -375,8 +548,11 @@ def main():
     all_actions = []
 
     if not args.eod:
+        all_actions += check_failed_pullback(positions, today, now)
+        positions = get_open_positions()
+        all_actions += check_free_ride(positions, today)
+        positions = get_open_positions()
         all_actions += check_targets(positions, today)
-        # Refresh positions after any order changes
         positions = get_open_positions()
         all_actions += check_trailing(positions, today)
         positions = get_open_positions()

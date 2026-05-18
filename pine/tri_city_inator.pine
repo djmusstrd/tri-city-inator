@@ -102,7 +102,7 @@ get_signal(sym) =>
          _above_orh and hi_vol and ema_dev > 0 and rsi > 50 ? 1 :    // BREAKOUT
          _above_orh and ema_dev >= 0 and ema_dev <= 1.0     ? 2 :    // CONTINUATION
          p > ema_m_raw and ema_dev >= -0.5 and ema_dev <= 0.8 and
-           rsi >= 38 and rsi <= 55                          ? 3 : 0  // PULLBACK / ---
+           rsi >= 38 and rsi <= 55 and rsi > rsi[1]         ? 3 : 0  // PULLBACK / --- (Fix D: RSI rising)
 
     [p, rsi, ema_dev, nz(orh), nz(orl), cup ? 1 : 0, sig]
 

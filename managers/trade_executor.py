@@ -284,6 +284,57 @@ def get_open_positions() -> list:
         return []
 
 
+def sell_shares_at_market(ticker: str, shares: int) -> bool:
+    """Sell a specific number of shares at market price (DAY order)."""
+    logger.info(f"Market sell: {ticker} x{shares}")
+    client = _get_client()
+    if client is None:
+        logger.info(f"MOCK: sell {ticker} x{shares}")
+        return True
+    try:
+        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        req = MarketOrderRequest(
+            symbol=ticker,
+            qty=shares,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        client.submit_order(req)
+        logger.info(f"✅ Market sell submitted: {ticker} x{shares}")
+        return True
+    except Exception as e:
+        logger.error(f"sell_shares_at_market error: {e}")
+        return False
+
+
+def place_trailing_stop(ticker: str, shares: int, trail_pct: float,
+                        direction: str = "BULLISH") -> bool:
+    """Place a trailing stop sell order. trail_pct is the % drawdown from peak."""
+    logger.info(f"Trailing stop: {ticker} x{shares} @ {trail_pct}% trail")
+    client = _get_client()
+    if client is None:
+        logger.info(f"MOCK: trailing stop {ticker} x{shares} @ {trail_pct}%")
+        return True
+    try:
+        from alpaca.trading.requests import TrailingStopOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        side = OrderSide.SELL if direction.upper() == "BULLISH" else OrderSide.BUY
+        req = TrailingStopOrderRequest(
+            symbol=ticker,
+            qty=shares,
+            side=side,
+            trail_percent=round(trail_pct, 2),
+            time_in_force=TimeInForce.DAY,
+        )
+        client.submit_order(req)
+        logger.info(f"✅ Trailing stop placed: {ticker} x{shares} @ {trail_pct}% trail")
+        return True
+    except Exception as e:
+        logger.error(f"place_trailing_stop error: {e}")
+        return False
+
+
 def cancel_all_orders(ticker: str) -> bool:
     """Cancel all open orders for a symbol."""
     client = _get_client()

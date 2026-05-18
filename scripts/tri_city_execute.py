@@ -272,21 +272,34 @@ def get_account_equity() -> float | None:
 
 # ── Signal calculation ─────────────────────────────────────────────────────────
 
-def calculate_signal(symbol: str, price: float, orh: float, setup: str) -> dict:
+EMA_STOP_BUFFER    = float(os.getenv("EMA_STOP_BUFFER",      "0.10"))  # Fix C: cents below EMA20
+PULLBACK_TIMEOUT   = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))    # Fix A: minutes
+
+
+def calculate_signal(symbol: str, price: float, orh: float, setup: str,
+                     ema_dev: float = 0.0) -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
     Stop placement:
-        BREAKOUT / CONTINUATION — 13 cents below ORH (key breakout level)
-        PULLBACK                — 13 cents below ORH if price is within 2% above ORH;
-                                  otherwise percentage-based stop (STOP_PCT%)
+        BREAKOUT / CONTINUATION — 13 cents below ORH
+        PULLBACK (Fix C)        — EMA20 minus EMA_STOP_BUFFER cents
+                                  (EMA20 derived from price and ema_dev%)
+                                  Falls back to STOP_PCT% if ema_dev unavailable.
 
     Position sizing: risk RISK_PCT% of account equity. Falls back to FIXED_RISK.
     """
     # Stop
-    pct_above_orh = (price - orh) / orh * 100 if orh > 0 else 999
-    if setup in ("BREAKOUT", "CONTINUATION") or (setup == "PULLBACK" and 0 < pct_above_orh <= 2.0):
+    if setup in ("BREAKOUT", "CONTINUATION"):
         stop = round(orh - STOP_OFFSET, 2)
+    elif setup == "PULLBACK":
+        # Fix C: use EMA20 as stop anchor (tighter, meaningful support level)
+        # ema_dev = (price - ema20) / ema20 * 100  →  ema20 = price / (1 + ema_dev/100)
+        if -99 < ema_dev < 100:
+            ema20 = round(price / (1 + ema_dev / 100), 4)
+            stop  = round(ema20 - EMA_STOP_BUFFER, 2)
+        else:
+            stop  = round(price * (1 - STOP_PCT / 100), 2)
     else:
         stop = round(price * (1 - STOP_PCT / 100), 2)
 
@@ -330,7 +343,9 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
                   cup: bool = False,
                   rsi: float | None = None,
                   ema_dev: float | None = None,
-                  scanner_signal: str | None = None):
+                  scanner_signal: str | None = None,
+                  orh: float | None = None,
+                  orl: float | None = None):
     now = datetime.now(CT)
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
@@ -350,6 +365,8 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
         "risk_dollars":   risk_dollars,
         "rsi":            rsi,
         "ema_dev":        ema_dev,
+        "orh":            orh,
+        "orl":            orl,
         "scanner_signal": scanner_signal,
         "rvol":           rvol,
         "spy_regime":     spy_regime,
@@ -424,7 +441,7 @@ def main():
     # ── Guard 5: time window ───────────────────────────────────────────────────
     if not args.dry_run and not getattr(args, "override_cutoff", False) and check_time_window(now):
         # Emit POST_CUTOFF_SIGNAL so Claude cron can alert the user
-        signal_preview = calculate_signal(symbol, args.price, args.orh, args.setup)
+        signal_preview = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev)
         risk_per_share = round(args.price - signal_preview["stop_loss"], 2)
         print(
             f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup} | "
@@ -453,7 +470,7 @@ def main():
         sys.exit(0)
 
     # ── Build signal ───────────────────────────────────────────────────────────
-    signal       = calculate_signal(symbol, args.price, args.orh, args.setup)
+    signal       = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev)
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
@@ -482,7 +499,7 @@ def main():
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
                       cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
-                      scanner_signal=args.signal)
+                      scanner_signal=args.signal, orh=args.orh, orl=args.orl)
         print(f"\n✅ ORDERS PLACED")
         print(f"   Order ID: {result.order_id}")
         print(f"   Shares:   {result.shares_filled}")
@@ -493,7 +510,7 @@ def main():
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
                       cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
-                      scanner_signal=args.signal)
+                      scanner_signal=args.signal, orh=args.orh, orl=args.orl)
         sys.exit(1)
 
 
