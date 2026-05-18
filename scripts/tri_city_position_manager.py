@@ -49,6 +49,8 @@ EOD_MINUTE          = int(os.getenv("EOD_MINUTE",           "45"))
 FREE_RIDE_PCT       = float(os.getenv("FREE_RIDE_PCT",       "3.0"))
 T3_TRAIL_PCT        = float(os.getenv("T3_TRAIL_PCT",        "5.0"))
 PULLBACK_TIMEOUT    = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))   # Fix A
+RVOL_EXIT_FLOOR     = float(os.getenv("RVOL_EXIT_FLOOR",     "1.0"))  # #5: collapse exit
+RVOL_LOOKBACK       = int(os.getenv("RVOL_LOOKBACK",         "20"))
 EXEC_LOG            = WORKSPACE / "logs" / "tri-city-executions.json"
 
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
@@ -114,6 +116,48 @@ def get_intraday_ema_vwap(symbol: str) -> tuple[float | None, float | None]:
     except Exception as e:
         logger.warning(f"get_intraday_ema_vwap {symbol}: {e}")
         return None, None
+
+
+# ── RVOL helper (#5) ──────────────────────────────────────────────────────────
+
+def get_rvol(symbol: str) -> float | None:
+    """
+    RVol = today's cumulative volume / (20-day avg daily vol × fraction of day elapsed).
+    Same logic as tri_city_execute.py — duplicated here to keep imports simple.
+    """
+    try:
+        import yfinance as yf
+        now = datetime.now(CT)
+        df = yf.download(symbol, period=f"{RVOL_LOOKBACK * 2}d", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+
+        today_str = now.strftime("%Y-%m-%d")
+        today_row = df[df.index.strftime("%Y-%m-%d") == today_str]["volume"]
+        today_vol = float(today_row.iloc[-1]) if not today_row.empty else None
+
+        hist = df[df.index.strftime("%Y-%m-%d") != today_str]["volume"].dropna()
+        if today_vol is None or hist.empty:
+            return None
+
+        hist_vols   = list(hist)[-RVOL_LOOKBACK:]
+        avg_daily   = sum(hist_vols) / len(hist_vols)
+        open_ct     = now.replace(hour=8, minute=30, second=0, microsecond=0)
+        close_ct    = now.replace(hour=15, minute=0,  second=0, microsecond=0)
+        total_sec   = (close_ct - open_ct).total_seconds()
+        elapsed_sec = max(60, (now - open_ct).total_seconds())
+        fraction    = min(1.0, elapsed_sec / total_sec)
+        expected    = avg_daily * fraction
+        if expected <= 0:
+            return None
+        return round(today_vol / expected, 2)
+    except Exception as e:
+        logger.warning(f"get_rvol {symbol}: {e}")
+        return None
 
 
 # ── Action -1: Failed pullback exit (Fix A + Fix B) ───────────────────────────
@@ -362,6 +406,76 @@ def check_targets(positions: list, today: str) -> list[str]:
     return actions
 
 
+# ── Action 2.5: RVOL collapse exit (#5) ───────────────────────────────────────
+
+def check_rvol_collapse(positions: list, today: str) -> list[str]:
+    """
+    Exit position if RVOL collapses below RVOL_EXIT_FLOOR after entry.
+    Only fires when breakeven has been set (T1 hit) — we never exit a winner
+    into a stop loss just because volume dried up; the stop handles that.
+    Disabled when RVOL_EXIT_FLOOR <= 0.
+    """
+    if RVOL_EXIT_FLOOR <= 0:
+        return []
+
+    actions = []
+    entries = load_executions()
+
+    for pos in positions:
+        ticker = pos["ticker"]
+
+        entry = None
+        for e in reversed(entries):
+            if e.get("symbol") == ticker and e.get("date") == today and e.get("success"):
+                entry = e
+                break
+
+        if not entry:
+            continue
+        # Only check after T1 hit (we're in the profit zone managing T3)
+        if not entry.get("breakeven_set"):
+            continue
+        # Skip if already checked and exited this cycle
+        if entry.get("rvol_collapse_exit"):
+            continue
+
+        rvol = get_rvol(ticker)
+        if rvol is None:
+            continue
+        if rvol >= RVOL_EXIT_FLOOR:
+            continue
+
+        logger.info(
+            f"RVOL COLLAPSE: {ticker} RVol={rvol:.2f}x < floor {RVOL_EXIT_FLOOR:.2f}x "
+            f"— closing T3 lot"
+        )
+        cancel_all_orders(ticker)
+        success = close_position(ticker, reason=f"RVOL collapse ({rvol:.2f}x < {RVOL_EXIT_FLOOR:.2f}x)")
+        if success:
+            entry["rvol_collapse_exit"] = True
+            actions.append(
+                f"RVOL COLLAPSE EXIT: {ticker} @ ${pos['current_price']:.2f} "
+                f"— RVol {rvol:.2f}x fell below floor {RVOL_EXIT_FLOOR:.2f}x"
+            )
+            try:
+                from managers.trade_journal import log_exit, fetch_exit_price
+                exit_price = fetch_exit_price(ticker) or pos["current_price"]
+                log_exit(
+                    symbol=ticker,
+                    setup=entry.get("setup", "UNKNOWN"),
+                    date=today,
+                    exit_price=exit_price,
+                    exit_reason=f"RVOL collapse ({rvol:.2f}x)",
+                    shares=entry.get("position_size", 0),
+                )
+            except Exception as _je:
+                logger.warning(f"journal.log_exit failed for {ticker}: {_je}")
+        else:
+            actions.append(f"RVOL COLLAPSE CLOSE FAILED: {ticker} — check Alpaca")
+
+    return actions
+
+
 # ── Action 3: Trailing stop (T3 lot) ──────────────────────────────────────────
 
 def check_trailing(positions: list, today: str) -> list[str]:
@@ -553,6 +667,8 @@ def main():
         all_actions += check_free_ride(positions, today)
         positions = get_open_positions()
         all_actions += check_targets(positions, today)
+        positions = get_open_positions()
+        all_actions += check_rvol_collapse(positions, today)
         positions = get_open_positions()
         all_actions += check_trailing(positions, today)
         positions = get_open_positions()

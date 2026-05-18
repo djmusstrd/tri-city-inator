@@ -75,6 +75,15 @@ _no_entry_minute   = int(os.getenv("NO_ENTRY_MINUTE",      "0"))
 NO_ENTRY_AFTER     = (_no_entry_hour, _no_entry_minute)
 RVOL_LOOKBACK      = int(os.getenv("RVOL_LOOKBACK",        "20"))
 
+# Setup-specific RVOL minimums (#4) — BREAKOUT needs most conviction
+BREAKOUT_MIN_RVOL     = float(os.getenv("BREAKOUT_MIN_RVOL",     "2.0"))
+CONTINUATION_MIN_RVOL = float(os.getenv("CONTINUATION_MIN_RVOL", "1.75"))
+PULLBACK_MIN_RVOL     = float(os.getenv("PULLBACK_MIN_RVOL",     "1.5"))
+
+# RVOL-based position size boost (#2)
+RVOL_SIZE_BOOST_MAX    = float(os.getenv("RVOL_SIZE_BOOST_MAX",    "1.25"))  # max multiplier
+RVOL_SIZE_BOOST_THRESH = float(os.getenv("RVOL_SIZE_BOOST_THRESH", "3.0"))   # RVOL level for max boost
+
 # ── Position sizing ───────────────────────────────────────────────────────────
 RISK_PCT      = float(os.getenv("RISK_PCT",    "2.0"))    # % of equity to risk
 STOP_PCT      = float(os.getenv("STOP_PCT",    "5.0"))    # fallback stop % if ORH not usable
@@ -279,7 +288,7 @@ PULLBACK_TIMEOUT   = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))    # Fix A: m
 
 
 def calculate_signal(symbol: str, price: float, orh: float, setup: str,
-                     ema_dev: float = 0.0) -> dict:
+                     ema_dev: float = 0.0, rvol: float | None = None) -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
@@ -318,6 +327,20 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
     equity           = get_account_equity()
     max_risk_dollars = (equity * RISK_PCT / 100) if (equity and equity > 0) else FIXED_RISK
     position_size    = max(1, int(max_risk_dollars / risk_per_share))
+
+    # #2: Scale position size up when RVOL is elevated (linear from 1.0x → RVOL_SIZE_BOOST_MAX)
+    if rvol is not None and rvol > MIN_RVOL and RVOL_SIZE_BOOST_MAX > 1.0:
+        boost_range = RVOL_SIZE_BOOST_THRESH - MIN_RVOL
+        if boost_range > 0:
+            t           = min(1.0, (rvol - MIN_RVOL) / boost_range)
+            multiplier  = 1.0 + t * (RVOL_SIZE_BOOST_MAX - 1.0)
+            boosted     = max(1, int(position_size * multiplier))
+            if boosted != position_size:
+                logger.info(
+                    f"RVOL boost: {rvol:.2f}x → size {position_size}→{boosted} "
+                    f"(x{multiplier:.2f})"
+                )
+            position_size = boosted
 
     target_1 = round(price * (1 + T1_PCT / 100), 2)
     target_2 = round(price * (1 + T2_PCT / 100), 2)
@@ -463,19 +486,26 @@ def main():
         print(f"SKIP: SPY bearish ({spy_str}) — blocking LONG entries.")
         sys.exit(0)
 
-    # ── Guard 7: relative volume (time-adjusted floor) ────────────────────────
+    # ── Guard 7: relative volume (setup-specific + afternoon floor) ──────────
     rvol = get_rvol(symbol)
     rvol_str = f"{rvol:.2f}x" if rvol is not None else "N/A"
     is_afternoon = now.hour >= PM_START_HOUR
-    rvol_floor   = PM_MIN_RVOL if is_afternoon else MIN_RVOL
-    period_label = "afternoon" if is_afternoon else "morning"
-    print(f"RVol: {rvol_str} ({period_label} min {rvol_floor:.1f}x)")
+    # #4: each setup has its own minimum; afternoon tightens the floor further
+    _setup_rvol_floor = {
+        "BREAKOUT":     BREAKOUT_MIN_RVOL,
+        "CONTINUATION": CONTINUATION_MIN_RVOL,
+        "PULLBACK":     PULLBACK_MIN_RVOL,
+    }
+    base_floor   = _setup_rvol_floor.get(args.setup, MIN_RVOL)
+    rvol_floor   = max(base_floor, PM_MIN_RVOL) if is_afternoon else base_floor
+    pm_note      = ", afternoon" if is_afternoon else ""
+    print(f"RVol: {rvol_str} ({args.setup} min {rvol_floor:.2f}x{pm_note})")
     if rvol is not None and rvol < rvol_floor and not args.dry_run:
-        print(f"SKIP: RVol {rvol_str} below {period_label} minimum {rvol_floor:.1f}x.")
+        print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
         sys.exit(0)
 
     # ── Build signal ───────────────────────────────────────────────────────────
-    signal       = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev)
+    signal       = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev, rvol=rvol)
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
