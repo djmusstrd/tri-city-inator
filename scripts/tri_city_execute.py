@@ -67,6 +67,8 @@ STOP_OFFSET = 0.13   # 13 cents below ORH (all setup types)
 MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",        "3"))
 MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS",     "-300"))
 MIN_RVOL           = float(os.getenv("MIN_RVOL",           "1.5"))
+PM_MIN_RVOL        = float(os.getenv("PM_MIN_RVOL",        "2.0"))   # tighter floor after noon
+PM_START_HOUR      = int(os.getenv("PM_START_HOUR",        "12"))    # noon CT
 SPY_BEAR_THRESHOLD = float(os.getenv("SPY_BEAR_THRESHOLD", "-1.5"))
 _no_entry_hour     = int(os.getenv("NO_ENTRY_HOUR",        "13"))
 _no_entry_minute   = int(os.getenv("NO_ENTRY_MINUTE",      "0"))
@@ -461,12 +463,15 @@ def main():
         print(f"SKIP: SPY bearish ({spy_str}) — blocking LONG entries.")
         sys.exit(0)
 
-    # ── Guard 7: relative volume ───────────────────────────────────────────────
+    # ── Guard 7: relative volume (time-adjusted floor) ────────────────────────
     rvol = get_rvol(symbol)
     rvol_str = f"{rvol:.2f}x" if rvol is not None else "N/A"
-    print(f"RVol: {rvol_str} (min {MIN_RVOL:.1f}x)")
-    if rvol is not None and rvol < MIN_RVOL and not args.dry_run:
-        print(f"SKIP: RVol {rvol_str} below minimum {MIN_RVOL:.1f}x.")
+    is_afternoon = now.hour >= PM_START_HOUR
+    rvol_floor   = PM_MIN_RVOL if is_afternoon else MIN_RVOL
+    period_label = "afternoon" if is_afternoon else "morning"
+    print(f"RVol: {rvol_str} ({period_label} min {rvol_floor:.1f}x)")
+    if rvol is not None and rvol < rvol_floor and not args.dry_run:
+        print(f"SKIP: RVol {rvol_str} below {period_label} minimum {rvol_floor:.1f}x.")
         sys.exit(0)
 
     # ── Build signal ───────────────────────────────────────────────────────────
