@@ -80,7 +80,7 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
    --- SETUP 3: PULLBACK (--setup PULLBACK) ---
    All 3 required:
    1. SIGNAL = "PULLBACK"
-   2. EMA Dev% between -0.5% and +0.8%
+   2. EMA Dev% between 0% and +0.8%  ← Finding 2: price must be at or above EMA (not below)
    3. RSI between 38 and 55
    Stop: 13 cents below ORH (if price within 2% above ORH), else 5% below entry. Add --cup if CUP column = "YES". Confidence: MEDIUM
 
@@ -136,7 +136,7 @@ Override any default by editing the values in `.env`.
 |--------|--------|-------|
 | BREAKOUT | Auto-execute | Price above ORH, high vol, RSI > 50, EMA Dev > 0 |
 | CONTINUATION | Auto-execute | Above ORH pullback, EMA dev 0–1%, RSI 50–65 |
-| PULLBACK | Auto-execute | Above EMA, dev -0.5–0.8%, RSI 38–55 |
+| PULLBACK | Auto-execute | At/above EMA, dev 0–+0.8%, RSI 38–55 |
 | --- | Silent | No signal — skip |
 | CUP = YES | +cup flag | Add --cup to execute call for high-conviction log |
 

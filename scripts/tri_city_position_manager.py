@@ -48,8 +48,9 @@ EOD_HOUR            = int(os.getenv("EOD_HOUR",             "15"))
 EOD_MINUTE          = int(os.getenv("EOD_MINUTE",           "45"))
 FREE_RIDE_PCT       = float(os.getenv("FREE_RIDE_PCT",       "3.0"))
 T3_TRAIL_PCT        = float(os.getenv("T3_TRAIL_PCT",        "5.0"))
-PULLBACK_TIMEOUT    = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))   # Fix A
-RVOL_EXIT_FLOOR     = float(os.getenv("RVOL_EXIT_FLOOR",     "1.0"))  # #5: collapse exit
+PULLBACK_TIMEOUT     = int(os.getenv("PULLBACK_TIMEOUT_MIN",   "25"))    # Fix A
+PULLBACK_FAIL_BUFFER = float(os.getenv("PULLBACK_FAIL_BUFFER", "0.005")) # Fix B: 0.5% buffer below entry
+RVOL_EXIT_FLOOR      = float(os.getenv("RVOL_EXIT_FLOOR",      "1.0"))  # #5: collapse exit
 RVOL_LOOKBACK       = int(os.getenv("RVOL_LOOKBACK",         "20"))
 EXEC_LOG            = WORKSPACE / "logs" / "tri-city-executions.json"
 
@@ -160,6 +161,40 @@ def get_rvol(symbol: str) -> float | None:
         return None
 
 
+# ── Last completed bar close (Finding 4) ─────────────────────────────────────
+
+def get_last_bar_close(symbol: str) -> float | None:
+    """
+    Return the close of the most recent completed 1-min bar from Alpaca.
+    Used by Fix B so intrabar wicks (live tick) can't trigger a premature exit.
+    Falls back to None if unavailable — caller uses live price as fallback.
+    """
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        return None
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import timedelta
+
+        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        now = datetime.now(CT)
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Minute,
+            start=now - timedelta(minutes=45),
+            end=now,
+        )
+        bars = client.get_stock_bars(req)
+        df   = bars.df
+        if df.empty:
+            return None
+        return round(float(df["close"].iloc[-1]), 4)
+    except Exception as e:
+        logger.warning(f"get_last_bar_close {symbol}: {e}")
+        return None
+
+
 # ── Action -1: Failed pullback exit (Fix A + Fix B) ───────────────────────────
 
 def check_failed_pullback(positions: list, today: str, now: datetime) -> list[str]:
@@ -195,18 +230,30 @@ def check_failed_pullback(positions: list, today: str, now: datetime) -> list[st
 
         orh = entry.get("orh", 0)
 
-        # ── Fix B: immediate breakdown — price fell below entry AND ORH ───────
-        if orh > 0 and curr_price < entry_price and curr_price < orh:
+        # ── Fix B: immediate breakdown — bar close below entry*(1-buffer) AND ORH ──
+        # Finding 4: use last completed bar close to avoid intrabar-wick false exits.
+        # Finding 1: require PULLBACK_FAIL_BUFFER (0.5%) below entry, not just $0.01.
+        last_close   = get_last_bar_close(ticker)
+        fix_b_price  = last_close if last_close is not None else curr_price
+        fix_b_thresh = round(entry_price * (1 - PULLBACK_FAIL_BUFFER), 4)
+
+        if orh > 0 and fix_b_price < fix_b_thresh and fix_b_price < orh:
             logger.info(
-                f"PULLBACK FAIL B: {ticker} ${curr_price:.2f} < "
-                f"entry ${entry_price:.2f} AND < ORH ${orh:.2f}"
+                f"PULLBACK FAIL B: {ticker} bar_close=${fix_b_price:.2f} < "
+                f"entry*(1-{PULLBACK_FAIL_BUFFER:.1%}) ${fix_b_thresh:.2f} AND < ORH ${orh:.2f}"
             )
             cancel_all_orders(ticker)
             success = close_position(ticker, reason="Failed pullback — below entry & ORH")
             if success:
+                # Finding 5: flag this exit so already_executed_today can allow re-entry
+                pnl_per_share = round(fix_b_price - entry_price, 4)
+                entry["fix_b_exit"]    = True
+                entry["pnl_per_share"] = pnl_per_share
+                save_executions(entries)
                 actions.append(
-                    f"PULLBACK FAIL: {ticker} @ ${curr_price:.2f} "
-                    f"— broke below entry ${entry_price:.2f} and ORH ${orh:.2f}"
+                    f"PULLBACK FAIL: {ticker} bar_close=${fix_b_price:.2f} "
+                    f"— {PULLBACK_FAIL_BUFFER:.1%} below entry ${entry_price:.2f} "
+                    f"and ORH ${orh:.2f} (P&L/share: ${pnl_per_share:+.4f})"
                 )
             else:
                 actions.append(f"PULLBACK FAIL CLOSE FAILED: {ticker} — check Alpaca")

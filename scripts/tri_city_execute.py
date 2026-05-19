@@ -120,10 +120,26 @@ def save_log(entries: list):
 # ── Guard 1 & 2: duplicate checks ─────────────────────────────────────────────
 
 def already_executed_today(symbol: str, setup: str) -> bool:
+    """
+    Guard 1: block duplicate setups per symbol per day.
+
+    Finding 5 (re-entry exception): if the prior execution was exited via Fix B
+    (failed pullback) and the loss was a small scratch (< RE_ENTRY_MAX_LOSS $/share),
+    allow one re-entry. Bulkowski: re-entry after a scratch has 65-70% win rate.
+    """
     today = datetime.now(CT).strftime("%Y-%m-%d")
     for e in load_log():
         if (e.get("symbol") == symbol and e.get("setup") == setup
                 and e.get("date") == today):
+            # Re-entry allowed if prior exit was a Fix B scratch within loss limit
+            if (e.get("fix_b_exit")
+                    and e.get("pnl_per_share") is not None
+                    and e["pnl_per_share"] >= -RE_ENTRY_MAX_LOSS):
+                logger.info(
+                    f"Re-entry allowed: {setup} {symbol} — Fix B scratch "
+                    f"${e['pnl_per_share']:+.4f}/share within ${RE_ENTRY_MAX_LOSS:.2f} limit"
+                )
+                return False
             logger.info(f"Already executed {setup} on {symbol} today.")
             return True
     return False
@@ -281,14 +297,74 @@ def get_account_equity() -> float | None:
         return None
 
 
+# ── Candle type classifier (Finding 6) ────────────────────────────────────────
+
+def get_candle_type(symbol: str) -> str:
+    """
+    Classify the most recent completed 15-min bar as HAMMER, DOJI, BEARISH, or NEUTRAL.
+    Finding 6 (Bulkowski): hammers at EMA have 72% follow-through.
+    Non-hammer PULLBACK entries get a 25% position size reduction.
+    Returns "UNKNOWN" on any error so callers skip the penalty.
+    """
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        return "UNKNOWN"
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import timedelta
+
+        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        now = datetime.now(CT)
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Minute,
+            start=now - timedelta(minutes=60),
+            end=now,
+        )
+        bars  = client.get_stock_bars(req)
+        df    = bars.df
+        if df.empty:
+            return "UNKNOWN"
+
+        bar = df.iloc[-1]
+        o, h, l, c = (float(bar["open"]), float(bar["high"]),
+                      float(bar["low"]),  float(bar["close"]))
+        total_range = h - l
+        if total_range < 0.001:
+            return "DOJI"
+
+        body        = abs(c - o)
+        lower_wick  = min(o, c) - l
+        upper_wick  = h - max(o, c)
+
+        # Hammer: small body (≤35% of range), long lower wick (≥2× body), tiny upper wick
+        if (lower_wick >= 2 * body
+                and upper_wick <= body
+                and total_range > 0
+                and body / total_range <= 0.35):
+            return "HAMMER"
+
+        # Bearish engulfing / shooting star
+        if c < o and upper_wick >= 2 * body:
+            return "BEARISH"
+
+        return "NEUTRAL"
+    except Exception as e:
+        logger.warning(f"get_candle_type {symbol}: {e}")
+        return "UNKNOWN"
+
+
 # ── Signal calculation ─────────────────────────────────────────────────────────
 
-EMA_STOP_BUFFER    = float(os.getenv("EMA_STOP_BUFFER",      "0.10"))  # Fix C: cents below EMA20
-PULLBACK_TIMEOUT   = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))    # Fix A: minutes
+EMA_STOP_BUFFER    = float(os.getenv("EMA_STOP_BUFFER",      "0.30"))  # Finding 3: widened to 30¢ below EMA20
+PULLBACK_TIMEOUT   = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))    # Fix A
+RE_ENTRY_MAX_LOSS  = float(os.getenv("RE_ENTRY_MAX_LOSS",   "0.50"))  # Finding 5: allow re-entry if scratch < this $/share: minutes
 
 
 def calculate_signal(symbol: str, price: float, orh: float, setup: str,
-                     ema_dev: float = 0.0, rvol: float | None = None) -> dict:
+                     ema_dev: float = 0.0, rvol: float | None = None,
+                     candle_type: str = "UNKNOWN") -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
@@ -342,6 +418,16 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                 )
             position_size = boosted
 
+    # Finding 6: reduce size 25% for PULLBACK entries where last bar is not a hammer.
+    # Bulkowski: hammers at EMA have 72% follow-through; non-hammers are lower conviction.
+    if setup == "PULLBACK" and candle_type not in ("HAMMER", "UNKNOWN"):
+        reduced = max(1, int(position_size * 0.75))
+        if reduced != position_size:
+            logger.info(
+                f"Candle type {candle_type}: PULLBACK size {position_size}→{reduced} (-25%)"
+            )
+        position_size = reduced
+
     target_1 = round(price * (1 + T1_PCT / 100), 2)
     target_2 = round(price * (1 + T2_PCT / 100), 2)
     target_3 = round(price * (1 + T3_PCT / 100), 2)
@@ -356,6 +442,7 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
         "target_3":      target_3,
         "direction":     "BULLISH",
         "confidence":    1.0,
+        "candle_type":   candle_type,
     }
 
 
@@ -370,7 +457,8 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
                   ema_dev: float | None = None,
                   scanner_signal: str | None = None,
                   orh: float | None = None,
-                  orl: float | None = None):
+                  orl: float | None = None,
+                  candle_type: str | None = None):
     now = datetime.now(CT)
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
@@ -381,6 +469,7 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
         "symbol":         symbol,
         "setup":          setup,
         "cup":            cup,
+        "candle_type":    candle_type or signal.get("candle_type"),
         "entry_price":    signal["entry_price"],
         "stop_loss":      signal["stop_loss"],
         "target_1":       signal["target_1"],
@@ -423,9 +512,12 @@ def main():
                         help='Signal text from scanner, e.g. "BREAKOUT"')
     parser.add_argument("--setup",    required=True,
                         choices=["BREAKOUT", "CONTINUATION", "PULLBACK"])
-    parser.add_argument("--cup",      action="store_true",
+    parser.add_argument("--cup",         action="store_true",
                         help="Cup pattern detected (high-conviction flag from scanner)")
-    parser.add_argument("--dry-run",  action="store_true",
+    parser.add_argument("--candle_type", default=None,
+                        help="Override candle type (HAMMER/NEUTRAL/BEARISH/DOJI). "
+                             "Auto-detected from last 1-min bar if not provided.")
+    parser.add_argument("--dry-run",     action="store_true",
                         help="Print signal without placing orders")
     parser.add_argument("--override-cutoff", action="store_true",
                         help="Allow entry past the time cutoff (user-confirmed late trade)")
@@ -434,6 +526,13 @@ def main():
     symbol = args.symbol.upper()
     now    = datetime.now(CT)
     today  = now.strftime("%Y-%m-%d")
+
+    # Finding 2: PULLBACK only valid when price is at or above EMA (EMA Dev% >= 0).
+    # Bulkowski: entries below EMA (-0.5% to 0%) have lower follow-through.
+    if args.setup == "PULLBACK" and args.ema_dev < 0.0:
+        print(f"SKIP: PULLBACK requires EMA Dev% >= 0.0% (got {args.ema_dev:+.2f}%). "
+              f"Price is still below EMA — wait for reclaim.")
+        sys.exit(0)
 
     cup_tag = " + CUP 🏆" if args.cup else ""
     print("=" * 64)
@@ -504,8 +603,16 @@ def main():
         print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
         sys.exit(0)
 
+    # ── Candle type (Finding 6) — auto-detect if not passed ───────────────────
+    candle_type = (args.candle_type or "").upper() or get_candle_type(symbol)
+    candle_note = ""
+    if args.setup == "PULLBACK" and candle_type not in ("HAMMER", "UNKNOWN"):
+        candle_note = f" ← -25% size ({candle_type})"
+    print(f"Candle: {candle_type}{candle_note}")
+
     # ── Build signal ───────────────────────────────────────────────────────────
-    signal       = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev, rvol=rvol)
+    signal       = calculate_signal(symbol, args.price, args.orh, args.setup,
+                                    args.ema_dev, rvol=rvol, candle_type=candle_type)
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
@@ -534,7 +641,8 @@ def main():
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
                       cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
-                      scanner_signal=args.signal, orh=args.orh, orl=args.orl)
+                      scanner_signal=args.signal, orh=args.orh, orl=args.orl,
+                      candle_type=candle_type)
         print(f"\n✅ ORDERS PLACED")
         print(f"   Order ID: {result.order_id}")
         print(f"   Shares:   {result.shares_filled}")
@@ -545,7 +653,8 @@ def main():
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
                       cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
-                      scanner_signal=args.signal, orh=args.orh, orl=args.orl)
+                      scanner_signal=args.signal, orh=args.orh, orl=args.orl,
+                      candle_type=candle_type)
         sys.exit(1)
 
 

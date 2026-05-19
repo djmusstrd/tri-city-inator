@@ -1,5 +1,5 @@
 # Tri-City Inator — Cheatsheet
-_Last updated: 2026-05-18_
+_Last updated: 2026-05-19_
 
 ---
 
@@ -55,7 +55,7 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_backtest.py \
 |--------|-----------|------|
 | **BREAKOUT** | SIGNAL=BREAKOUT · Price > ORH · RSI > 50 · EMA Dev% > 0 | 13¢ below ORH |
 | **CONTINUATION** | SIGNAL=CONTINUATION · Price > ORH · EMA Dev% 0–1.0% | 13¢ below ORH |
-| **PULLBACK** | SIGNAL=PULLBACK · EMA Dev% -0.5–+0.8% · RSI 38–55 | 13¢ below ORH (if within 2% of ORH), else 5% below entry |
+| **PULLBACK** | SIGNAL=PULLBACK · EMA Dev% 0–+0.8% · RSI 38–55 | EMA20 – 30¢ (widened stop) |
 
 Add `--cup` flag if CUP column = YES (high-conviction log).
 
@@ -88,15 +88,29 @@ Entry
 
 ---
 
-## RVOL Features (new 2026-05-18)
+## RVOL Features
 
 | Feature | Detail |
 |---------|--------|
 | **Size boost** | RVOL > 1.5x scales position up linearly to +25% at 3.0x |
 | **Setup floors** | BREAKOUT 2.0x · CONTINUATION 1.75x · PULLBACK 1.5x |
 | **Collapse exit** | After T1 hit (breakeven set), exits if RVOL drops below 1.0x |
+| **Candle type** | PULLBACK: HAMMER = full size · NEUTRAL/BEARISH/DOJI = -25% size (auto-detected) |
 
 Override in `.env`: `RVOL_SIZE_BOOST_MAX`, `RVOL_SIZE_BOOST_THRESH`, `RVOL_EXIT_FLOOR`
+
+## Bulkowski Fixes (2026-05-19)
+
+| # | Finding | Change |
+|---|---------|--------|
+| 1 | Fix B buffer | Requires 0.5% below entry before exit fires (was any penny) |
+| 2 | Entry timing | PULLBACK only when EMA Dev% ≥ 0% (price at or above EMA) |
+| 3 | EMA stop | PULLBACK stop = EMA20 – 30¢ (widened from 10¢) |
+| 4 | Last bar close | Fix B uses last completed bar close, not live tick |
+| 5 | Re-entry | One re-entry allowed after Fix B scratch < $0.50/share |
+| 6 | Candle type | PULLBACK non-hammer entries get -25% position size |
+
+Override: `PULLBACK_FAIL_BUFFER`, `EMA_STOP_BUFFER`, `RE_ENTRY_MAX_LOSS` in `.env`
 
 ---
 
