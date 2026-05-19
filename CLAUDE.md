@@ -60,7 +60,9 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
    /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Extract ORH and ORL for every symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json. Report symbols loaded.
 
 4. Signal monitor — weekdays every 3 minutes (starts at level lock time):
-   /loop 3m Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Use the ORH and ORL values from the table directly for each symbol — do NOT use hardcoded levels. Check every symbol for THREE setup types. For each qualifying setup: (1) report it, (2) immediately execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {SYMBOL} --price {PRICE} --orh {ORH} --orl {ORL} --rsi {RSI} --ema_dev {EMA_DEV} --signal "{SIGNAL}" --setup {SETUP_TYPE} {--cup if CUP=YES}`. If nothing qualifies, stay silent.
+   /loop 3m Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Also read ~/tri-city-inator/shared/tri-city-candidates.json and note the "htf" array (symbols flagged as High & Tight Flag) and "resistance" array (symbols near 52-week high). Use the ORH and ORL values from the table directly for each symbol — do NOT use hardcoded levels. Check every symbol for THREE setup types. For each qualifying setup: (1) report it, (2) immediately execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {SYMBOL} --price {PRICE} --orh {ORH} --orl {ORL} --rsi {RSI} --ema_dev {EMA_DEV} --signal "{SIGNAL}" --setup {SETUP_TYPE} {--cup if CUP=YES} {--htf if symbol in htf array}`. If nothing qualifies, stay silent.
+
+   RESISTANCE WARNING: If a symbol is in the "resistance" array (near 52-week high), note it in your report but do NOT block the trade — treat as a caution flag only.
 
    --- SETUP 1: BREAKOUT (--setup BREAKOUT) ---
    All 4 required:

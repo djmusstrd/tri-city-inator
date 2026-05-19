@@ -52,10 +52,11 @@ MAX_PRICE     = float(os.getenv("MAX_PRICE",    "500.0"))
 MIN_RVOL      = float(os.getenv("MIN_RVOL",     "1.5"))
 PARABOLIC_VOL = 10.0
 
-W_GAP      = 0.35
-W_RVOL     = 0.35
-W_STAGE    = 0.20
-W_CATALYST = 0.10
+W_GAP       = 0.35
+W_RVOL      = 0.35
+W_STAGE     = 0.12   # Weinstein: split with SMA slope
+W_SMA_SLOPE = 0.08   # Weinstein: bonus when SMA50 > SMA100 (rising)
+W_CATALYST  = 0.10
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -105,11 +106,15 @@ def fetch_gappers() -> list[dict]:
             volume       = safe("Volume")
             avg_vol      = safe("Average Volume (10 day)", 1.0)
             sma_50       = safe("Simple Moving Average (50)")
+            sma_100      = safe("Simple Moving Average (100)")
             ma_rating    = safe("Moving Averages Rating")
             rsi          = safe("Relative Strength Index (14)", 50.0)
             rel_vol      = safe("Relative Volume", volume / avg_vol if avg_vol > 0 else 1.0)
             float_shares = safe("Float Shares Outstanding") * 1e6 if safe("Float Shares Outstanding") else 0.0
             pm_volume    = safe("Pre-market Volume")
+            high_52w     = safe("52 Week High")
+            perf_3m      = safe("3-Month Performance")      # % gain over 3 months (Bulkowski HTF: ≥90%)
+            candle_hammer = safe("Candle.Hammer") != 0.0    # TradingView daily candle detection
 
             if ma_rating >= 0.5:    tech_rating = "strong_buy"
             elif ma_rating >= 0.1:  tech_rating = "buy"
@@ -139,22 +144,29 @@ def fetch_gappers() -> list[dict]:
                 tv_symbol = f"{tv_prefix}:{ticker}"
 
             stocks.append({
-                "symbol":       ticker,
-                "tv_symbol":    tv_symbol,
-                "price":        round(price, 2),
-                "gap_pct":      round(gap_pct, 2),
-                "rvol":         round(rel_vol, 2),
-                "rsi":          round(rsi, 1),
-                "sma50":        round(sma_50, 2),
-                "stage2":       price > sma_50 > 0,
-                "catalyst":     gap_pct >= 5.0,
-                "parabolic":    rel_vol >= PARABOLIC_VOL,
-                "float_cat":    float_cat,
-                "float_shares": int(float_shares),
-                "tech_rating":  tech_rating,
-                "volume":       int(volume),
-                "avg_volume":   int(avg_vol),
-                "pm_volume":    int(pm_volume),
+                "symbol":          ticker,
+                "tv_symbol":       tv_symbol,
+                "price":           round(price, 2),
+                "gap_pct":         round(gap_pct, 2),
+                "rvol":            round(rel_vol, 2),
+                "rsi":             round(rsi, 1),
+                "sma50":           round(sma_50, 2),
+                "sma100":          round(sma_100, 2),
+                "stage2":          price > sma_50 > 0,
+                "sma_rising":      sma_50 > sma_100 > 0,     # Weinstein: SMA50 above SMA100 = uptrend
+                "near_52wk_high":  high_52w > 0 and price / high_52w > 0.95,  # Weinstein: resistance zone
+                "htf":             perf_3m >= 90.0,           # Bulkowski HTF: +90% in ≤3 months
+                "candle_hammer":   candle_hammer,             # TradingView daily hammer detection
+                "perf_3m":         round(perf_3m, 1),
+                "high_52w":        round(high_52w, 2),
+                "catalyst":        gap_pct >= 5.0,
+                "parabolic":       rel_vol >= PARABOLIC_VOL,
+                "float_cat":       float_cat,
+                "float_shares":    int(float_shares),
+                "tech_rating":     tech_rating,
+                "volume":          int(volume),
+                "avg_volume":      int(avg_vol),
+                "pm_volume":       int(pm_volume),
             })
 
         return stocks
@@ -170,12 +182,13 @@ def fetch_gappers() -> list[dict]:
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 def score_candidate(s: dict) -> float:
-    gap_score    = min(s["gap_pct"] / 20.0, 1.0) * W_GAP
-    raw_rvol     = min(s["rvol"] / 5.0, 1.0) * W_RVOL
-    rvol_score   = raw_rvol * 0.5 if s["parabolic"] else raw_rvol
-    stage_score  = W_STAGE if s["stage2"] else 0.0
-    cat_score    = W_CATALYST if s["catalyst"] else 0.0
-    return round(gap_score + rvol_score + stage_score + cat_score, 4)
+    gap_score   = min(s["gap_pct"] / 20.0, 1.0) * W_GAP
+    raw_rvol    = min(s["rvol"] / 5.0, 1.0) * W_RVOL
+    rvol_score  = raw_rvol * 0.5 if s["parabolic"] else raw_rvol
+    stage_score = W_STAGE if s["stage2"] else 0.0
+    sma_score   = W_SMA_SLOPE if s.get("sma_rising") else 0.0   # Weinstein
+    cat_score   = W_CATALYST if s["catalyst"] else 0.0
+    return round(gap_score + rvol_score + stage_score + sma_score + cat_score, 4)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -207,7 +220,9 @@ def main():
     for i, s in enumerate(ranked, 1):
         s["rank"] = i
 
-    parabolic = [s["symbol"] for s in ranked if s["parabolic"]]
+    parabolic       = [s["symbol"] for s in ranked if s["parabolic"]]
+    resistance_warn = [s["symbol"] for s in ranked if s.get("near_52wk_high")]
+    htf_list        = [s["symbol"] for s in ranked if s.get("htf")]
 
     def fmt_vol(v: int) -> str:
         if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
@@ -216,24 +231,30 @@ def main():
 
     # Print ranked table
     print(f"\n{'RK':<4} {'SYMBOL':<7} {'PRICE':>7} {'GAP%':>7} {'RVOL':>6} "
-          f"{'RSI':>5} {'PM VOL':>8} {'STAGE2':>7} {'FLOAT':>6} {'SCORE':>7} {'RATING'}")
-    print("-" * 82)
+          f"{'RSI':>5} {'PM VOL':>8} {'S2':>3} {'SMA↑':>4} {'52H':>4} {'HTF':>4} {'SCORE':>7}")
+    print("-" * 86)
 
     for s in ranked:
-        stage  = "YES" if s["stage2"] else "---"
-        fcat   = s["float_cat"][0].upper()
+        stage  = "Y" if s["stage2"] else "-"
+        sma_r  = "Y" if s.get("sma_rising") else "-"
+        h52    = "⚠" if s.get("near_52wk_high") else "-"
+        htf_f  = "★" if s.get("htf") else "-"
         para   = "⚠" if s["parabolic"] else " "
         pmv    = fmt_vol(s["pm_volume"])
         print(f"{s['rank']:<4} {s['symbol']:<7} ${s['price']:>6.2f} "
               f"{s['gap_pct']:>+6.1f}% {s['rvol']:>5.1f}x "
-              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>7} "
-              f"{fcat:>6} {para}{s['score']:>6.4f}  {s['tech_rating']}")
+              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>3} {sma_r:>4} {h52:>4} {htf_f:>4} "
+              f"{para}{s['score']:>6.4f}")
 
-    print(f"\n{'─'*82}")
+    print(f"\n{'─'*86}")
     print(f"  {len(ranked)} candidates ranked.")
     if parabolic:
-        print(f"  ⚠️  PARABOLIC (>10x RVol — avoid): {parabolic}")
-    print(f"{'─'*82}")
+        print(f"  ⚠  PARABOLIC (>10x RVol — avoid):           {parabolic}")
+    if resistance_warn:
+        print(f"  ⚠  RESISTANCE (within 5% of 52wk high):     {resistance_warn}")
+    if htf_list:
+        print(f"  ★  HIGH & TIGHT FLAG (+90% in 3mo):          {htf_list}")
+    print(f"{'─'*86}")
 
     # Top 15 non-parabolic exchange-prefixed symbols for TradingView indicator swap
     tv_symbols = [
@@ -251,6 +272,8 @@ def main():
             "scanned_at": now.strftime("%H:%M CT"),
             "total":      len(ranked),
             "tv_symbols": tv_symbols,
+            "htf":        htf_list,
+            "resistance": resistance_warn,
             "candidates": ranked,
         }
         CANDIDATES.write_text(json.dumps(payload, indent=2))

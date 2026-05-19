@@ -357,14 +357,17 @@ def get_candle_type(symbol: str) -> str:
 
 # ── Signal calculation ─────────────────────────────────────────────────────────
 
-EMA_STOP_BUFFER    = float(os.getenv("EMA_STOP_BUFFER",      "0.30"))  # Finding 3: widened to 30¢ below EMA20
-PULLBACK_TIMEOUT   = int(os.getenv("PULLBACK_TIMEOUT_MIN",  "25"))    # Fix A
-RE_ENTRY_MAX_LOSS  = float(os.getenv("RE_ENTRY_MAX_LOSS",   "0.50"))  # Finding 5: allow re-entry if scratch < this $/share: minutes
+EMA_STOP_BUFFER      = float(os.getenv("EMA_STOP_BUFFER",        "0.30"))  # Finding 3: widened to 30¢ below EMA20
+PULLBACK_TIMEOUT     = int(os.getenv("PULLBACK_TIMEOUT_MIN",    "25"))    # Fix A
+RE_ENTRY_MAX_LOSS    = float(os.getenv("RE_ENTRY_MAX_LOSS",     "0.50"))  # Finding 5: allow re-entry if scratch < this $/share
+LOOSE_CONSOL_PENALTY = float(os.getenv("LOOSE_CONSOL_PENALTY",  "0.85"))  # Pennant: -15% size when no CUP on PULLBACK: minutes
 
 
 def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                      ema_dev: float = 0.0, rvol: float | None = None,
-                     candle_type: str = "UNKNOWN") -> dict:
+                     candle_type: str = "UNKNOWN",
+                     cup: bool = False,
+                     htf: bool = False) -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
@@ -418,15 +421,31 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                 )
             position_size = boosted
 
-    # Finding 6: reduce size 25% for PULLBACK entries where last bar is not a hammer.
-    # Bulkowski: hammers at EMA have 72% follow-through; non-hammers are lower conviction.
-    if setup == "PULLBACK" and candle_type not in ("HAMMER", "UNKNOWN"):
-        reduced = max(1, int(position_size * 0.75))
-        if reduced != position_size:
-            logger.info(
-                f"Candle type {candle_type}: PULLBACK size {position_size}→{reduced} (-25%)"
-            )
-        position_size = reduced
+    if setup == "PULLBACK":
+        # HTF override: High & Tight Flag (+90% in 3mo) — skip all size penalties.
+        # Bulkowski: HTF has 82% target hit rate and 15% failure rate. Full size warranted.
+        if htf:
+            logger.info(f"HTF setup: bypassing candle and loose-consolidation size penalties")
+        else:
+            # Finding 6: -25% for non-hammer candles (Bulkowski: hammers at EMA 72% follow-through)
+            if candle_type not in ("HAMMER", "UNKNOWN"):
+                reduced = max(1, int(position_size * 0.75))
+                if reduced != position_size:
+                    logger.info(
+                        f"Candle type {candle_type}: PULLBACK size {position_size}→{reduced} (-25%)"
+                    )
+                position_size = reduced
+
+            # Pennant penalty: -15% for loose consolidation (no CUP = widening range)
+            # Bulkowski: loose pennants have 54% failure vs tight at 44%.
+            if not cup and LOOSE_CONSOL_PENALTY < 1.0:
+                reduced = max(1, int(position_size * LOOSE_CONSOL_PENALTY))
+                if reduced != position_size:
+                    logger.info(
+                        f"Loose consolidation (no CUP): PULLBACK size {position_size}→{reduced} "
+                        f"(-{round((1-LOOSE_CONSOL_PENALTY)*100):.0f}%)"
+                    )
+                position_size = reduced
 
     target_1 = round(price * (1 + T1_PCT / 100), 2)
     target_2 = round(price * (1 + T2_PCT / 100), 2)
@@ -443,6 +462,7 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
         "direction":     "BULLISH",
         "confidence":    1.0,
         "candle_type":   candle_type,
+        "htf":           htf,
     }
 
 
@@ -514,6 +534,8 @@ def main():
                         choices=["BREAKOUT", "CONTINUATION", "PULLBACK"])
     parser.add_argument("--cup",         action="store_true",
                         help="Cup pattern detected (high-conviction flag from scanner)")
+    parser.add_argument("--htf",         action="store_true",
+                        help="High & Tight Flag: +90%% in 3 months — bypasses candle/pennant size penalties")
     parser.add_argument("--candle_type", default=None,
                         help="Override candle type (HAMMER/NEUTRAL/BEARISH/DOJI). "
                              "Auto-detected from last 1-min bar if not provided.")
@@ -606,13 +628,19 @@ def main():
     # ── Candle type (Finding 6) — auto-detect if not passed ───────────────────
     candle_type = (args.candle_type or "").upper() or get_candle_type(symbol)
     candle_note = ""
-    if args.setup == "PULLBACK" and candle_type not in ("HAMMER", "UNKNOWN"):
-        candle_note = f" ← -25% size ({candle_type})"
+    if args.setup == "PULLBACK":
+        if getattr(args, "htf", False):
+            candle_note = " ← HTF bypass (no penalty)"
+        elif candle_type not in ("HAMMER", "UNKNOWN"):
+            candle_note = f" ← -25% size ({candle_type})"
+        if not args.cup and LOOSE_CONSOL_PENALTY < 1.0 and not getattr(args, "htf", False):
+            candle_note += f" + loose -{ round((1-LOOSE_CONSOL_PENALTY)*100):.0f}%"
     print(f"Candle: {candle_type}{candle_note}")
 
     # ── Build signal ───────────────────────────────────────────────────────────
     signal       = calculate_signal(symbol, args.price, args.orh, args.setup,
-                                    args.ema_dev, rvol=rvol, candle_type=candle_type)
+                                    args.ema_dev, rvol=rvol, candle_type=candle_type,
+                                    cup=args.cup, htf=getattr(args, "htf", False))
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
@@ -628,6 +656,8 @@ def main():
     print(f"  Risk:   ${risk_dollars:.2f}")
     if args.cup:
         print(f"  Cup:    YES — high-conviction setup")
+    if getattr(args, "htf", False):
+        print(f"  HTF:    YES — High & Tight Flag (Bulkowski 82% target, 15% failure)")
 
     if args.dry_run:
         print("\n[DRY RUN] — no order placed.")
