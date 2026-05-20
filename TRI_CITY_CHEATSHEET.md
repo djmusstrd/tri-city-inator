@@ -120,7 +120,7 @@ Override: `PULLBACK_FAIL_BUFFER`, `EMA_STOP_BUFFER`, `RE_ENTRY_MAX_LOSS` in `.en
 |------|-------|
 | Layout | TRI CITY INATOR III (ID 168250176) |
 | Indicator | Tri-City Inator (Pine v5, shorttitle: "Tri-City") |
-| Entity ID | `ur9VaL` |
+| Entity ID | `YcTiy2` |
 | Symbol inputs | `in_7` through `in_21` (15 slots) |
 | Timeframe | 15-min (matches ORB_MINUTES=15) |
 | Columns | SYMBOL · PRICE · RSI · EMA DEV% · **RVOL** · ORH/ORL · CUP · SIGNAL |

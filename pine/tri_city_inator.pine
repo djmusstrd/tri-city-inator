@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // v5 — inlined headers (no local fn inside if block), single-line request.security
 // Input layout: in_0–in_1 Display, in_2–in_6 Scanner, in_7–in_21 Symbols (15 slots)
+// Columns: SYMBOL · PRICE · RSI · EMA DEV% · RVOL · ORH/ORL · CUP · SMA↑ · 52H · HTF · SIGNAL
 // ─────────────────────────────────────────────────────────────────────────────
 
 //@version=5
@@ -54,41 +55,46 @@ _session_open = timestamp("America/Chicago", year, month, dayofmonth, 8, 30, 0)
 _orb_close    = _session_open + i_orb_min * 60 * 1000
 
 // ── get_signal ────────────────────────────────────────────────────────────────
+// Returns: [price, rsi, ema_dev, orh, orl, cup, sig, rvol, sma_rising, near_52wk, htf]
 get_signal(sym) =>
     [p, rsi_raw, ema_m_raw, vol_raw, avg_vol_raw, high_raw, low_raw, orb_hi_raw, orb_lo_raw] = request.security(sym, i_tf, [close, ta.rsi(close, i_rsi_len), ta.ema(close, i_ema_m), volume, ta.sma(volume, 10), high, low, ta.highest(high, i_orb_min), ta.lowest(low, i_orb_min)], lookahead=barmerge.lookahead_off)
-    rsi     = math.round(rsi_raw, 1)
-    ema_dev = math.round((p - ema_m_raw) / ema_m_raw * 100, 2)
-    rel_vol = avg_vol_raw > 0 ? vol_raw / avg_vol_raw : 1.0
-    hi_vol  = rel_vol >= i_hi_vol
-    _locked = time >= _orb_close
-    orh     = _locked ? orb_hi_raw : float(na)
-    orl     = _locked ? orb_lo_raw : float(na)
-    _h20    = ta.highest(high_raw, 20)
-    _l20    = ta.lowest(low_raw,   20)
-    cup     = _h20 > 0 and (_h20 - _l20) / _h20 < 0.06 and p >= _h20 * 0.99
+    [sma50_d, sma100_d, hi52w_d, close65_d] = request.security(sym, "D", [ta.sma(close, 50), ta.sma(close, 100), ta.highest(close, 252), nz(close[65])], lookahead=barmerge.lookahead_off)
+    rsi      = math.round(rsi_raw, 1)
+    ema_dev  = math.round((p - ema_m_raw) / ema_m_raw * 100, 2)
+    rel_vol  = avg_vol_raw > 0 ? vol_raw / avg_vol_raw : 1.0
+    hi_vol   = rel_vol >= i_hi_vol
+    _locked  = time >= _orb_close
+    orh      = _locked ? orb_hi_raw : float(na)
+    orl      = _locked ? orb_lo_raw : float(na)
+    _h20     = ta.highest(high_raw, 20)
+    _l20     = ta.lowest(low_raw,   20)
+    cup      = _h20 > 0 and (_h20 - _l20) / _h20 < 0.06 and p >= _h20 * 0.99
     _above_orh = not na(orh) and p > orh
     sig =
-         _above_orh and hi_vol and ema_dev > 0 and rsi > 50 ? 1 :
-         _above_orh and ema_dev >= 0 and ema_dev <= 1.0     ? 2 :
-         p > ema_m_raw and ema_dev >= -0.5 and ema_dev <= 0.8 and rsi >= 38 and rsi <= 55 and rsi > rsi[1] ? 3 : 0
-    [p, rsi, ema_dev, nz(orh), nz(orl), cup ? 1 : 0, sig, math.round(rel_vol, 2)]
+         _above_orh and hi_vol and ema_dev > 0 and rsi > 50                          ? 1 :
+         _above_orh and ema_dev >= 0 and ema_dev <= 1.0                               ? 2 :
+         p > ema_m_raw and ema_dev >= 0 and ema_dev <= 0.8 and rsi >= 38 and rsi <= 55 and rsi > rsi[1] ? 3 : 0
+    sma_rising = sma50_d > sma100_d and sma100_d > 0
+    near_52wk  = hi52w_d > 0 and p / hi52w_d > 0.95
+    htf_flag   = close65_d > 0 and (p - close65_d) / close65_d * 100 >= 90.0
+    [p, rsi, ema_dev, nz(orh), nz(orl), cup ? 1 : 0, sig, math.round(rel_vol, 2), sma_rising ? 1 : 0, near_52wk ? 1 : 0, htf_flag ? 1 : 0]
 
 // ── Fetch all 15 symbols ──────────────────────────────────────────────────────
-[p1,  r1,  d1,  oh1,  ol1,  c1,  s1,  rv1]  = get_signal(sym1)
-[p2,  r2,  d2,  oh2,  ol2,  c2,  s2,  rv2]  = get_signal(sym2)
-[p3,  r3,  d3,  oh3,  ol3,  c3,  s3,  rv3]  = get_signal(sym3)
-[p4,  r4,  d4,  oh4,  ol4,  c4,  s4,  rv4]  = get_signal(sym4)
-[p5,  r5,  d5,  oh5,  ol5,  c5,  s5,  rv5]  = get_signal(sym5)
-[p6,  r6,  d6,  oh6,  ol6,  c6,  s6,  rv6]  = get_signal(sym6)
-[p7,  r7,  d7,  oh7,  ol7,  c7,  s7,  rv7]  = get_signal(sym7)
-[p8,  r8,  d8,  oh8,  ol8,  c8,  s8,  rv8]  = get_signal(sym8)
-[p9,  r9,  d9,  oh9,  ol9,  c9,  s9,  rv9]  = get_signal(sym9)
-[p10, r10, d10, oh10, ol10, c10, s10, rv10] = get_signal(sym10)
-[p11, r11, d11, oh11, ol11, c11, s11, rv11] = get_signal(sym11)
-[p12, r12, d12, oh12, ol12, c12, s12, rv12] = get_signal(sym12)
-[p13, r13, d13, oh13, ol13, c13, s13, rv13] = get_signal(sym13)
-[p14, r14, d14, oh14, ol14, c14, s14, rv14] = get_signal(sym14)
-[p15, r15, d15, oh15, ol15, c15, s15, rv15] = get_signal(sym15)
+[p1,  r1,  d1,  oh1,  ol1,  c1,  s1,  rv1,  sr1,  n1,  hf1]  = get_signal(sym1)
+[p2,  r2,  d2,  oh2,  ol2,  c2,  s2,  rv2,  sr2,  n2,  hf2]  = get_signal(sym2)
+[p3,  r3,  d3,  oh3,  ol3,  c3,  s3,  rv3,  sr3,  n3,  hf3]  = get_signal(sym3)
+[p4,  r4,  d4,  oh4,  ol4,  c4,  s4,  rv4,  sr4,  n4,  hf4]  = get_signal(sym4)
+[p5,  r5,  d5,  oh5,  ol5,  c5,  s5,  rv5,  sr5,  n5,  hf5]  = get_signal(sym5)
+[p6,  r6,  d6,  oh6,  ol6,  c6,  s6,  rv6,  sr6,  n6,  hf6]  = get_signal(sym6)
+[p7,  r7,  d7,  oh7,  ol7,  c7,  s7,  rv7,  sr7,  n7,  hf7]  = get_signal(sym7)
+[p8,  r8,  d8,  oh8,  ol8,  c8,  s8,  rv8,  sr8,  n8,  hf8]  = get_signal(sym8)
+[p9,  r9,  d9,  oh9,  ol9,  c9,  s9,  rv9,  sr9,  n9,  hf9]  = get_signal(sym9)
+[p10, r10, d10, oh10, ol10, c10, s10, rv10, sr10, n10, hf10] = get_signal(sym10)
+[p11, r11, d11, oh11, ol11, c11, s11, rv11, sr11, n11, hf11] = get_signal(sym11)
+[p12, r12, d12, oh12, ol12, c12, s12, rv12, sr12, n12, hf12] = get_signal(sym12)
+[p13, r13, d13, oh13, ol13, c13, s13, rv13, sr13, n13, hf13] = get_signal(sym13)
+[p14, r14, d14, oh14, ol14, c14, s14, rv14, sr14, n14, hf14] = get_signal(sym14)
+[p15, r15, d15, oh15, ol15, c15, s15, rv15, sr15, n15, hf15] = get_signal(sym15)
 
 // ── Build arrays ──────────────────────────────────────────────────────────────
 syms  = array.from(sym1,sym2,sym3,sym4,sym5,sym6,sym7,sym8,sym9,sym10,sym11,sym12,sym13,sym14,sym15)
@@ -100,6 +106,9 @@ orls  = array.from(ol1,ol2,ol3,ol4,ol5,ol6,ol7,ol8,ol9,ol10,ol11,ol12,ol13,ol14,
 cups  = array.from(c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15)
 sigs  = array.from(s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15)
 rvols = array.from(rv1,rv2,rv3,rv4,rv5,rv6,rv7,rv8,rv9,rv10,rv11,rv12,rv13,rv14,rv15)
+smars = array.from(sr1,sr2,sr3,sr4,sr5,sr6,sr7,sr8,sr9,sr10,sr11,sr12,sr13,sr14,sr15)
+n52s  = array.from(n1,n2,n3,n4,n5,n6,n7,n8,n9,n10,n11,n12,n13,n14,n15)
+htfs  = array.from(hf1,hf2,hf3,hf4,hf5,hf6,hf7,hf8,hf9,hf10,hf11,hf12,hf13,hf14,hf15)
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 C_HDR  = color.new(#1a3a1a, 0)
@@ -111,20 +120,25 @@ C_BRK  = color.new(#00c853, 0)
 C_CONT = color.new(#0091ea, 0)
 C_PULL = color.new(#ff6f00, 0)
 C_CUP  = color.new(#ffd600, 0)
+C_WARN = color.new(#ff9800, 0)
+C_HTF  = color.new(#ffd600, 0)
 
-// ── Table (8 cols × 17 rows) ──────────────────────────────────────────────────
-var tbl = table.new(f_tpos(), 8, 17, bgcolor=C_BG, border_color=color.new(#333333,0), border_width=1)
+// ── Table (11 cols × 17 rows) ─────────────────────────────────────────────────
+var tbl = table.new(f_tpos(), 11, 17, bgcolor=C_BG, border_color=color.new(#333333,0), border_width=1)
 
 if barstate.islast
     sz = f_tsize()
-    table.cell(tbl, 0, 0, "SYMBOL",   text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    table.cell(tbl, 1, 0, "PRICE",    text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    table.cell(tbl, 2, 0, "RSI",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    table.cell(tbl, 3, 0, "EMA DEV%", text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    table.cell(tbl, 4, 0, "RVOL",     text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    table.cell(tbl, 5, 0, "ORH/ORL",  text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    table.cell(tbl, 6, 0, "CUP",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
-    table.cell(tbl, 7, 0, "SIGNAL",   text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 0,  0, "SYMBOL",   text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 1,  0, "PRICE",    text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 2,  0, "RSI",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 3,  0, "EMA DEV%", text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 4,  0, "RVOL",     text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 5,  0, "ORH/ORL",  text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 6,  0, "CUP",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 7,  0, "SMA↑",     text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 8,  0, "52H",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 9,  0, "HTF",      text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
+    table.cell(tbl, 10, 0, "SIGNAL",   text_color=C_TXT, bgcolor=C_HDR, text_size=sz, text_halign=text.align_center)
     for i = 0 to 14
         row     = i + 1
         sym     = array.get(syms,  i)
@@ -137,6 +151,9 @@ if barstate.islast
         cup     = array.get(cups,   i)
         sig     = array.get(sigs,   i)
         rv      = array.get(rvols,  i)
+        sr      = array.get(smars,  i)
+        n52     = array.get(n52s,   i)
+        hf      = array.get(htfs,   i)
         bg      = i % 2 == 0 ? C_ROW : C_BG
         sig_txt = sig == 1 ? "BREAKOUT" : sig == 2 ? "CONTINUATION" : sig == 3 ? "PULLBACK" : "---"
         sig_col = sig == 1 ? C_BRK : sig == 2 ? C_CONT : sig == 3 ? C_PULL : C_DIM
@@ -146,14 +163,23 @@ if barstate.islast
         dev_str = dev >= 0 ? "+" + str.tostring(dev, "#.##") : str.tostring(dev, "#.##")
         rv_str  = str.tostring(rv, "#.#") + "x"
         rv_col  = rv < 1.5 ? color.red : rv < 2.5 ? C_CUP : C_BRK
-        table.cell(tbl, 0, row, tick,                    text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_left)
-        table.cell(tbl, 1, row, str.tostring(p,"#.##"),  text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 2, row, str.tostring(rsi,"#.#"), text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 3, row, dev_str,                 text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 4, row, rv_str,                  text_color=rv_col, bgcolor=bg, text_size=sz, text_halign=text.align_right)
-        table.cell(tbl, 5, row, orh_str,                 text_color=C_DIM,  bgcolor=bg, text_size=sz, text_halign=text.align_center)
-        table.cell(tbl, 6, row, cup_txt,                 text_color=cup_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
-        table.cell(tbl, 7, row, sig_txt,                 text_color=sig_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        sr_txt  = sr == 1 ? "Y" : "-"
+        sr_col  = sr == 1 ? C_BRK : C_DIM
+        n52_txt = n52 == 1 ? "⚠" : "-"
+        n52_col = n52 == 1 ? C_WARN : C_DIM
+        hf_txt  = hf == 1 ? "★" : "-"
+        hf_col  = hf == 1 ? C_HTF : C_DIM
+        table.cell(tbl, 0,  row, tick,                    text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 1,  row, str.tostring(p,"#.##"),  text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 2,  row, str.tostring(rsi,"#.#"), text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 3,  row, dev_str,                 text_color=C_TXT,  bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 4,  row, rv_str,                  text_color=rv_col, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tbl, 5,  row, orh_str,                 text_color=C_DIM,  bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tbl, 6,  row, cup_txt,                 text_color=cup_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tbl, 7,  row, sr_txt,                  text_color=sr_col, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tbl, 8,  row, n52_txt,                 text_color=n52_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tbl, 9,  row, hf_txt,                  text_color=hf_col, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tbl, 10, row, sig_txt,                 text_color=sig_col,bgcolor=bg, text_size=sz, text_halign=text.align_center)
 
 // ── Alerts ────────────────────────────────────────────────────────────────────
 _any_breakout     = s1==1 or s2==1 or s3==1 or s4==1 or s5==1 or s6==1 or s7==1 or s8==1 or s9==1 or s10==1 or s11==1 or s12==1 or s13==1 or s14==1 or s15==1
