@@ -12,7 +12,9 @@ _Last updated: 2026-05-19_
 | **7:30 AM** | Premarket scanner runs, ranks gap-up candidates | Auto |
 | **8:30 AM** | Top 15 symbols pushed into TradingView scanner | Auto |
 | **8:45 AM** | ORH/ORL lock, signal monitor starts (15-min ORB) | Auto |
-| Every 3 min | Signal check + position manager | Auto |
+| Every 3 min | Signal check + RVol spike watch + position manager | Auto |
+| **9:30 AM** | Intraday scan #1 — catches flat-open breakouts, merges pool, re-pushes TV slots | Auto |
+| **11:30 AM** | Intraday scan #2 — catches mid-morning continuation movers, re-pushes TV slots | Auto |
 | 3:45 PM | EOD close all open positions | Auto |
 
 > ORB timeframe is set by `ORB_MINUTES` in `.env` (default: 15). Lock time = 8:30 + ORB_MINUTES.
@@ -27,6 +29,10 @@ tricity-scan         # Run premarket scanner manually
 tricity-status       # Check open positions
 tricity              # Today's trade report (P&L, R-multiples)
 tricity-all          # All-time performance report
+
+# Run intraday scanners manually
+python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_930
+python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_1130
 ```
 
 ---
@@ -169,15 +175,17 @@ T3_TRAIL_PCT=5             # T3 trailing stop %
 github.com/djmusstrd/tri-city-inator
 
 scripts/
-  tri_city_scanner.py        ← 7:30 AM premarket scan
-  tri_city_execute.py        ← signal execution + guards
+  tri_city_scanner.py          ← 7:30 AM premarket scan (gap-up candidates)
+  tri_city_intraday_scanner.py ← 9:30 AM + 11:30 AM intraday scan (flat-open breakouts)
+  tri_city_execute.py          ← signal execution + guards
   tri_city_position_manager.py ← T1/T2/T3 targets, EOD close
-  tri_city_backtest.py       ← historical simulation
-  journal_report.py          ← performance report
+  tri_city_backtest.py         ← historical simulation
+  journal_report.py            ← performance report
 pine/
-  tri_city_inator.pine       ← TradingView Pine v5 source
+  tri_city_inator.pine         ← TradingView Pine v5 source
 shared/
-  tri-city-candidates.json   ← scanner output (auto-updated)
-  tri-city-levels.json       ← ORH/ORL after lock (auto-updated)
-logs/                        ← executions, journal, daily reports
+  tri-city-candidates.json     ← scanner output (auto-updated, gap + intraday merged)
+  tri-city-levels.json         ← ORH/ORL after lock (auto-updated)
+  tri-city-rvol-state.json     ← RVol spike watch state (updated each monitor cycle)
+logs/                          ← executions, journal, daily reports
 ```
