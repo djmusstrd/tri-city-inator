@@ -14,11 +14,11 @@ i_size    = input.string("AUTO", "Table text size", options=["AUTO","SMALL","NOR
 i_pos     = input.string("Bottom Right", "Table position", options=["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"], group="Display")
 
 // ── Scanner inputs (in_2 … in_6) ──────────────────────────────────────────────
-i_orb_min = input.int(15,    "ORB Minutes (5 / 15 / 30)", minval=1,   group="Scanner")
+i_orb_min = input.int(5,     "ORB Minutes (5 / 15 / 30)", minval=1,   group="Scanner")
 i_rsi_len = input.int(14,    "RSI Length",                minval=1,   group="Scanner")
 i_ema_m   = input.int(21,    "EMA Mid",                   minval=1,   group="Scanner")
 i_hi_vol  = input.float(1.5, "High-Vol RVol threshold",   minval=0.1, group="Scanner")
-i_tf      = input.timeframe("15", "Scanner timeframe",               group="Scanner")
+i_tf      = input.timeframe("1",  "Scanner timeframe",               group="Scanner")
 
 // ── Symbol inputs (in_7 … in_21) ──────────────────────────────────────────────
 sym1  = input.symbol("NASDAQ:RKLB", "Symbol 1",  group="Symbols")
