@@ -76,14 +76,15 @@ NO_ENTRY_AFTER     = (_no_entry_hour, _no_entry_minute)
 RVOL_LOOKBACK      = int(os.getenv("RVOL_LOOKBACK",        "20"))
 
 # Setup-specific RVOL minimums (#4) — BREAKOUT needs most conviction
-# Raised to 2.5x for 5-min ORB: tighter window means more false breakouts without volume confirmation
-BREAKOUT_MIN_RVOL     = float(os.getenv("BREAKOUT_MIN_RVOL",     "2.5"))
+# BREAKOUT_MIN_RVOL restored to 2.0x — original floor that produced winning trades; 2.5x was too restrictive
+BREAKOUT_MIN_RVOL     = float(os.getenv("BREAKOUT_MIN_RVOL",     "2.0"))
 CONTINUATION_MIN_RVOL = float(os.getenv("CONTINUATION_MIN_RVOL", "1.75"))
 PULLBACK_MIN_RVOL     = float(os.getenv("PULLBACK_MIN_RVOL",     "1.5"))
 
-# 5-min ORB guardrails — BREAKOUT only
-# Short ORB windows can lock in an already-extended ORH; cap EMA dev and RSI to avoid chasing
-BREAKOUT_MAX_EMA_DEV  = float(os.getenv("BREAKOUT_MAX_EMA_DEV",  "8.0"))   # skip if price >8% above EMA20
+# BREAKOUT extension guardrails — blocks parabolic chasing without filtering legitimate setups
+# EMA Dev ceiling raised 8% → 12%: 15-min ORB breakouts naturally carry 8–12% dev at entry
+# RSI cap kept at 82: anything above is genuinely overbought on a breakout bar
+BREAKOUT_MAX_EMA_DEV  = float(os.getenv("BREAKOUT_MAX_EMA_DEV",  "12.0"))  # skip if price >12% above EMA20
 BREAKOUT_MAX_RSI      = float(os.getenv("BREAKOUT_MAX_RSI",      "82.0"))  # skip if RSI overbought
 
 # RVOL-based position size boost (#2)

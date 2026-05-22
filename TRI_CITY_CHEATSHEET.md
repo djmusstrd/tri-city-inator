@@ -99,7 +99,7 @@ Entry
 | Feature | Detail |
 |---------|--------|
 | **Size boost** | RVOL > 1.5x scales position up linearly to +25% at 3.0x |
-| **Setup floors** | BREAKOUT 2.5x · CONTINUATION 1.75x · PULLBACK 1.5x |
+| **Setup floors** | BREAKOUT 2.0x · CONTINUATION 1.75x · PULLBACK 1.5x |
 | **Collapse exit** | After T1 hit (breakeven set), exits if RVOL drops below 1.0x |
 | **Candle type** | PULLBACK: HAMMER = full size · NEUTRAL/BEARISH/DOJI = -25% size (auto-detected) |
 
@@ -125,9 +125,9 @@ meaning price and RSI are already extended when the signal fires.
 
 | Guard | Rule | Default | Override |
 |-------|------|---------|----------|
-| EMA Dev% ceiling | Skip BREAKOUT if EMA Dev% > 8% | 8.0% | `BREAKOUT_MAX_EMA_DEV` |
+| EMA Dev% ceiling | Skip BREAKOUT if EMA Dev% > 12% | 12.0% | `BREAKOUT_MAX_EMA_DEV` |
 | RSI cap | Skip BREAKOUT if RSI ≥ 82 | 82 | `BREAKOUT_MAX_RSI` |
-| RVol floor (raised) | BREAKOUT now requires 2.5x (was 2.0x) | 2.5x | `BREAKOUT_MIN_RVOL` |
+| RVol floor | BREAKOUT requires 2.0x (restored from 2.5x) | 2.0x | `BREAKOUT_MIN_RVOL` |
 
 > Also change **Scanner timeframe** in the TradingView Tri-City Inator indicator settings
 > from 15 min → 5 min to match `ORB_MINUTES=5`.
@@ -167,7 +167,7 @@ FREE_RIDE_PCT=3            # Profit % to lock free-ride stop
 T3_TRAIL_PCT=5             # T3 trailing stop %
 
 # RVOL (all have defaults — only set to override)
-# BREAKOUT_MIN_RVOL=2.5        # raised from 2.0 (5-min ORB guardrail)
+# BREAKOUT_MIN_RVOL=2.0        # restored to 2.0 (2.5x was too restrictive)
 # CONTINUATION_MIN_RVOL=1.75
 # PULLBACK_MIN_RVOL=1.5
 # RVOL_SIZE_BOOST_MAX=1.25
