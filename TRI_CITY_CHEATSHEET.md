@@ -99,7 +99,7 @@ Entry
 | Feature | Detail |
 |---------|--------|
 | **Size boost** | RVOL > 1.5x scales position up linearly to +25% at 3.0x |
-| **Setup floors** | BREAKOUT 2.0x · CONTINUATION 1.75x · PULLBACK 1.5x |
+| **Setup floors** | BREAKOUT 2.5x · CONTINUATION 1.75x · PULLBACK 1.5x |
 | **Collapse exit** | After T1 hit (breakeven set), exits if RVOL drops below 1.0x |
 | **Candle type** | PULLBACK: HAMMER = full size · NEUTRAL/BEARISH/DOJI = -25% size (auto-detected) |
 
@@ -117,6 +117,20 @@ Override in `.env`: `RVOL_SIZE_BOOST_MAX`, `RVOL_SIZE_BOOST_THRESH`, `RVOL_EXIT_
 | 6 | Candle type | PULLBACK non-hammer entries get -25% position size |
 
 Override: `PULLBACK_FAIL_BUFFER`, `EMA_STOP_BUFFER`, `RE_ENTRY_MAX_LOSS` in `.env`
+
+## 5-Min ORB Guardrails (2026-05-22)
+
+Applied to BREAKOUT only — short ORB windows can lock ORH during the opening spike,
+meaning price and RSI are already extended when the signal fires.
+
+| Guard | Rule | Default | Override |
+|-------|------|---------|----------|
+| EMA Dev% ceiling | Skip BREAKOUT if EMA Dev% > 8% | 8.0% | `BREAKOUT_MAX_EMA_DEV` |
+| RSI cap | Skip BREAKOUT if RSI ≥ 82 | 82 | `BREAKOUT_MAX_RSI` |
+| RVol floor (raised) | BREAKOUT now requires 2.5x (was 2.0x) | 2.5x | `BREAKOUT_MIN_RVOL` |
+
+> Also change **Scanner timeframe** in the TradingView Tri-City Inator indicator settings
+> from 15 min → 5 min to match `ORB_MINUTES=5`.
 
 ---
 
@@ -153,13 +167,15 @@ FREE_RIDE_PCT=3            # Profit % to lock free-ride stop
 T3_TRAIL_PCT=5             # T3 trailing stop %
 
 # RVOL (all have defaults — only set to override)
-# BREAKOUT_MIN_RVOL=2.0
+# BREAKOUT_MIN_RVOL=2.5        # raised from 2.0 (5-min ORB guardrail)
 # CONTINUATION_MIN_RVOL=1.75
 # PULLBACK_MIN_RVOL=1.5
 # RVOL_SIZE_BOOST_MAX=1.25
 # RVOL_SIZE_BOOST_THRESH=3.0
 # RVOL_EXIT_FLOOR=1.0
 # PM_MIN_RVOL=2.0          # Afternoon floor (after noon CT)
+# BREAKOUT_MAX_EMA_DEV=8.0 # 5-min ORB: skip if price >8% above EMA20
+# BREAKOUT_MAX_RSI=82.0    # 5-min ORB: skip if RSI overbought
 
 # Session
 # ORB_MINUTES=15           # 5, 15, or 30

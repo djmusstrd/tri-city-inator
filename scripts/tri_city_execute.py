@@ -76,9 +76,15 @@ NO_ENTRY_AFTER     = (_no_entry_hour, _no_entry_minute)
 RVOL_LOOKBACK      = int(os.getenv("RVOL_LOOKBACK",        "20"))
 
 # Setup-specific RVOL minimums (#4) — BREAKOUT needs most conviction
-BREAKOUT_MIN_RVOL     = float(os.getenv("BREAKOUT_MIN_RVOL",     "2.0"))
+# Raised to 2.5x for 5-min ORB: tighter window means more false breakouts without volume confirmation
+BREAKOUT_MIN_RVOL     = float(os.getenv("BREAKOUT_MIN_RVOL",     "2.5"))
 CONTINUATION_MIN_RVOL = float(os.getenv("CONTINUATION_MIN_RVOL", "1.75"))
 PULLBACK_MIN_RVOL     = float(os.getenv("PULLBACK_MIN_RVOL",     "1.5"))
+
+# 5-min ORB guardrails — BREAKOUT only
+# Short ORB windows can lock in an already-extended ORH; cap EMA dev and RSI to avoid chasing
+BREAKOUT_MAX_EMA_DEV  = float(os.getenv("BREAKOUT_MAX_EMA_DEV",  "8.0"))   # skip if price >8% above EMA20
+BREAKOUT_MAX_RSI      = float(os.getenv("BREAKOUT_MAX_RSI",      "82.0"))  # skip if RSI overbought
 
 # RVOL-based position size boost (#2)
 RVOL_SIZE_BOOST_MAX    = float(os.getenv("RVOL_SIZE_BOOST_MAX",    "1.25"))  # max multiplier
@@ -624,6 +630,24 @@ def main():
     if rvol is not None and rvol < rvol_floor and not args.dry_run:
         print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
         sys.exit(0)
+
+    # ── Guard 8: 5-min ORB BREAKOUT extension guards ──────────────────────────
+    # Short ORB windows can lock ORH during the first 5-min spike — price and RSI
+    # may already be extended before the signal fires.  Block entries that are
+    # chasing a parabolic move; the real setup will re-base and try again.
+    if args.setup == "BREAKOUT" and not args.dry_run:
+        if args.ema_dev > BREAKOUT_MAX_EMA_DEV:
+            print(
+                f"SKIP: BREAKOUT EMA Dev% {args.ema_dev:+.2f}% exceeds "
+                f"{BREAKOUT_MAX_EMA_DEV:.1f}% ceiling — too extended above EMA20."
+            )
+            sys.exit(0)
+        if args.rsi >= BREAKOUT_MAX_RSI:
+            print(
+                f"SKIP: BREAKOUT RSI {args.rsi:.1f} at or above {BREAKOUT_MAX_RSI:.0f} "
+                f"cap — overbought, skip and wait for re-base."
+            )
+            sys.exit(0)
 
     # ── Candle type (Finding 6) — auto-detect if not passed ───────────────────
     candle_type = (args.candle_type or "").upper() or get_candle_type(symbol)
