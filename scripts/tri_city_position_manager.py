@@ -89,18 +89,19 @@ def get_intraday_ema_vwap(symbol: str) -> tuple[float | None, float | None]:
 
         client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
-        # VWAP from snapshot
-        snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol))
+        # VWAP from snapshot (IEX feed — no SIP required)
+        snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol, feed="iex"))
         s = snap.get(symbol)
         vwap = float(s.daily_bar.vwap) if s and s.daily_bar else None
 
-        # EMA20 from 1-min bars (last 30 bars)
+        # EMA20 from 1-min bars via IEX feed
         now = datetime.now(CT)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame.Minute,
             start=now - timedelta(minutes=60),
             end=now,
+            feed="iex",
         )
         bars = client.get_stock_bars(req)
         df = bars.df
@@ -165,7 +166,7 @@ def get_rvol(symbol: str) -> float | None:
 
 def get_last_bar_close(symbol: str) -> float | None:
     """
-    Return the close of the most recent completed 1-min bar from Alpaca.
+    Return the close of the most recent completed 1-min bar from Alpaca (IEX feed).
     Used by Fix B so intrabar wicks (live tick) can't trigger a premature exit.
     Falls back to None if unavailable — caller uses live price as fallback.
     """
@@ -184,6 +185,7 @@ def get_last_bar_close(symbol: str) -> float | None:
             timeframe=TimeFrame.Minute,
             start=now - timedelta(minutes=45),
             end=now,
+            feed="iex",
         )
         bars = client.get_stock_bars(req)
         df   = bars.df

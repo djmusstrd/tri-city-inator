@@ -50,6 +50,7 @@ MIN_GAP_PCT   = float(os.getenv("MIN_GAP_PCT",  "3.0"))
 MIN_PRICE     = float(os.getenv("MIN_PRICE",    "2.0"))
 MAX_PRICE     = float(os.getenv("MAX_PRICE",    "500.0"))
 MIN_RVOL      = float(os.getenv("MIN_RVOL",     "1.5"))
+MIN_AVG_VOL   = float(os.getenv("MIN_AVG_VOL",  "500000"))
 PARABOLIC_VOL = 10.0
 
 W_GAP       = 0.35
@@ -80,6 +81,7 @@ def fetch_gappers() -> list[dict]:
         ss.add_filter("close",                    FilterOperator.ABOVE_OR_EQUAL, MIN_PRICE)
         ss.add_filter("close",                    FilterOperator.BELOW_OR_EQUAL, MAX_PRICE)
         ss.add_filter("relative_volume_10d_calc", FilterOperator.ABOVE_OR_EQUAL, MIN_RVOL)
+        ss.add_filter("average_volume_10d_calc",  FilterOperator.ABOVE_OR_EQUAL, MIN_AVG_VOL)
 
         df = ss.get()
         if df is None or df.empty:
@@ -203,7 +205,7 @@ def main():
     print(f"\n{'='*72}")
     print(f"  TRI-CITY PREMARKET SCANNER — {now.strftime('%Y-%m-%d %H:%M CT')}")
     print(f"  Source: TradingView Screener (Gap Gainers / Volume Gainers / % Gainers)")
-    print(f"  Filters: Gap >{MIN_GAP_PCT}% | RVol >{MIN_RVOL}x | Price ${MIN_PRICE}–${MAX_PRICE}")
+    print(f"  Filters: Gap >{MIN_GAP_PCT}% | RVol >{MIN_RVOL}x | AvgVol >{MIN_AVG_VOL:,.0f} | Price ${MIN_PRICE}–${MAX_PRICE}")
     print(f"{'='*72}")
 
     stocks = fetch_gappers()
