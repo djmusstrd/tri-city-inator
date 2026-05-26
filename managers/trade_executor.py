@@ -335,8 +335,12 @@ def place_trailing_stop(ticker: str, shares: int, trail_pct: float,
         return False
 
 
-def cancel_all_orders(ticker: str) -> bool:
-    """Cancel all open orders for a symbol."""
+def cancel_all_orders(ticker: str, wait_secs: float = 3.0, poll_interval: float = 0.5) -> bool:
+    """
+    Cancel all open orders for a symbol and wait until Alpaca confirms they
+    are no longer open (up to wait_secs). This prevents 'insufficient qty'
+    errors when close_position is called immediately after cancellation.
+    """
     client = _get_client()
     if client is None:
         return True
@@ -350,6 +354,25 @@ def cancel_all_orders(ticker: str) -> bool:
         for order in orders:
             client.cancel_order_by_id(order.id)
         logger.info(f"Cancelled {len(orders)} orders for {ticker}")
+
+        if not orders:
+            return True
+
+        # Poll until no open orders remain (or timeout)
+        import time as _time
+        elapsed = 0.0
+        while elapsed < wait_secs:
+            _time.sleep(poll_interval)
+            elapsed += poll_interval
+            remaining = client.get_orders(GetOrdersRequest(
+                symbol=ticker,
+                status=QueryOrderStatus.OPEN
+            ))
+            if not remaining:
+                logger.info(f"All orders cleared for {ticker} after {elapsed:.1f}s")
+                return True
+
+        logger.warning(f"cancel_all_orders: orders still open for {ticker} after {wait_secs}s")
         return True
     except Exception as e:
         logger.error(f"cancel_all_orders error: {e}")
