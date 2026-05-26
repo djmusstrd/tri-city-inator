@@ -119,7 +119,7 @@ def check_alpaca() -> tuple[str, str]:
     """Check Alpaca API connectivity."""
     try:
         sys.path.insert(0, str(WORKSPACE))
-        from managers.trade_executor import get_account_equity, get_buying_power
+        from scripts.tri_city_execute import get_account_equity, get_buying_power
         equity = get_account_equity()
         bp     = get_buying_power()
         if equity is None:
