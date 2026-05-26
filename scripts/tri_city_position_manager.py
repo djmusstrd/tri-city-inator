@@ -257,6 +257,19 @@ def check_failed_pullback(positions: list, today: str, now: datetime) -> list[st
                     f"— {PULLBACK_FAIL_BUFFER:.1%} below entry ${entry_price:.2f} "
                     f"and ORH ${orh:.2f} (P&L/share: ${pnl_per_share:+.4f})"
                 )
+                try:
+                    from managers.trade_journal import log_exit, fetch_exit_price
+                    exit_price_j = fetch_exit_price(ticker) or fix_b_price
+                    log_exit(
+                        symbol=ticker,
+                        setup=entry.get("setup", "UNKNOWN"),
+                        date=today,
+                        exit_price=exit_price_j,
+                        exit_reason=f"Failed pullback — bar close ${fix_b_price:.2f} below entry & ORH",
+                        shares=entry.get("position_size", 0),
+                    )
+                except Exception as _je:
+                    logger.warning(f"journal.log_exit failed for {ticker}: {_je}")
             else:
                 actions.append(f"PULLBACK FAIL CLOSE FAILED: {ticker} — check Alpaca")
             continue
@@ -284,6 +297,19 @@ def check_failed_pullback(positions: list, today: str, now: datetime) -> list[st
                             f"PULLBACK TIMEOUT: {ticker} @ ${curr_price:.2f} "
                             f"— {mins_open:.0f}min open, never reclaimed ORH ${orh:.2f}"
                         )
+                        try:
+                            from managers.trade_journal import log_exit, fetch_exit_price
+                            exit_price_j = fetch_exit_price(ticker) or curr_price
+                            log_exit(
+                                symbol=ticker,
+                                setup=entry.get("setup", "UNKNOWN"),
+                                date=today,
+                                exit_price=exit_price_j,
+                                exit_reason=f"Pullback timeout — {PULLBACK_TIMEOUT}min no ORH reclaim",
+                                shares=entry.get("position_size", 0),
+                            )
+                        except Exception as _je:
+                            logger.warning(f"journal.log_exit failed for {ticker}: {_je}")
                     else:
                         actions.append(f"PULLBACK TIMEOUT CLOSE FAILED: {ticker} — check Alpaca")
             except Exception as e:

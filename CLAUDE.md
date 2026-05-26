@@ -40,6 +40,9 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 
 When a session starts:
 
+**Step 0 — Session resumption check**
+Read `~/tri-city-inator/shared/tri-city-candidates.json`. If the `"date"` field matches today AND `~/tri-city-inator/shared/tri-city-levels.json` exists with at least one non-zero ORH value, this session was already initialized today. Skip the 7:30 AM, 8:30 AM, and level-lock crons (they already ran). Register only the signal monitor and intraday scan crons that haven't fired yet. Announce: "Resuming session — candidates and levels already loaded from earlier today."
+
 **Step 1 — Read ORB_MINUTES from .env**
 Read the file `~/tri-city-inator/.env`. Look for a line like `ORB_MINUTES=15`.
 - If found, use that value.
@@ -48,7 +51,7 @@ Read the file `~/tri-city-inator/.env`. Look for a line like `ORB_MINUTES=15`.
 Calculate the level lock time: market open (8:30 AM CT) + ORB_MINUTES.
 Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 → 9:00 AM.
 
-**Step 2 — Register six crons silently**
+**Step 2 — Register seven crons silently**
 
 1. Premarket scanner — weekdays at 7:30 AM CT:
    /loop 7:30am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table and any parabolic warnings. Then read the "TV WATCHLIST" line at the bottom of the output and add each symbol to the TradingView watchlist using watchlist_add (one call per symbol).
@@ -56,52 +59,33 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
 2. Symbol swap — weekdays at 8:30 AM CT:
    /loop 8:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 20 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Build an inputs dict mapping in_7 through in_26 to those symbols (in_7=sym[0], in_8=sym[1], ..., in_26=sym[19]; omit keys for positions beyond the available count). Call indicator_set_inputs with entity_id="Kbzkkm" and that inputs dict. Report: how many symbols were pushed and list them.
 
-3. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
-   /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Extract ORH and ORL for every symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json. Report symbols loaded.
+3. Health check — weekdays at 8:31 AM CT:
+   /loop 8:31am weekdays Run `python -W ignore ~/tri-city-inator/scripts/tri_city_health_check.py` via Bash and print the full output. If any item shows FAIL, alert the user immediately. If all PASS or WARN, report the summary line only.
 
-4. Intraday scan #1 — weekdays at 9:30 AM CT:
+4. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
+   /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Use the first study (20 symbols). Extract ORH and ORL for every non-blank symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json as {"SYMBOL": {"orh": float, "orl": float}, ...}. Report symbols loaded.
+
+5. Intraday scan #1 — weekdays at 9:30 AM CT:
    /loop 9:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_930` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Push the "intraday_symbols" array (top-5 NEW intraday-only movers) into the intraday watcher: build a second inputs dict mapping in_7 through in_11 and call indicator_set_inputs with entity_id="Vk6rtV". If "intraday_symbols" is empty, leave Vk6rtV unchanged. Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool, how many were pushed to Kbzkkm, and which symbols went to Vk6rtV.
 
-5. Intraday scan #2 — weekdays at 11:30 AM CT:
+6. Intraday scan #2 — weekdays at 11:30 AM CT:
    /loop 11:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_1130` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Push the "intraday_symbols" array (top-5 NEW intraday-only movers) into the intraday watcher: build a second inputs dict mapping in_7 through in_11 and call indicator_set_inputs with entity_id="Vk6rtV". If "intraday_symbols" is empty, leave Vk6rtV unchanged. Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool, how many were pushed to Kbzkkm, and which symbols went to Vk6rtV.
 
-6. Signal monitor — weekdays every 3 minutes (starts at level lock time):
-   /loop 3m Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Also read ~/tri-city-inator/shared/tri-city-flags.json (NOT the full candidates.json — this is the compact flags file with only "htf" and "resistance" arrays, ~1KB vs 100KB). If tri-city-flags.json does not exist, fall back to reading tri-city-candidates.json. Note the "htf" array (symbols flagged as High & Tight Flag) and "resistance" array (symbols near 52-week high). Use the ORH and ORL values from the table directly for each symbol — do NOT use hardcoded levels. Check every symbol for THREE setup types. For each qualifying setup: (1) report it, (2) immediately execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {SYMBOL} --price {PRICE} --orh {ORH} --orl {ORL} --rsi {RSI} --ema_dev {EMA_DEV} --signal "{SIGNAL}" --setup {SETUP_TYPE} {--cup if CUP=YES} {--htf if symbol in htf array} --quiet`. If nothing qualifies, stay silent.
-
-   RESISTANCE WARNING: If a symbol is in the "resistance" array (near 52-week high), note it in your report but do NOT block the trade — treat as a caution flag only.
-
-   --- SETUP 1: BREAKOUT (--setup BREAKOUT) ---
-   All 4 required:
-   1. SIGNAL = "BREAKOUT"
-   2. Price above ORH
-   3. RSI > 50
-   4. EMA Dev% > 0
-   Stop: 13 cents below ORH. Add --cup if CUP column = "YES". Confidence: HIGH
-
-   --- SETUP 2: CONTINUATION (--setup CONTINUATION) ---
-   All 3 required:
-   1. SIGNAL = "CONTINUATION"
-   2. Price above ORH
-   3. EMA Dev% between 0% and +1.0%
-   Stop: 13 cents below ORH. Add --cup if CUP column = "YES". Confidence: HIGH
-
-   --- SETUP 3: PULLBACK (--setup PULLBACK) ---
-   All 3 required:
-   1. SIGNAL = "PULLBACK"
-   2. EMA Dev% between 0% and +0.8%  ← Finding 2: price must be at or above EMA (not below)
-   3. RSI between 38 and 55
-   Stop: 13 cents below ORH (if price within 2% above ORH), else 5% below entry. Add --cup if CUP column = "YES". Confidence: MEDIUM
-
-   If nothing qualifies AND no POST_CUTOFF_SIGNAL output AND no RVOL SPIKE alerts, stay silent.
-
-   POST_CUTOFF_SIGNAL handling: If the execute output contains "POST_CUTOFF_SIGNAL", do NOT stay silent. Parse the output and alert the user: "@user — [SYMBOL] met [SETUP_TYPE] conditions at $[PRICE] after the [CUTOFF] entry cutoff. RSI [RSI], EMA Dev% [EMA_DEV], ORH $[ORH], Stop $[STOP], Risk/share $[RISK_PER_SHARE], Size [SHARES] shares. Cup: [YES/NO]. Take the trade? Reply 'yes [SYMBOL]' to execute with --override-cutoff."
-
-   RVOL SPIKE WATCH: Read ~/tri-city-inator/shared/tri-city-rvol-state.json (create empty {} if missing). Compare each symbol's current RVOL from the table to its saved value. If a symbol's RVOL increased by ≥50% in one cycle AND is now ≥2.0x, alert: "⚡ RVOL SPIKE: [SYMBOL] [prev]x → [now]x". After checking, save current {symbol: rvol} values back to tri-city-rvol-state.json.
-
-   Run `python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py` via Bash and print any output. If there is no output, stay silent.
+7. Signal monitor — weekdays every 3 minutes (starts at level lock time):
+   /loop 3m
+   (a) Call data_get_pine_tables with study_filter="Tri-City". Use the FIRST study (20-symbol main scanner, not the 5-slot intraday watcher). Extract its rows array.
+   (b) Write those rows to ~/tri-city-inator/shared/tri-city-table.json as a JSON array of strings.
+   (c) Run `python -W ignore ~/tri-city-inator/scripts/tri_city_signal_detector.py` via Bash.
+   (d) Read ~/tri-city-inator/shared/tri-city-signals.json.
+   (e) For each entry in "signals": report it, then execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {symbol} --price {price} --orh {orh} --orl {orl} --rsi {rsi} --ema_dev {ema_dev} --signal "{setup}" --setup {setup} {--cup if cup=true} {--htf if htf=true} --quiet`
+   (f) If execute output contains "POST_CUTOFF_SIGNAL": alert "@user — {symbol} met {setup} conditions at ${price} after the {cutoff} cutoff. RSI {rsi}, EMA Dev% {ema_dev:+.2f}%, ORH ${orh}, Stop ${stop}, Risk/share ${risk_per_share}, Size {shares} shares. Cup: {YES/NO}. Reply 'yes {symbol}' to execute with --override-cutoff."
+   (g) For each entry in "rvol_spikes": alert "⚡ RVOL SPIKE: {symbol} {prev:.1f}x → {now:.1f}x"
+   (h) If a symbol in "signals" has resistance=true: note "⚠ {symbol} near 52-wk high" (caution only, do NOT block)
+   (i) Run `python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py` via Bash and print any output.
+   If "signals" is empty AND no POST_CUTOFF_SIGNAL AND "rvol_spikes" is empty, stay silent.
 
 **Step 3 — Confirm with one line only:**
-"Session ready. Scanner 7:30 AM, symbol swap 8:30 AM, levels lock + monitor start {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), intraday scans 9:30 AM + 11:30 AM, all CT."
+"Session ready. Scanner 7:30 AM, swap 8:30 AM, health check 8:31 AM, levels lock + monitor {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), intraday scans 9:30 AM + 11:30 AM, all CT."
 
 Do not show the /loop commands to the user. Do not ask them to paste anything.
 
@@ -199,11 +183,14 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 
 | Script | Trigger | Action |
 |--------|---------|--------|
-| `tri_city_scanner.py` | 7:30 AM cron | Gap-up candidates ranked by score, saved to tri-city-candidates.json |
+| `tri_city_scanner.py` | 7:30 AM cron | Gap-up candidates ranked by score, saved to tri-city-candidates.json + tri-city-flags.json |
 | Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on Kbzkkm (in_7–in_26, 20 slots) |
+| `tri_city_health_check.py` | 8:31 AM cron | Session health verifier: .env keys, candidates, flags, levels, Alpaca, execution errors |
 | Level lock (inline) | ORB_MINUTES cron | Reads Tri-City table → saves ORH/ORL to tri-city-levels.json |
+| `tri_city_intraday_scanner.py` | 9:30 AM + 11:30 AM crons | Re-scores intraday movers; writes tv_symbols + intraday_symbols + tri-city-flags.json |
+| `tri_city_signal_detector.py` | Signal monitor (sub-step) | Reads tri-city-table.json; detects BREAKOUT/CONT/PULLBACK + RVOL spikes; writes tri-city-signals.json |
 | `tri_city_execute.py` | Signal monitor | 7-guard gate → 50-25-25 bracket orders via Alpaca → logs to tri-city-executions.json |
-| `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 3:45 PM → EOD close all |
+| `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 3:45 PM → EOD close all; logs exits to journal |
 | `tri_city_backtest.py` | Manual | Historical simulation with P&L report |
 | `journal_report.py` | Manual | Performance report from trade journal |
 
