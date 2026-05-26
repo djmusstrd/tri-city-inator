@@ -18,7 +18,12 @@ i_orb_min = input.int(5,     "ORB Minutes (5 / 15 / 30)", minval=1,   group="Sca
 i_rsi_len = input.int(14,    "RSI Length",                minval=1,   group="Scanner")
 i_ema_m   = input.int(21,    "EMA Mid",                   minval=1,   group="Scanner")
 i_hi_vol  = input.float(1.5, "High-Vol RVol threshold",   minval=0.1, group="Scanner")
-i_tf      = input.timeframe("1",  "Scanner timeframe",               group="Scanner")
+i_tf      = input.timeframe("5",  "Scanner timeframe",               group="Scanner")
+
+// Compute how many bars of scanner-TF data equal one ORB window
+// e.g. ORB_MINUTES=5, i_tf="5" → 1 bar; ORB_MINUTES=15, i_tf="5" → 3 bars
+_tf_mins  = math.max(1.0, nz(str.tonumber(i_tf), 1.0))
+_orb_bars = math.max(1, math.round(i_orb_min / _tf_mins))
 
 // ── Symbol inputs (in_7 … in_21) ──────────────────────────────────────────────
 sym1  = input.symbol("NASDAQ:RKLB", "Symbol 1",  group="Symbols")
@@ -57,7 +62,7 @@ _orb_close    = _session_open + i_orb_min * 60 * 1000
 // ── get_signal ────────────────────────────────────────────────────────────────
 // Returns: [price, rsi, ema_dev, orh, orl, cup, sig, rvol, sma_rising, near_52wk, htf]
 get_signal(sym) =>
-    [p, rsi_raw, ema_m_raw, vol_raw, avg_vol_raw, high_raw, low_raw, orb_hi_raw, orb_lo_raw] = request.security(sym, i_tf, [close, ta.rsi(close, i_rsi_len), ta.ema(close, i_ema_m), volume, ta.sma(volume, 10), high, low, ta.highest(high, i_orb_min), ta.lowest(low, i_orb_min)], lookahead=barmerge.lookahead_off)
+    [p, rsi_raw, ema_m_raw, vol_raw, avg_vol_raw, high_raw, low_raw, orb_hi_raw, orb_lo_raw] = request.security(sym, i_tf, [close, ta.rsi(close, i_rsi_len), ta.ema(close, i_ema_m), volume, ta.sma(volume, 10), high, low, ta.highest(high, _orb_bars), ta.lowest(low, _orb_bars)], lookahead=barmerge.lookahead_off)
     [sma50_d, sma100_d, hi52w_d, close65_d] = request.security(sym, "D", [ta.sma(close, 50), ta.sma(close, 100), ta.highest(close, 252), nz(close[65])], lookahead=barmerge.lookahead_off)
     rsi      = math.round(rsi_raw, 1)
     ema_dev  = math.round((p - ema_m_raw) / ema_m_raw * 100, 2)
