@@ -304,6 +304,18 @@ def get_account_equity() -> float | None:
         return None
 
 
+def get_buying_power() -> float | None:
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        return None
+    try:
+        from alpaca.trading.client import TradingClient
+        client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+        return float(client.get_account().buying_power)
+    except Exception as e:
+        logger.warning(f"get_buying_power: {e}")
+        return None
+
+
 # ── Candle type classifier (Finding 6) ────────────────────────────────────────
 
 def get_candle_type(symbol: str) -> str:
@@ -454,6 +466,17 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                     )
                 position_size = reduced
 
+    # Cap to 90% of available buying power to prevent insufficient-funds errors
+    bp = get_buying_power()
+    if bp is not None and bp > 0 and price > 0:
+        max_by_bp = max(1, int(bp * 0.90 / price))
+        if position_size > max_by_bp:
+            logger.info(
+                f"Buying power cap: {position_size}→{max_by_bp} shares "
+                f"(bp=${bp:,.0f}, price=${price:.2f})"
+            )
+            position_size = max_by_bp
+
     target_1 = round(price * (1 + T1_PCT / 100), 2)
     target_2 = round(price * (1 + T2_PCT / 100), 2)
     target_3 = round(price * (1 + T3_PCT / 100), 2)
@@ -550,6 +573,9 @@ def main():
                         help="Print signal without placing orders")
     parser.add_argument("--override-cutoff", action="store_true",
                         help="Allow entry past the time cutoff (user-confirmed late trade)")
+    parser.add_argument("--quiet",       action="store_true",
+                        help="Suppress routine guard-failure output; only print POST_CUTOFF_SIGNAL "
+                             "and execution results (reduces Claude context bloat on each 3-min cycle)")
     args = parser.parse_args()
 
     symbol = args.symbol.upper()
@@ -564,36 +590,52 @@ def main():
         sys.exit(0)
 
     cup_tag = " + CUP 🏆" if args.cup else ""
-    print("=" * 64)
-    print(f"TRI-CITY EXECUTE — {now.strftime('%Y-%m-%d %H:%M CT')}")
-    print(f"Symbol: {symbol} | Setup: {args.setup}{cup_tag} | Price: ${args.price:.2f}")
-    print(f"ORH: ${args.orh:.2f} | ORL: ${args.orl:.2f} | "
-          f"RSI: {args.rsi:.1f} | EMA Dev%: {args.ema_dev:+.2f}%")
-    print("=" * 64)
+    if not args.quiet:
+        print("=" * 64)
+        print(f"TRI-CITY EXECUTE — {now.strftime('%Y-%m-%d %H:%M CT')}")
+        print(f"Symbol: {symbol} | Setup: {args.setup}{cup_tag} | Price: ${args.price:.2f}")
+        print(f"ORH: ${args.orh:.2f} | ORL: ${args.orl:.2f} | "
+              f"RSI: {args.rsi:.1f} | EMA Dev%: {args.ema_dev:+.2f}%")
+        print("=" * 64)
 
     # ── Guard 1: already executed ──────────────────────────────────────────────
     if already_executed_today(symbol, args.setup):
-        print(f"SKIP: {args.setup} already executed for {symbol} today.")
+        if not args.quiet:
+            print(f"SKIP: {args.setup} already executed for {symbol} today.")
         sys.exit(0)
 
     # ── Guard 2: already in position ───────────────────────────────────────────
     if already_in_position(symbol):
-        print(f"SKIP: Already holding {symbol}.")
+        if not args.quiet:
+            print(f"SKIP: Already holding {symbol}.")
         sys.exit(0)
 
     # ── Guard 3: max positions ─────────────────────────────────────────────────
     if check_max_positions():
-        print(f"SKIP: Max positions ({MAX_POSITIONS}) already open.")
+        if not args.quiet:
+            print(f"SKIP: Max positions ({MAX_POSITIONS}) already open.")
         sys.exit(0)
 
     # ── Guard 4: daily loss limit ──────────────────────────────────────────────
     if check_daily_loss_limit(today):
-        print(f"SKIP: Daily loss limit (${MAX_DAILY_LOSS:.0f}) reached.")
+        if not args.quiet:
+            print(f"SKIP: Daily loss limit (${MAX_DAILY_LOSS:.0f}) reached.")
         sys.exit(0)
 
     # ── Guard 5: time window ───────────────────────────────────────────────────
     if not args.dry_run and not getattr(args, "override_cutoff", False) and check_time_window(now):
-        # Emit POST_CUTOFF_SIGNAL so Claude cron can alert the user
+        # Emit POST_CUTOFF_SIGNAL so Claude cron can alert the user (always printed, even in quiet mode)
+        if args.quiet:
+            # Print minimal header for POST_CUTOFF_SIGNAL so Claude can parse it
+            print(f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup} + CUP" if args.cup else
+                  f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup}")
+        else:
+            print("=" * 64)
+            print(f"TRI-CITY EXECUTE — {now.strftime('%Y-%m-%d %H:%M CT')}")
+            print(f"Symbol: {symbol} | Setup: {args.setup}{cup_tag} | Price: ${args.price:.2f}")
+            print(f"ORH: ${args.orh:.2f} | ORL: ${args.orl:.2f} | "
+                  f"RSI: {args.rsi:.1f} | EMA Dev%: {args.ema_dev:+.2f}%")
+            print("=" * 64)
         signal_preview = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev)
         risk_per_share = round(args.price - signal_preview["stop_loss"], 2)
         print(
@@ -609,7 +651,8 @@ def main():
     # ── Guard 6: market regime ─────────────────────────────────────────────────
     spy_regime, spy_change = get_spy_regime()
     spy_str = f"{spy_change:+.2f}%" if spy_change is not None else "N/A"
-    print(f"SPY regime: {spy_regime} ({spy_str})")
+    if not args.quiet:
+        print(f"SPY regime: {spy_regime} ({spy_str})")
     if spy_regime == "BEAR" and not args.dry_run:
         print(f"SKIP: SPY bearish ({spy_str}) — blocking LONG entries.")
         sys.exit(0)
@@ -627,9 +670,11 @@ def main():
     base_floor   = _setup_rvol_floor.get(args.setup, MIN_RVOL)
     rvol_floor   = max(base_floor, PM_MIN_RVOL) if is_afternoon else base_floor
     pm_note      = ", afternoon" if is_afternoon else ""
-    print(f"RVol: {rvol_str} ({args.setup} min {rvol_floor:.2f}x{pm_note})")
+    if not args.quiet:
+        print(f"RVol: {rvol_str} ({args.setup} min {rvol_floor:.2f}x{pm_note})")
     if rvol is not None and rvol < rvol_floor and not args.dry_run:
-        print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
+        if not args.quiet:
+            print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
         sys.exit(0)
 
     # ── Guard 8: 5-min ORB BREAKOUT extension guards ──────────────────────────

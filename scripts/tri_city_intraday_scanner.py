@@ -232,9 +232,9 @@ def merge_pools(existing: list[dict], new: list[dict]) -> list[dict]:
 
 # ── Top-15 with stickiness ────────────────────────────────────────────────────
 
-def compute_top15(ranked: list[dict], sticky: set[str]) -> list[str]:
+def compute_top20(ranked: list[dict], sticky: set[str]) -> list[str]:
     """
-    Pick top 15 tv_symbols for the indicator.
+    Pick top 20 tv_symbols for the indicator.
     Sticky symbols (open positions) get priority slots; remaining filled by rank.
     Parabolic stocks excluded from all slots.
     """
@@ -242,7 +242,7 @@ def compute_top15(ranked: list[dict], sticky: set[str]) -> list[str]:
     sticky_first = [s for s in non_para if s["symbol"] in sticky]
     rest         = [s for s in non_para if s["symbol"] not in sticky]
     ordered = sticky_first + rest
-    return [s.get("tv_symbol", f"NASDAQ:{s['symbol']}") for s in ordered][:15]
+    return [s.get("tv_symbol", f"NASDAQ:{s['symbol']}") for s in ordered][:20]
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -354,29 +354,53 @@ def main():
         print(f"  ★  HIGH & TIGHT FLAG (+90% in 3mo):       {htf_list}")
     print(f"{'─'*90}")
 
-    # Compute sticky top 15
+    # Compute sticky top 20 (combined pool → main scanner Kbzkkm)
     sticky     = get_open_position_symbols()
-    tv_symbols = compute_top15(ranked, sticky)
+    tv_symbols = compute_top20(ranked, sticky)
+
+    # Compute intraday-only top 5 (new movers not in gap-scan pool → intraday watcher Vk6rtV)
+    # These are ranked candidates whose source is intraday (not the morning gap scan)
+    intraday_only = [
+        s for s in ranked
+        if s.get("source") == args.source and not s["parabolic"]
+    ][:5]
+    intraday_symbols = [
+        s.get("tv_symbol", f"NASDAQ:{s['symbol']}") for s in intraday_only
+    ]
 
     if sticky:
         print(f"\n  STICKY (open positions, locked in): {sorted(sticky)}")
-    print(f"\n  TV WATCHLIST (top 15, sticky-first, parabolic excluded):")
+    print(f"\n  TV WATCHLIST (top 20, sticky-first, parabolic excluded):")
     print(f"  {', '.join(tv_symbols)}")
+    print(f"\n  INTRADAY WATCHER (top 5 new movers for Vk6rtV):")
+    print(f"  {', '.join(intraday_symbols) if intraday_symbols else '  (no new intraday movers)'}")
 
     if not args.dry_run:
         CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "date":       now.strftime("%Y-%m-%d"),
-            "scanned_at": now.strftime("%H:%M CT"),
-            "last_scan":  args.source,
-            "total":      len(ranked),
-            "tv_symbols": tv_symbols,
-            "htf":        htf_list,
-            "resistance": resistance_warn,
-            "candidates": ranked,
+            "date":             now.strftime("%Y-%m-%d"),
+            "scanned_at":       now.strftime("%H:%M CT"),
+            "last_scan":        args.source,
+            "total":            len(ranked),
+            "tv_symbols":       tv_symbols,
+            "intraday_symbols": intraday_symbols,
+            "htf":              htf_list,
+            "resistance":       resistance_warn,
+            "candidates":       ranked,
         }
         CANDIDATES.write_text(json.dumps(payload, indent=2))
         print(f"\n  Saved → {CANDIDATES}")
+
+        # Update compact flags file for signal monitor (htf + resistance only — ~1KB vs 100KB)
+        flags_file = CANDIDATES.parent / "tri-city-flags.json"
+        flags_file.write_text(json.dumps({
+            "date":       now.strftime("%Y-%m-%d"),
+            "updated_at": now.strftime("%H:%M CT"),
+            "source":     args.source,
+            "htf":        htf_list,
+            "resistance": resistance_warn,
+        }, indent=2))
+        print(f"  Saved → {flags_file}")
 
     print(f"\n{'='*72}\n")
 

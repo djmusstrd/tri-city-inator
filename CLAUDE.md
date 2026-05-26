@@ -23,7 +23,7 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 
 ```
 7:30 AM CT         Premarket scanner  →  gap-up candidates ranked by score, saved + pushed to TV watchlist
-8:30 AM CT         Symbol swap        →  top 15 candidates pushed into Tri-City scanner inputs
+8:30 AM CT         Symbol swap        →  top 20 candidates pushed into Tri-City scanner inputs
 8:30 + ORB_MINUTES Level lock         →  ORH/ORL finalize once opening range closes
 8:30 + ORB_MINUTES Signal monitor     →  every 3 min, checks all symbols for BREAKOUT/CONT/PULLBACK
                    Position manager   →  T1 breakeven, T2 lock, T3 trail, EOD close
@@ -54,19 +54,19 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
    /loop 7:30am weekdays Run the Tri-City premarket scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table and any parabolic warnings. Then read the "TV WATCHLIST" line at the bottom of the output and add each symbol to the TradingView watchlist using watchlist_add (one call per symbol).
 
 2. Symbol swap — weekdays at 8:30 AM CT:
-   /loop 8:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 15 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Build an inputs dict mapping in_7 through in_21 to those symbols (in_7=sym[0], in_8=sym[1], ..., in_21=sym[14]; omit keys for positions beyond the available count). Call indicator_set_inputs with entity_id="YcTiy2" and that inputs dict. Report: how many symbols were pushed and list them.
+   /loop 8:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 20 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Build an inputs dict mapping in_7 through in_26 to those symbols (in_7=sym[0], in_8=sym[1], ..., in_26=sym[19]; omit keys for positions beyond the available count). Call indicator_set_inputs with entity_id="Kbzkkm" and that inputs dict. Report: how many symbols were pushed and list them.
 
 3. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
    /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Extract ORH and ORL for every symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json. Report symbols loaded.
 
 4. Intraday scan #1 — weekdays at 9:30 AM CT:
-   /loop 9:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_930` via Bash and report the full output including any new additions and re-scored symbols. Then read the updated "TV WATCHLIST" line from the output and push new top-15 symbols into the indicator: build an inputs dict mapping in_7 through in_21 to those symbols and call indicator_set_inputs with entity_id="YcTiy2". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool and how many were pushed to TV.
+   /loop 9:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_930` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Push the "intraday_symbols" array (top-5 NEW intraday-only movers) into the intraday watcher: build a second inputs dict mapping in_7 through in_11 and call indicator_set_inputs with entity_id="Vk6rtV". If "intraday_symbols" is empty, leave Vk6rtV unchanged. Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool, how many were pushed to Kbzkkm, and which symbols went to Vk6rtV.
 
 5. Intraday scan #2 — weekdays at 11:30 AM CT:
-   /loop 11:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_1130` via Bash and report the full output including any new additions and re-scored symbols. Then read the updated "TV WATCHLIST" line from the output and push new top-15 symbols into the indicator: build an inputs dict mapping in_7 through in_21 to those symbols and call indicator_set_inputs with entity_id="YcTiy2". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool and how many were pushed to TV.
+   /loop 11:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_1130` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Push the "intraday_symbols" array (top-5 NEW intraday-only movers) into the intraday watcher: build a second inputs dict mapping in_7 through in_11 and call indicator_set_inputs with entity_id="Vk6rtV". If "intraday_symbols" is empty, leave Vk6rtV unchanged. Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool, how many were pushed to Kbzkkm, and which symbols went to Vk6rtV.
 
 6. Signal monitor — weekdays every 3 minutes (starts at level lock time):
-   /loop 3m Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Also read ~/tri-city-inator/shared/tri-city-candidates.json and note the "htf" array (symbols flagged as High & Tight Flag) and "resistance" array (symbols near 52-week high). Use the ORH and ORL values from the table directly for each symbol — do NOT use hardcoded levels. Check every symbol for THREE setup types. For each qualifying setup: (1) report it, (2) immediately execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {SYMBOL} --price {PRICE} --orh {ORH} --orl {ORL} --rsi {RSI} --ema_dev {EMA_DEV} --signal "{SIGNAL}" --setup {SETUP_TYPE} {--cup if CUP=YES} {--htf if symbol in htf array}`. If nothing qualifies, stay silent.
+   /loop 3m Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Also read ~/tri-city-inator/shared/tri-city-flags.json (NOT the full candidates.json — this is the compact flags file with only "htf" and "resistance" arrays, ~1KB vs 100KB). If tri-city-flags.json does not exist, fall back to reading tri-city-candidates.json. Note the "htf" array (symbols flagged as High & Tight Flag) and "resistance" array (symbols near 52-week high). Use the ORH and ORL values from the table directly for each symbol — do NOT use hardcoded levels. Check every symbol for THREE setup types. For each qualifying setup: (1) report it, (2) immediately execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {SYMBOL} --price {PRICE} --orh {ORH} --orl {ORL} --rsi {RSI} --ema_dev {EMA_DEV} --signal "{SIGNAL}" --setup {SETUP_TYPE} {--cup if CUP=YES} {--htf if symbol in htf array} --quiet`. If nothing qualifies, stay silent.
 
    RESISTANCE WARNING: If a symbol is in the "resistance" array (near 52-week high), note it in your report but do NOT block the trade — treat as a caution flag only.
 
@@ -113,9 +113,11 @@ Do not show the /loop commands to the user. Do not ask them to paste anything.
 |------|-------|
 | Layout | **TRI CITY INATOR III** (ID 168250176) |
 | Indicator | **Tri-City Inator** (Pine shorttitle: "Tri-City") |
-| Entity ID | `YcTiy2` |
-| Symbol inputs | `in_7` through `in_21` (15 slots) |
-| Table columns | SYMBOL · PRICE · RSI · EMA DEV% · RVOL · ORH/ORL · CUP · SIGNAL |
+| Entity ID | `Kbzkkm` |
+| Symbol inputs | `in_7` through `in_26` (20 slots) |
+| Table columns | SYMBOL · PRICE · RSI · EMA DEV% · RVOL · ORH/ORL · CUP · SMA↑ · SIGNAL |
+| Intraday Watcher Entity ID | `Vk6rtV` |
+| Intraday Watcher inputs | `in_7` through `in_11` (5 slots, same Tri-City code) |
 
 To read the live scanner table:
 ```
@@ -198,7 +200,7 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 | Script | Trigger | Action |
 |--------|---------|--------|
 | `tri_city_scanner.py` | 7:30 AM cron | Gap-up candidates ranked by score, saved to tri-city-candidates.json |
-| Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on IFZIpE (in_7–in_21) |
+| Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on Kbzkkm (in_7–in_26, 20 slots) |
 | Level lock (inline) | ORB_MINUTES cron | Reads Tri-City table → saves ORH/ORL to tri-city-levels.json |
 | `tri_city_execute.py` | Signal monitor | 7-guard gate → 50-25-25 bracket orders via Alpaca → logs to tri-city-executions.json |
 | `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 3:45 PM → EOD close all |
@@ -210,7 +212,7 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 ## TradingView Indicator
 
 The **Tri-City Inator** scanner must be visible on the **TRI CITY INATOR III** layout.
-It shows a live table with BREAKOUT / CONTINUATION / PULLBACK signals and cup detection for all 15 symbols.
+It shows a live table with BREAKOUT / CONTINUATION / PULLBACK signals and cup detection for all 20 symbols.
 
 The Python monitor handles all auto-execution — TradingView is for visualization and signal generation only.
 

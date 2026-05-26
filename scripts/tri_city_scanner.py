@@ -262,9 +262,9 @@ def main():
     tv_symbols = [
         s.get("tv_symbol", f"NASDAQ:{s['symbol']}")
         for s in ranked if not s["parabolic"]
-    ][:15]
+    ][:20]
 
-    print(f"\n  TV WATCHLIST (top 15, parabolic excluded, exchange-prefixed):")
+    print(f"\n  TV WATCHLIST (top 20, parabolic excluded, exchange-prefixed):")
     print(f"  {', '.join(tv_symbols)}")
 
     if not args.dry_run:
@@ -280,6 +280,17 @@ def main():
         }
         CANDIDATES.write_text(json.dumps(payload, indent=2))
         print(f"\n  Saved → {CANDIDATES}")
+
+        # Write compact flags file for signal monitor (htf + resistance only — ~1KB vs 100KB)
+        flags_file = CANDIDATES.parent / "tri-city-flags.json"
+        flags_file.write_text(json.dumps({
+            "date":       now.strftime("%Y-%m-%d"),
+            "updated_at": now.strftime("%H:%M CT"),
+            "source":     "gap_scan",
+            "htf":        htf_list,
+            "resistance": resistance_warn,
+        }, indent=2))
+        print(f"  Saved → {flags_file}")
 
     print(f"\n{'='*72}\n")
 
