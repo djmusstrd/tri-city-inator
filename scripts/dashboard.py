@@ -324,26 +324,7 @@ elif page == "Trade Log":
                 lambda v: f"{v:.0f}" if pd.notna(v) else "—"
             )
 
-        def row_bg(outcome: str) -> str:
-            mapping = {
-                "full_win": "rgba(38,166,154,0.15)",
-                "partial_win": "rgba(255,167,38,0.15)",
-                "loss": "rgba(239,83,80,0.15)",
-                "scratch": "rgba(120,144,156,0.10)",
-            }
-            return mapping.get(outcome, "")
-
-        if "Outcome" in tbl.columns:
-            raw_outcomes = fdf.sort_values("date", ascending=False)["outcome"].values
-        else:
-            raw_outcomes = [""] * len(tbl)
-
-        styled = tbl.style.apply(
-            lambda _: [f"background-color: {row_bg(raw_outcomes[i])}" for i in range(len(tbl))],
-            axis=None,
-        )
-
-        st.dataframe(styled, use_container_width=True, height=420)
+        st.dataframe(tbl, use_container_width=True, height=420)
 
         st.subheader("Trade Detail")
         symbols_available = sorted(fdf["symbol"].dropna().unique().tolist()) if "symbol" in fdf.columns else []
