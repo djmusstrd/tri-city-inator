@@ -167,6 +167,29 @@ Run `python -W ignore ~/tri-city-inator/scripts/journal_report.py` via Bash and 
 
 ---
 
+## Dashboard
+
+```bash
+# Launch trading dashboard (4 pages: Overview, Trade Log, Signal Analysis, Risk & Sizing)
+python3 -m streamlit run ~/tri-city-inator/scripts/dashboard.py
+```
+
+Reads from:
+- `logs/tri-city-journal.json` — closed trades (P&L, R, outcome, durations)
+- `logs/tri-city-executions.json` — entry signals (RSI, RVOL, EMA dev, cup, BB squeeze)
+
+Pages:
+| Page | Shows |
+|------|-------|
+| Overview | Cumulative P&L, daily P&L bars, outcome donut |
+| Trade Log | Sortable trade table + per-trade detail expander |
+| Signal Analysis | Win rate / Avg R by setup, RVOL+RSI histograms, cup/BB squeeze, P&L by hour |
+| Risk & Sizing | R distribution, streak analysis, rolling drawdown, risk scatter |
+
+> Uses `plotly.graph_objects` only — no `plotly.express` (avoids xarray/dask/scipy compat issue on Anaconda Python 3.9).
+
+---
+
 ## Manual Commands
 
 ```bash
