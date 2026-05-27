@@ -8,7 +8,7 @@ Actions (in order):
   1. T1 CHECK:    If price >= T1 → move stop to breakeven for remaining shares
   2. T2 CHECK:    If price >= T2 → move stop to T2 level (lock T2 gains on T3)
   3. TRAILING:    If in normal mode and price < EMA20 AND < VWAP → close T3 lot
-  4. EOD CLOSE:   If time >= 3:45 PM CT → cancel all orders → close all positions
+  4. EOD CLOSE:   If time >= 2:45 PM CT → cancel all orders → close all positions
 
 Usage:
     python -W ignore scripts/tri_city_position_manager.py
@@ -44,7 +44,7 @@ from managers.trade_executor import (
 )
 
 CT                  = ZoneInfo("America/Chicago")
-EOD_HOUR            = int(os.getenv("EOD_HOUR",             "15"))
+EOD_HOUR            = int(os.getenv("EOD_HOUR",             "14"))
 EOD_MINUTE          = int(os.getenv("EOD_MINUTE",           "45"))
 FREE_RIDE_PCT       = float(os.getenv("FREE_RIDE_PCT",       "3.0"))
 T3_TRAIL_PCT        = float(os.getenv("T3_TRAIL_PCT",        "5.0"))
@@ -619,7 +619,7 @@ def check_trailing(positions: list, today: str) -> list[str]:
 # ── Action 4: EOD close ────────────────────────────────────────────────────────
 
 def check_eod(positions: list, now: datetime) -> list[str]:
-    """Close all positions at 3:45 PM CT."""
+    """Close all positions at 2:45 PM CT (15 min before 3:00 PM CT market close)."""
     actions = []
     eod = now.replace(hour=EOD_HOUR, minute=EOD_MINUTE, second=0, microsecond=0)
 
@@ -635,7 +635,7 @@ def check_eod(positions: list, now: datetime) -> list[str]:
         ticker = pos["ticker"]
         cancel_all_orders(ticker)
         time.sleep(1.5)
-        success = close_position(ticker, reason="EOD auto-close 3:45 PM CT")
+        success = close_position(ticker, reason="EOD auto-close 2:45 PM CT")
         if success:
             actions.append(f"EOD CLOSED: {ticker} (was ${pos['current_price']:.2f})")
             try:

@@ -190,7 +190,7 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 | `tri_city_intraday_scanner.py` | 9:30 AM + 11:30 AM crons | Re-scores intraday movers; writes tv_symbols + intraday_symbols + tri-city-flags.json |
 | `tri_city_signal_detector.py` | Signal monitor (sub-step) | Reads tri-city-table.json; detects BREAKOUT/CONT/PULLBACK + RVOL spikes; writes tri-city-signals.json |
 | `tri_city_execute.py` | Signal monitor | 7-guard gate → 50-25-25 bracket orders via Alpaca → logs to tri-city-executions.json |
-| `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 3:45 PM → EOD close all; logs exits to journal |
+| `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 2:45 PM CT → EOD close all; logs exits to journal |
 | `tri_city_backtest.py` | Manual | Historical simulation with P&L report |
 | `journal_report.py` | Manual | Performance report from trade journal |
 
