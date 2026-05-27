@@ -163,7 +163,8 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 def calc_metrics(df: pd.DataFrame) -> dict:
     if df.empty or "realized_pnl" not in df.columns:
         return {"total_pnl": 0, "win_rate": 0, "avg_r": 0,
-                "profit_factor": 0, "total_trades": 0}
+                "profit_factor": 0, "total_trades": 0,
+                "sharpe_r": None, "calmar": None}
 
     total = len(df)
     wins = df["outcome"].isin(["full_win", "partial_win"]).sum() if "outcome" in df.columns else 0
@@ -172,12 +173,36 @@ def calc_metrics(df: pd.DataFrame) -> dict:
     gross_loss = abs(df.loc[df["realized_pnl"] < 0, "realized_pnl"].sum())
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
 
+    # Sharpe (R-based, trade-level)
+    sharpe_r = None
+    if "r_multiple" in df.columns:
+        r_vals = df["r_multiple"].dropna().tolist()
+        if len(r_vals) >= 3:
+            mean_r = sum(r_vals) / len(r_vals)
+            std_r  = math.sqrt(sum((x - mean_r) ** 2 for x in r_vals) / (len(r_vals) - 1))
+            if std_r > 0:
+                dates = df["date"].dropna().dt.date.nunique() if "date" in df.columns else 1
+                avg_per_day = len(r_vals) / max(dates, 1)
+                sharpe_r = round((mean_r / std_r) * math.sqrt(252 / max(avg_per_day, 0.01)), 2)
+
+    # Calmar ratio: total P&L / abs(max drawdown)
+    calmar = None
+    if "date" in df.columns:
+        daily = df.groupby(df["date"].dt.date)["realized_pnl"].sum().sort_index()
+        cum   = daily.cumsum()
+        max_dd = (cum - cum.cummax()).min()
+        total_pnl = df["realized_pnl"].sum()
+        if max_dd < 0 and total_pnl != 0:
+            calmar = round(total_pnl / abs(max_dd), 2)
+
     return {
-        "total_pnl": df["realized_pnl"].sum(),
-        "win_rate": (wins / total * 100) if total > 0 else 0,
-        "avg_r": df["r_multiple"].mean() if "r_multiple" in df.columns else 0,
+        "total_pnl":    df["realized_pnl"].sum(),
+        "win_rate":     (wins / total * 100) if total > 0 else 0,
+        "avg_r":        df["r_multiple"].mean() if "r_multiple" in df.columns else 0,
         "profit_factor": profit_factor,
         "total_trades": total,
+        "sharpe_r":     sharpe_r,
+        "calmar":       calmar,
     }
 
 
@@ -214,12 +239,16 @@ if page == "Overview":
     fdf = apply_filters(merged if not merged.empty else jdf)
     m = calc_metrics(fdf)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Total P&L", f"${'−' if m['total_pnl'] < 0 else ''}{abs(m['total_pnl']):,.2f}")
     c2.metric("Win Rate", f"{m['win_rate']:.1f}%")
     c3.metric("Avg R", f"{m['avg_r']:.2f}R" if not math.isnan(m["avg_r"]) else "—")
     c4.metric("Profit Factor", f"{m['profit_factor']:.2f}" if m['profit_factor'] != float('inf') else "∞")
     c5.metric("Total Trades", m["total_trades"])
+    c6.metric("Sharpe (R)", f"{m['sharpe_r']:+.2f}" if m["sharpe_r"] is not None else "—",
+              help="Trade-level Sharpe: mean(R)/std(R)×√(252/avg_trades_per_day). Preferred metric. ≥1.0 = good.")
+    c7.metric("Calmar", f"{m['calmar']:+.2f}" if m["calmar"] is not None else "—",
+              help="Total P&L / max drawdown. Higher = better drawdown-adjusted return.")
 
     st.divider()
 
@@ -299,9 +328,15 @@ elif page == "Trade Log":
 
         st.divider()
 
+        # Compute slippage if signal_price was logged alongside entry_price
+        if "signal_price" in fdf.columns and "entry_price" in fdf.columns:
+            fdf = fdf.copy()
+            fdf["slippage"] = (fdf["entry_price"] - fdf["signal_price"]).round(4)
+
         display_cols = {
             "date": "Date", "symbol": "Symbol", "setup": "Setup",
-            "entry_price": "Entry", "exit_price": "Exit",
+            "signal_price": "Signal $", "entry_price": "Fill $",
+            "slippage": "Slip", "exit_price": "Exit",
             "realized_pnl": "P&L ($)", "r_multiple": "R",
             "duration_min": "Duration (min)", "outcome": "Outcome",
         }
@@ -312,9 +347,11 @@ elif page == "Trade Log":
 
         if "Date" in tbl.columns:
             tbl["Date"] = tbl["Date"].dt.strftime("%Y-%m-%d")
-        for col in ["Entry", "Exit"]:
+        for col in ["Signal $", "Fill $", "Exit"]:
             if col in tbl.columns:
                 tbl[col] = tbl[col].apply(lambda v: f"${v:.2f}" if pd.notna(v) else "—")
+        if "Slip" in tbl.columns:
+            tbl["Slip"] = tbl["Slip"].apply(lambda v: f"{v:+.4f}" if pd.notna(v) else "—")
         if "P&L ($)" in tbl.columns:
             tbl["P&L ($)"] = tbl["P&L ($)"].apply(lambda v: f"${v:+,.2f}" if pd.notna(v) else "—")
         if "R" in tbl.columns:
@@ -466,6 +503,27 @@ elif page == "Signal Analysis":
         _base_layout(fig_rsi, "RSI at Entry Distribution", height=300, xaxis_title="RSI")
         st.plotly_chart(fig_rsi, use_container_width=True)
 
+    # ── EMA Dev% at entry ──
+    if "ema_dev" in fdf.columns and fdf["ema_dev"].notna().any():
+        st.subheader("EMA Dev% at Entry — Winners vs Losers")
+        ema_df = fdf[fdf["ema_dev"].notna()].copy()
+        wins_mask = is_win.reindex(ema_df.index)
+        fig_ema = go.Figure()
+        fig_ema.add_trace(go.Histogram(
+            x=ema_df.loc[wins_mask, "ema_dev"],
+            name="Win", marker_color=COLOR_WIN, opacity=0.7, nbinsx=20,
+        ))
+        fig_ema.add_trace(go.Histogram(
+            x=ema_df.loc[~wins_mask, "ema_dev"],
+            name="Loss/Scratch", marker_color=COLOR_LOSS, opacity=0.7, nbinsx=20,
+        ))
+        fig_ema.update_layout(barmode="overlay")
+        fig_ema.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.6,
+                          annotation_text="EMA", annotation_position="top right")
+        _base_layout(fig_ema, "EMA Dev% at Entry Distribution", height=300,
+                     xaxis_title="EMA Dev%")
+        st.plotly_chart(fig_ema, use_container_width=True)
+
     st.divider()
     col_cup, col_htf = st.columns(2)
 
@@ -601,6 +659,34 @@ elif page == "Risk & Sizing":
         sc2.metric("Worst Trade", f"{r_df['r_multiple'].min():+.2f}R")
         sc3.metric("Avg R (wins)", f"{r_df.loc[wins_mask,'r_multiple'].mean():+.2f}R" if wins_mask.any() else "—")
         sc4.metric("Avg R (losses)", f"{r_df.loc[~wins_mask,'r_multiple'].mean():+.2f}R" if (~wins_mask).any() else "—")
+
+    # ── Position size vs R ──
+    if "position_size" in fdf.columns and "r_multiple" in fdf.columns:
+        ps_df = fdf[fdf["position_size"].notna() & fdf["r_multiple"].notna()].copy()
+        if not ps_df.empty and "entry_price" in ps_df.columns:
+            ps_df["notional"] = ps_df["position_size"] * ps_df["entry_price"].fillna(0)
+            wins_mask_ps = is_win.reindex(ps_df.index)
+            ps_df["outcome_label"] = ps_df["outcome"].replace({
+                "full_win": "Full Win", "partial_win": "Partial Win",
+                "loss": "Loss", "scratch": "Scratch",
+            }) if "outcome" in ps_df.columns else "Unknown"
+            color_map_ps = {"Full Win": COLOR_WIN, "Partial Win": COLOR_PARTIAL,
+                            "Loss": COLOR_LOSS, "Scratch": COLOR_SCRATCH}
+            fig_ps = go.Figure()
+            for label, grp in ps_df.groupby("outcome_label"):
+                fig_ps.add_trace(go.Scatter(
+                    x=grp["notional"],
+                    y=grp["r_multiple"],
+                    mode="markers",
+                    name=label,
+                    marker=dict(color=color_map_ps.get(label, "#888"), size=8, opacity=0.8),
+                    text=grp["symbol"] if "symbol" in grp.columns else None,
+                    hovertemplate="<b>%{text}</b><br>Notional: $%{x:,.0f}<br>R: %{y:+.2f}<extra></extra>",
+                ))
+            fig_ps.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+            _base_layout(fig_ps, "Position Notional ($) vs R-Multiple", height=320,
+                         xaxis_title="Notional Value ($)", yaxis_title="R-Multiple")
+            st.plotly_chart(fig_ps, use_container_width=True)
 
     st.divider()
 

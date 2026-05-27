@@ -9,11 +9,13 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 WORKSPACE = Path.home() / "tri-city-inator"
@@ -57,6 +59,47 @@ def _build_equity_curve(closed: list) -> list[tuple[str, float, float]]:
         equity += by_date[d]
         curve.append((d, by_date[d], round(equity, 2)))
     return curve
+
+
+
+def _compute_sharpe_daily(closed: list) -> Tuple[Optional[float], int]:
+    """
+    Sharpe on daily P&L series. Annualized via √252.
+    Meaningful once you have ~20+ trading days. Dollar-denominated (changes with account size).
+    Returns (sharpe, num_days).
+    """
+    curve = _build_equity_curve(closed)
+    if len(curve) < 3:
+        return None, len(curve)
+    daily_pnls = [c[1] for c in curve]
+    n     = len(daily_pnls)
+    mean  = sum(daily_pnls) / n
+    std   = math.sqrt(sum((x - mean) ** 2 for x in daily_pnls) / (n - 1))
+    if std == 0:
+        return None, n
+    return round((mean / std) * math.sqrt(252), 2), n
+
+
+def _compute_sharpe_r(closed: list) -> Tuple[Optional[float], int]:
+    """
+    Sharpe on per-trade R-multiples. Size-independent and works on trade-level data.
+    Scales by √(252 / avg_trades_per_day) to annualize.
+    Meaningful at ~20+ trades. Preferred metric for evaluating edge consistency.
+    Returns (sharpe, num_trades).
+    """
+    r_vals = [t["r_multiple"] for t in closed if t.get("r_multiple") is not None]
+    n = len(r_vals)
+    if n < 3:
+        return None, n
+    mean = sum(r_vals) / n
+    std  = math.sqrt(sum((x - mean) ** 2 for x in r_vals) / (n - 1))
+    if std == 0:
+        return None, n
+    # Estimate avg trades per day from date range
+    dates = sorted({t["date"] for t in closed if t.get("date")})
+    avg_per_day = n / max(len(dates), 1)
+    annualize   = math.sqrt(252 / max(avg_per_day, 0.01))
+    return round((mean / std) * annualize, 2), n
 
 
 def print_rolling_drawdown(closed: list) -> None:
@@ -158,6 +201,23 @@ def print_report(trades: list, label: str = "ALL TIME"):
     print(f"  Profit Factor:  {m['profit_factor']}")
     print(f"  Gross Profit:   ${m['gross_profit']:>+8.2f}")
     print(f"  Gross Loss:     ${m['gross_loss']:>+8.2f}")
+
+    sharpe_r, n_trades = _compute_sharpe_r(closed)
+    sharpe_d, n_days   = _compute_sharpe_daily(closed)
+
+    def _rating(s):
+        if s is None: return "N/A"
+        return ("excellent" if s >= 2.0 else "good" if s >= 1.0 else
+                "below avg" if s >= 0.0 else "negative")
+
+    if sharpe_r is not None:
+        print(f"  Sharpe (R):     {sharpe_r:>+.2f}  ({n_trades} trades — {_rating(sharpe_r)})  ← preferred")
+    else:
+        print(f"  Sharpe (R):     N/A  ({n_trades} trades — need ≥3)")
+    if sharpe_d is not None:
+        print(f"  Sharpe (daily): {sharpe_d:>+.2f}  ({n_days} days — {_rating(sharpe_d)})")
+    else:
+        print(f"  Sharpe (daily): N/A  ({n_days} trading days — need ≥3)")
 
     if m.get("by_setup"):
         print("\n  BY SIGNAL TYPE:")

@@ -91,6 +91,14 @@ SPY_BEAR_THRESHOLD = float(os.getenv("SPY_BEAR_THRESHOLD", "-1.5"))
 _no_entry_hour     = int(os.getenv("NO_ENTRY_HOUR",        "13"))
 _no_entry_minute   = int(os.getenv("NO_ENTRY_MINUTE",      "0"))
 NO_ENTRY_AFTER     = (_no_entry_hour, _no_entry_minute)
+
+LUNCH_NO_ENTRY       = os.getenv("LUNCH_NO_ENTRY", "false").lower() == "true"
+_lunch_start_hour    = int(os.getenv("LUNCH_START_HOUR",   "11"))
+_lunch_start_minute  = int(os.getenv("LUNCH_START_MINUTE", "30"))
+_lunch_end_hour      = int(os.getenv("LUNCH_END_HOUR",     "12"))
+_lunch_end_minute    = int(os.getenv("LUNCH_END_MINUTE",   "30"))
+LUNCH_START          = (_lunch_start_hour, _lunch_start_minute)
+LUNCH_END            = (_lunch_end_hour,   _lunch_end_minute)
 RVOL_LOOKBACK      = int(os.getenv("RVOL_LOOKBACK",        "20"))
 
 # Setup-specific RVOL minimums (#4) — BREAKOUT needs most conviction
@@ -191,6 +199,23 @@ def check_max_positions() -> bool:
 # ── Guard 4: daily loss limit ──────────────────────────────────────────────────
 
 def check_daily_loss_limit(today: str) -> bool:
+    # Primary: live account equity vs yesterday's close — catches unrealized losses
+    if ALPACA_API_KEY and ALPACA_SECRET_KEY:
+        try:
+            from alpaca.trading.client import TradingClient
+            client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+            acct = client.get_account()
+            daily_pnl = float(acct.equity) - float(acct.last_equity)
+            if daily_pnl <= MAX_DAILY_LOSS:
+                logger.warning(
+                    f"Daily loss limit hit (live): ${daily_pnl:.2f} "
+                    f"(limit ${MAX_DAILY_LOSS:.0f}). No new entries."
+                )
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"check_daily_loss_limit (live): {e} — falling back to journal")
+    # Fallback: closed trades from journal only
     try:
         from managers.trade_journal import get_all_trades
         trades = get_all_trades()
@@ -200,12 +225,29 @@ def check_daily_loss_limit(today: str) -> bool:
         )
         if today_pnl <= MAX_DAILY_LOSS:
             logger.warning(
-                f"Daily loss limit hit: ${today_pnl:.2f} "
+                f"Daily loss limit hit (journal): ${today_pnl:.2f} "
                 f"(limit ${MAX_DAILY_LOSS:.0f}). No new entries."
             )
             return True
     except Exception as e:
-        logger.warning(f"check_daily_loss_limit: {e}")
+        logger.warning(f"check_daily_loss_limit (journal): {e}")
+    return False
+
+
+# ── Guard 4b: lunch no-entry window ───────────────────────────────────────────
+
+def check_lunch_window(now: datetime) -> bool:
+    """Block new entries during the lunch dead-zone (default 11:30–12:30 CT)."""
+    if not LUNCH_NO_ENTRY:
+        return False
+    start = now.replace(hour=LUNCH_START[0], minute=LUNCH_START[1], second=0, microsecond=0)
+    end   = now.replace(hour=LUNCH_END[0],   minute=LUNCH_END[1],   second=0, microsecond=0)
+    if start <= now < end:
+        logger.info(
+            f"Lunch window {LUNCH_START[0]:02d}:{LUNCH_START[1]:02d}–"
+            f"{LUNCH_END[0]:02d}:{LUNCH_END[1]:02d} CT — skipping entry."
+        )
+        return True
     return False
 
 
@@ -666,10 +708,12 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
                   scanner_signal: str | None = None,
                   orh: float | None = None,
                   orl: float | None = None,
-                  candle_type: str | None = None):
+                  candle_type: str | None = None,
+                  actual_fill_price: float | None = None):
     now = datetime.now(CT)
+    fill_price = actual_fill_price or signal["entry_price"]
     risk_dollars = round(
-        signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
+        signal["position_size"] * (fill_price - signal["stop_loss"]), 2
     )
     entry = {
         "date":           now.strftime("%Y-%m-%d"),
@@ -679,7 +723,8 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
         "cup":            cup,
         "bb_squeeze":     bb_squeeze,
         "candle_type":    candle_type or signal.get("candle_type"),
-        "entry_price":    signal["entry_price"],
+        "signal_price":   signal["entry_price"],
+        "entry_price":    fill_price,
         "stop_loss":      signal["stop_loss"],
         "target_1":       signal["target_1"],
         "target_2":       signal["target_2"],
@@ -805,6 +850,13 @@ def main():
             print(f"SKIP: Daily loss limit (${MAX_DAILY_LOSS:.0f}) reached.")
         sys.exit(0)
 
+    # ── Guard 4b: lunch no-entry window ───────────────────────────────────────
+    if not args.dry_run and check_lunch_window(now):
+        if not args.quiet:
+            print(f"SKIP: Lunch window {LUNCH_START[0]:02d}:{LUNCH_START[1]:02d}–"
+                  f"{LUNCH_END[0]:02d}:{LUNCH_END[1]:02d} CT — no new entries.")
+        sys.exit(0)
+
     # ── Guard 5: time window ───────────────────────────────────────────────────
     if not args.dry_run and not getattr(args, "override_cutoff", False) and check_time_window(now):
         # Emit POST_CUTOFF_SIGNAL so Claude cron can alert the user (always printed, even in quiet mode)
@@ -928,16 +980,19 @@ def main():
     result = execute_tri_city_trade("tri_city", signal)
 
     if result.success:
+        slippage = round(result.avg_fill_price - args.price, 4)
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
                       cup=args.cup, bb_squeeze=getattr(args, "bb_squeeze", False),
                       rsi=args.rsi, ema_dev=args.ema_dev,
                       scanner_signal=args.signal, orh=args.orh, orl=args.orl,
-                      candle_type=candle_type)
+                      candle_type=candle_type,
+                      actual_fill_price=result.avg_fill_price)
         print(f"\n✅ ORDERS PLACED")
         print(f"   Order ID: {result.order_id}")
         print(f"   Shares:   {result.shares_filled}")
-        print(f"   Fill ~:   ${result.avg_fill_price:.2f}")
+        print(f"   Signal:   ${args.price:.2f}")
+        print(f"   Fill:     ${result.avg_fill_price:.2f}  (slippage {slippage:+.4f})")
         print(f"   Logged:   {LOG_FILE}")
     else:
         print(f"\n❌ EXECUTION FAILED: {result.error}")

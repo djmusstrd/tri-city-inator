@@ -220,11 +220,22 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
             logger.warning(f"T3 trailing stop failed ({trail_err}) — falling back to bracket")
             place_bracket(t3_shares, target_3, "T3-fallback")
 
+        # Fetch actual fill price from T1 order (already filled by the time T3 trailing
+        # stop placement completes — _wait_for_fill confirmed it above)
+        actual_fill = entry_price
+        if order_id:
+            try:
+                filled_order = client.get_order_by_id(order_id)
+                if filled_order.filled_avg_price:
+                    actual_fill = float(filled_order.filled_avg_price)
+            except Exception:
+                pass
+
         return ExecutionResult(
             success=True,
             order_id=order_id,
             shares_filled=position_size,
-            avg_fill_price=entry_price
+            avg_fill_price=actual_fill
         )
 
     except Exception as e:

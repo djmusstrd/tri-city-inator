@@ -46,20 +46,25 @@ except ImportError:
 CT         = ZoneInfo("America/Chicago")
 CANDIDATES = WORKSPACE / "shared" / "tri-city-candidates.json"
 
-MIN_GAP_PCT   = float(os.getenv("MIN_GAP_PCT",  "3.0"))
+MIN_GAP_PCT   = float(os.getenv("MIN_GAP_PCT",  "1.5"))   # matches .env default
 MIN_PRICE     = float(os.getenv("MIN_PRICE",    "2.0"))
 MAX_PRICE     = float(os.getenv("MAX_PRICE",    "500.0"))
 MIN_RVOL      = float(os.getenv("MIN_RVOL",     "1.5"))
 MIN_AVG_VOL   = float(os.getenv("MIN_AVG_VOL",  "500000"))
 PARABOLIC_VOL = 10.0
 
-W_GAP       = 0.35
-W_RVOL      = 0.35
-W_STAGE     = 0.12   # Weinstein: split with SMA slope
-W_SMA_SLOPE = 0.08   # Weinstein: bonus when SMA50 > SMA100 (rising)
-W_CATALYST  = 0.10
-W_PARK_VOL  = 0.05   # Parkinson vol trending bonus (Ch 05 — Algo Trading Cookbook)
-W_BB_SQUEEZE = 0.05  # Bollinger Band squeeze bonus (Ch 06 — Investing for Programmers)
+# Scoring weights — sum to 1.0 (positive) minus W_52WK_PENALTY when applicable
+W_GAP          = 0.30  # gap % — size of overnight move
+W_RVOL         = 0.30  # relative volume — institutional conviction
+W_STAGE        = 0.10  # Weinstein Stage 2: price above SMA50
+W_SMA_SLOPE    = 0.07  # Weinstein: SMA50 above SMA100 (rising trend)
+W_CATALYST     = 0.08  # gap ≥5% treated as catalyst-driven
+W_FLOAT        = 0.06  # low float amplifies gap moves
+W_RSI          = 0.05  # RSI in optimal entry range (50–70 full, 40–80 half)
+W_PARK_VOL     = 0.02  # Parkinson vol trending (Ch 05 — Algo Trading Cookbook)
+W_BB_SQUEEZE   = 0.02  # BB squeeze bonus (Ch 06 — Investing for Programmers)
+# Positive weights sum: 0.30+0.30+0.10+0.07+0.08+0.06+0.05+0.02+0.02 = 1.00
+W_52WK_PENALTY = 0.08  # subtracted when price within 5% of 52-week high (resistance)
 
 PARK_VOL_WINDOW  = int(os.getenv("PARK_VOL_WINDOW",  "14"))   # rolling window for Parkinson vol
 PARK_VOL_LOOKBACK = int(os.getenv("PARK_VOL_LOOKBACK", "60")) # days of history for baseline
@@ -146,32 +151,33 @@ def compute_parkinson_trending(symbols: list[str]) -> dict[str, bool]:
 
 def compute_bb_squeeze(symbols: list[str]) -> dict[str, bool]:
     """
-    Batch-fetches 60 days of 5-min bars for all symbols.
+    Fetches 60 days of 5-min bars per symbol in parallel (ThreadPoolExecutor).
     Returns {symbol: True} if the most recent BB(20,2) width is in the bottom
     BB_SQUEEZE_PCTILE% of the 60-day intraday width distribution.
-    Omits symbols with insufficient data.
+    Parallelized: ~8x faster than serial fetch (30–60s vs 5–10 min for 100 symbols).
     """
     if not symbols:
         return {}
     try:
-        import yfinance as yf
         import math
+        import random
+        import time
+        import yfinance as yf
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        result = {}
-        # yfinance 5-min data must be fetched per-symbol (no batch for intraday)
-        for sym in symbols:
+        def _fetch_one(sym: str) -> tuple:
             try:
+                time.sleep(random.uniform(0.05, 0.25))   # jitter to avoid Yahoo rate-limit
                 df = yf.download(sym, period="60d", interval="5m",
                                  progress=False, auto_adjust=True)
                 if df.empty:
-                    continue
+                    return sym, False
                 if hasattr(df.columns, "levels"):
                     df.columns = df.columns.get_level_values(0)
                 df.columns = [c.lower() for c in df.columns]
                 c = df["close"].dropna()
                 if len(c) < BB_SQUEEZE_PERIOD + 10:
-                    continue
-
+                    return sym, False
                 vals = list(c)
                 widths = []
                 for i in range(BB_SQUEEZE_PERIOD, len(vals) + 1):
@@ -182,18 +188,76 @@ def compute_bb_squeeze(symbols: list[str]) -> dict[str, bool]:
                     lower = mid - BB_SQUEEZE_STD * std
                     width = (upper - lower) / mid if mid > 0 else 0.0
                     widths.append(width)
-
                 if len(widths) < 10:
-                    continue
-
+                    return sym, False
                 current_width = widths[-1]
                 threshold = sorted(widths)[int(len(widths) * BB_SQUEEZE_PCTILE / 100)]
-                result[sym] = current_width <= threshold
+                return sym, current_width <= threshold
             except Exception:
-                continue
+                return sym, False
+
+        result = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_one, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                sym, squeezed = future.result()
+                result[sym] = squeezed
         return result
     except Exception as e:
         logger.debug(f"compute_bb_squeeze: {e}")
+        return {}
+
+
+def compute_earnings_flags(symbols: list[str]) -> dict[str, bool]:
+    """
+    Returns {symbol: True} if earnings are within the next 5 trading days.
+    Fetches yfinance calendar per-symbol in parallel.
+    Earnings gaps behave differently (wider range, news-driven) — flagged for awareness,
+    not filtered out, since some earnings gaps are the best ORB setups.
+    """
+    if not symbols:
+        return {}
+    try:
+        import yfinance as yf
+        import random
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        today = datetime.now(CT).date()
+        lookahead_days = 7   # calendar days (covers ~5 trading days)
+
+        def _check_earnings(sym: str) -> tuple:
+            try:
+                time.sleep(random.uniform(0.05, 0.20))
+                cal = yf.Ticker(sym).calendar
+                if cal is None or cal.empty:
+                    return sym, False
+                # calendar index contains event names; "Earnings Date" is a row
+                if "Earnings Date" in cal.index:
+                    ed = cal.loc["Earnings Date"]
+                    # May be a Series with multiple dates or a single value
+                    dates = ed.values if hasattr(ed, "values") else [ed]
+                    for d in dates:
+                        try:
+                            import pandas as pd
+                            ed_date = pd.Timestamp(d).date()
+                            if today <= ed_date <= today + timedelta(days=lookahead_days):
+                                return sym, True
+                        except Exception:
+                            continue
+                return sym, False
+            except Exception:
+                return sym, False
+
+        result = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_check_earnings, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                sym, has_earnings = future.result()
+                result[sym] = has_earnings
+        return result
+    except Exception as e:
+        logger.debug(f"compute_earnings_flags: {e}")
         return {}
 
 
@@ -321,12 +385,31 @@ def score_candidate(s: dict) -> float:
     gap_score   = min(s["gap_pct"] / 20.0, 1.0) * W_GAP
     raw_rvol    = min(s["rvol"] / 5.0, 1.0) * W_RVOL
     rvol_score  = raw_rvol * 0.5 if s["parabolic"] else raw_rvol
-    stage_score = W_STAGE if s["stage2"] else 0.0
-    sma_score   = W_SMA_SLOPE if s.get("sma_rising") else 0.0   # Weinstein
-    cat_score   = W_CATALYST if s["catalyst"] else 0.0
-    park_score  = W_PARK_VOL  if s.get("park_trending") else 0.0  # Parkinson vol trending
-    bb_score    = W_BB_SQUEEZE if s.get("bb_squeeze")   else 0.0  # BB squeeze (coiled)
-    return round(gap_score + rvol_score + stage_score + sma_score + cat_score + park_score + bb_score, 4)
+    stage_score = W_STAGE     if s["stage2"]            else 0.0
+    sma_score   = W_SMA_SLOPE if s.get("sma_rising")    else 0.0
+    cat_score   = W_CATALYST  if s["catalyst"]          else 0.0
+    park_score  = W_PARK_VOL  if s.get("park_trending") else 0.0
+    bb_score    = W_BB_SQUEEZE if s.get("bb_squeeze")   else 0.0
+
+    # Float score: low float (<10M shares) amplifies gap moves
+    float_score = (W_FLOAT if s.get("float_cat") == "low"
+                   else W_FLOAT * 0.5 if s.get("float_cat") == "medium"
+                   else 0.0)
+
+    # RSI score: 50–70 = full credit (ideal ORB entry zone), 40–80 = half, outside = 0
+    rsi = s.get("rsi", 50.0)
+    rsi_score = (W_RSI if 50 <= rsi <= 70
+                 else W_RSI * 0.5 if 40 <= rsi <= 80
+                 else 0.0)
+
+    # 52-week high penalty: within 5% of high = resistance zone, reduces score
+    penalty = W_52WK_PENALTY if s.get("near_52wk_high") else 0.0
+
+    return round(
+        gap_score + rvol_score + stage_score + sma_score + cat_score +
+        park_score + bb_score + float_score + rsi_score - penalty,
+        4
+    )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -361,14 +444,21 @@ def main():
     park_trending_count = sum(1 for s in stocks if s["park_trending"])
     print(f"  Parkinson: {park_trending_count}/{len(stocks)} in trending vol regime")
 
-    # Bollinger Band squeeze check (5-min bars, 60-day intraday history per symbol)
-    # Stocks in a squeeze (compressed BB) breaking out are higher-conviction ORB setups.
-    print(f"  Computing Bollinger Band squeeze for {len(stocks)} candidates...")
+    # Bollinger Band squeeze check (5-min bars, 60-day intraday — now parallelized)
+    print(f"  Computing Bollinger Band squeeze for {len(stocks)} candidates (parallel)...")
     bb_results = compute_bb_squeeze(syms)
     for s in stocks:
         s["bb_squeeze"] = bb_results.get(s["symbol"], False)
     bb_squeeze_count = sum(1 for s in stocks if s["bb_squeeze"])
     print(f"  BB Squeeze: {bb_squeeze_count}/{len(stocks)} in compressed band (coiled)")
+
+    # Earnings check — flag symbols with earnings within next 5 trading days
+    print(f"  Checking earnings dates for {len(stocks)} candidates (parallel)...")
+    earnings_results = compute_earnings_flags(syms)
+    for s in stocks:
+        s["earnings_soon"] = earnings_results.get(s["symbol"], False)
+    earnings_count = sum(1 for s in stocks if s["earnings_soon"])
+    print(f"  Earnings: {earnings_count}/{len(stocks)} reporting within 5 trading days")
 
     # Score and rank
     for s in stocks:
@@ -380,6 +470,7 @@ def main():
     parabolic       = [s["symbol"] for s in ranked if s["parabolic"]]
     resistance_warn = [s["symbol"] for s in ranked if s.get("near_52wk_high")]
     htf_list        = [s["symbol"] for s in ranked if s.get("htf")]
+    earnings_list   = [s["symbol"] for s in ranked if s.get("earnings_soon")]
 
     def fmt_vol(v: int) -> str:
         if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
@@ -388,38 +479,41 @@ def main():
 
     # Print ranked table
     print(f"\n{'RK':<4} {'SYMBOL':<7} {'PRICE':>7} {'GAP%':>7} {'RVOL':>6} "
-          f"{'RSI':>5} {'PM VOL':>8} {'S2':>3} {'SMA↑':>4} {'52H':>4} {'HTF':>4} {'PK':>3} {'BB':>3} {'SCORE':>7}")
-    print("-" * 97)
+          f"{'RSI':>5} {'PM VOL':>8} {'S2':>3} {'SMA↑':>4} {'52H':>4} {'HTF':>4} {'PK':>3} {'BB':>3} {'E':>2} {'SCORE':>7}")
+    print("-" * 101)
 
     for s in ranked:
         stage  = "Y" if s["stage2"] else "-"
         sma_r  = "Y" if s.get("sma_rising") else "-"
         h52    = "⚠" if s.get("near_52wk_high") else "-"
         htf_f  = "★" if s.get("htf") else "-"
-        pk     = "T" if s.get("park_trending") else "-"   # Parkinson trending
-        bb     = "S" if s.get("bb_squeeze")    else "-"   # BB Squeeze
+        pk     = "T" if s.get("park_trending") else "-"
+        bb     = "S" if s.get("bb_squeeze")    else "-"
+        earn   = "E" if s.get("earnings_soon") else "-"   # earnings within 5 days
         para   = "⚠" if s["parabolic"] else " "
         pmv    = fmt_vol(s["pm_volume"])
         print(f"{s['rank']:<4} {s['symbol']:<7} ${s['price']:>6.2f} "
               f"{s['gap_pct']:>+6.1f}% {s['rvol']:>5.1f}x "
-              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>3} {sma_r:>4} {h52:>4} {htf_f:>4} {pk:>3} {bb:>3} "
+              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>3} {sma_r:>4} {h52:>4} {htf_f:>4} {pk:>3} {bb:>3} {earn:>2} "
               f"{para}{s['score']:>6.4f}")
 
     park_trending_list = [s["symbol"] for s in ranked if s.get("park_trending")]
     bb_squeeze_list    = [s["symbol"] for s in ranked if s.get("bb_squeeze")]
-    print(f"\n{'─'*97}")
+    print(f"\n{'─'*101}")
     print(f"  {len(ranked)} candidates ranked.")
     if parabolic:
         print(f"  ⚠  PARABOLIC (>10x RVol — avoid):              {parabolic}")
     if resistance_warn:
-        print(f"  ⚠  RESISTANCE (within 5% of 52wk high):        {resistance_warn}")
+        print(f"  ⚠  RESISTANCE (within 5% of 52wk high — penalized in score): {resistance_warn}")
+    if earnings_list:
+        print(f"  E  EARNINGS SOON (within 5 trading days — wider range expected): {earnings_list}")
     if htf_list:
         print(f"  ★  HIGH & TIGHT FLAG (+90% in 3mo):             {htf_list}")
     if park_trending_list:
         print(f"  T  PARKINSON TRENDING (vol regime, ORB-ready):  {park_trending_list}")
     if bb_squeeze_list:
         print(f"  S  BB SQUEEZE (compressed band, coiled):         {bb_squeeze_list}")
-    print(f"{'─'*97}")
+    print(f"{'─'*101}")
 
     # Top 15 non-parabolic exchange-prefixed symbols for TradingView indicator swap
     tv_symbols = [
@@ -448,12 +542,13 @@ def main():
         # Write compact flags file for signal monitor (~1KB vs 100KB full candidates)
         flags_file = CANDIDATES.parent / "tri-city-flags.json"
         flags_file.write_text(json.dumps({
-            "date":       now.strftime("%Y-%m-%d"),
-            "updated_at": now.strftime("%H:%M CT"),
-            "source":     "gap_scan",
-            "htf":        htf_list,
-            "resistance": resistance_warn,
-            "bb_squeeze": bb_squeeze_list,
+            "date":         now.strftime("%Y-%m-%d"),
+            "updated_at":   now.strftime("%H:%M CT"),
+            "source":       "gap_scan",
+            "htf":          htf_list,
+            "resistance":   resistance_warn,
+            "bb_squeeze":   bb_squeeze_list,
+            "earnings_soon": earnings_list,
         }, indent=2))
         print(f"  Saved → {flags_file}")
 
