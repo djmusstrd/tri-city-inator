@@ -186,11 +186,11 @@ def no_data_msg(label: str = "No trades in selected range"):
 
 
 def _base_layout(fig, title: str, height: int = 320, **kwargs):
+    kwargs.setdefault("margin", dict(t=40, b=20))
     fig.update_layout(
         title=title,
         template=PLOTLY_THEME,
         height=height,
-        margin=dict(t=40, b=20),
         **kwargs,
     )
     return fig
