@@ -63,21 +63,21 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
    /loop 8:31am weekdays Run `python -W ignore ~/tri-city-inator/scripts/tri_city_health_check.py` via Bash and print the full output. If any item shows FAIL, alert the user immediately. If all PASS or WARN, report the summary line only.
 
 4. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
-   /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Tri-City". Use the first study (20 symbols). Extract ORH and ORL for every non-blank symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json as {"SYMBOL": {"orh": float, "orl": float}, ...}. Report symbols loaded.
+   /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Inator". Use the first study (20 symbols). Extract ORH and ORL for every non-blank symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json as {"SYMBOL": {"orh": float, "orl": float}, ...}. Report symbols loaded.
 
 5. Intraday scan #1 — weekdays at 9:30 AM CT:
-   /loop 9:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_930` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Push the "intraday_symbols" array (top-5 NEW intraday-only movers) into the intraday watcher: build a second inputs dict mapping in_7 through in_11 and call indicator_set_inputs with entity_id="Vk6rtV". If "intraday_symbols" is empty, leave Vk6rtV unchanged. Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool, how many were pushed to Kbzkkm, and which symbols went to Vk6rtV.
+   /loop 9:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_930` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool and how many were pushed to Kbzkkm.
 
 6. Intraday scan #2 — weekdays at 11:30 AM CT:
-   /loop 11:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_1130` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Push the "intraday_symbols" array (top-5 NEW intraday-only movers) into the intraday watcher: build a second inputs dict mapping in_7 through in_11 and call indicator_set_inputs with entity_id="Vk6rtV". If "intraday_symbols" is empty, leave Vk6rtV unchanged. Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool, how many were pushed to Kbzkkm, and which symbols went to Vk6rtV.
+   /loop 11:30am weekdays Run the Tri-City intraday scanner: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_intraday_scanner.py --source intraday_1130` via Bash and report the full output including any new additions and re-scored symbols. Then read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Report: how many new symbols were added to the pool and how many were pushed to Kbzkkm.
 
 7. Signal monitor — weekdays every 3 minutes (starts at level lock time):
    /loop 3m
-   (a) Call data_get_pine_tables with study_filter="Tri-City". Use the FIRST study (20-symbol main scanner, not the 5-slot intraday watcher). Extract its rows array.
+   (a) Call data_get_pine_tables with study_filter="Inator". Use the FIRST study (20-symbol main scanner, not the 5-slot intraday watcher). Extract its rows array.
    (b) Write those rows to ~/tri-city-inator/shared/tri-city-table.json as a JSON array of strings.
    (c) Run `python -W ignore ~/tri-city-inator/scripts/tri_city_signal_detector.py` via Bash.
    (d) Read ~/tri-city-inator/shared/tri-city-signals.json.
-   (e) For each entry in "signals": report it, then execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {symbol} --price {price} --orh {orh} --orl {orl} --rsi {rsi} --ema_dev {ema_dev} --signal "{setup}" --setup {setup} {--cup if cup=true} {--htf if htf=true} --quiet`
+   (e) For each entry in "signals": report it, then execute via Bash: `python -W ignore ~/tri-city-inator/scripts/tri_city_execute.py --symbol {symbol} --price {price} --orh {orh} --orl {orl} --rsi {rsi} --ema_dev {ema_dev} --rvol {rvol} --signal "{setup}" --setup {setup} {--cup if cup=true} {--htf if htf=true} {--bb_squeeze if bb_squeeze=true} --quiet`
    (f) If execute output contains "POST_CUTOFF_SIGNAL": alert "@user — {symbol} met {setup} conditions at ${price} after the {cutoff} cutoff. RSI {rsi}, EMA Dev% {ema_dev:+.2f}%, ORH ${orh}, Stop ${stop}, Risk/share ${risk_per_share}, Size {shares} shares. Cup: {YES/NO}. Reply 'yes {symbol}' to execute with --override-cutoff."
    (g) For each entry in "rvol_spikes": alert "⚡ RVOL SPIKE: {symbol} {prev:.1f}x → {now:.1f}x"
    (h) If a symbol in "signals" has resistance=true: note "⚠ {symbol} near 52-wk high" (caution only, do NOT block)
@@ -100,13 +100,12 @@ Do not show the /loop commands to the user. Do not ask them to paste anything.
 | Entity ID | `Kbzkkm` |
 | Symbol inputs | `in_7` through `in_26` (20 slots) |
 | Table columns | SYMBOL · PRICE · RSI · EMA DEV% · RVOL · ORH/ORL · CUP · SMA↑ · SIGNAL |
-| Intraday Watcher Entity ID | `Vk6rtV` |
-| Intraday Watcher inputs | `in_7` through `in_11` (5 slots, same Tri-City code) |
 
 To read the live scanner table:
 ```
-data_get_pine_tables with study_filter="Tri-City"
+data_get_pine_tables with study_filter="Inator"
 ```
+> Note: use `"Inator"` not `"Tri-City"` — the Positions tracker is also named "Tri-City Positions" and would otherwise appear first.
 
 ---
 
@@ -114,6 +113,7 @@ data_get_pine_tables with study_filter="Tri-City"
 
 | # | Guard | Default | Effect |
 |---|-------|---------|--------|
+| 0 | Pre-ORB block | 8:30+ORB_MINUTES | No entries before opening range closes |
 | 1 | Already executed today | — | No duplicate setups per symbol |
 | 2 | Already in position | — | No duplicate symbols |
 | 3 | Max positions | 3 | No more than 3 concurrent trades |
@@ -146,6 +146,24 @@ Entry → T1 (+10%): sell 50% → move stop to breakeven
        → T3 (+30%): trail 25% → exits on EMA20 + VWAP breach or EOD
        → Stop (-5%):  all shares exit
 ```
+
+---
+
+## END SESSION
+
+When the user says **"end session"** (or any clear variant: "end the session", "close out", "wrap up", "shut it down"), execute this shutdown sequence immediately — no confirmation needed:
+
+**Step 1 — Stop all crons**
+Call `CronList` to get all active cron IDs. Call `CronDelete` for each one. If no crons are running, skip.
+
+**Step 2 — Close all open positions**
+Run `python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod` via Bash.
+
+**Step 3 — Print today's summary**
+Run `python -W ignore ~/tri-city-inator/scripts/journal_report.py` via Bash and show the output.
+
+**Step 4 — Confirm shutdown with one line:**
+"Session ended. All crons stopped, positions closed. [X trades today, net P&L $X]"
 
 ---
 

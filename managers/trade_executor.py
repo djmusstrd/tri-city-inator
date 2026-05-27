@@ -114,27 +114,87 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
 
     try:
         from alpaca.trading.requests import (
-            MarketOrderRequest, StopLossRequest, TakeProfitRequest
+            MarketOrderRequest, TrailingStopOrderRequest,
+            StopLossRequest, TakeProfitRequest
         )
         from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 
         side = OrderSide.BUY if direction == "BULLISH" else OrderSide.SELL
 
-        def place_bracket(qty: int, take_profit: float, label: str) -> str | None:
+        def place_bracket(qty: int, take_profit: float, label: str,
+                          tif: TimeInForce = TimeInForce.GTC) -> str | None:
             kwargs = dict(
                 symbol=ticker,
                 qty=qty,
                 side=side,
-                time_in_force=TimeInForce.DAY,
+                # GTC so stop/target bracket legs persist past market close (Papp Ch 11)
+                # Falls back to DAY automatically for HTB assets (Alpaca error 42210000)
+                time_in_force=tif,
                 order_class=OrderClass.BRACKET,
             )
             if stop_loss > 0:
                 kwargs["stop_loss"] = StopLossRequest(stop_price=round(stop_loss, 2))
             if take_profit > 0:
                 kwargs["take_profit"] = TakeProfitRequest(limit_price=round(take_profit, 2))
-            order = client.submit_order(MarketOrderRequest(**kwargs))
+            try:
+                order = client.submit_order(MarketOrderRequest(**kwargs))
+            except Exception as e:
+                # 42210000 = HTB asset — only DAY orders allowed, GTC rejected
+                if "42210000" in str(e) and tif == TimeInForce.GTC:
+                    logger.warning(
+                        f"HTB asset detected — GTC rejected (42210000), retrying {label} with DAY"
+                    )
+                    return place_bracket(qty, take_profit, label, tif=TimeInForce.DAY)
+                raise
             oid = str(order.id)
-            logger.info(f"  ✅ {label} bracket: {oid} ({qty} shares @ T {take_profit:.2f})")
+            logger.info(f"  ✅ {label} bracket ({tif.value}): {oid} ({qty} shares @ T {take_profit:.2f})")
+            return oid
+
+        def _wait_for_fill(order_id: str, timeout: float = 30.0, poll: float = 1.0) -> bool:
+            """Poll until order is filled or timeout. Returns True if filled."""
+            import time as _t
+            from alpaca.trading.enums import OrderStatus
+            elapsed = 0.0
+            while elapsed < timeout:
+                _t.sleep(poll)
+                elapsed += poll
+                try:
+                    o = client.get_order_by_id(order_id)
+                    if o.status == OrderStatus.FILLED:
+                        logger.info(f"  Order {order_id} filled after {elapsed:.1f}s")
+                        return True
+                    if o.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED,
+                                    OrderStatus.REJECTED):
+                        logger.warning(f"  Order {order_id} terminal status: {o.status}")
+                        return False
+                except Exception as pe:
+                    logger.warning(f"  Poll error for {order_id}: {pe}")
+            logger.warning(f"  Fill poll timed out for {order_id} after {timeout}s")
+            return False
+
+        def place_trailing_stop_after_fill(
+            entry_order_id: str, qty: int, trail_pct: float, label: str
+        ) -> str | None:
+            """
+            Alpaca native trailing stop for T3 (Papp Ch 11, Table 11.3).
+            Must be placed AFTER entry fill — Alpaca rejects SELL while BUY is still open
+            (error 40310000: cannot open short sell while long buy order is open).
+            Polls entry order fill before submitting, falls back to bracket on timeout.
+            """
+            filled = _wait_for_fill(entry_order_id)
+            if not filled:
+                logger.warning(f"  {label}: entry not filled in time — skipping trailing stop")
+                return None
+            req = TrailingStopOrderRequest(
+                symbol=ticker,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                trail_percent=trail_pct,
+            )
+            order = client.submit_order(req)
+            oid = str(order.id)
+            logger.info(f"  ✅ {label} trailing stop: {oid} ({qty} shares @ -{trail_pct:.1f}% trail)")
             return oid
 
         # T1 bracket (50%)
@@ -143,8 +203,22 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
         # T2 bracket (25%)
         place_bracket(t2_shares, target_2, "T2")
 
-        # T3 bracket (25%) — position manager will trail this
-        place_bracket(t3_shares, target_3, "T3")
+        # T3 (25%) — Alpaca native trailing stop placed AFTER entry fills (Papp Ch 11)
+        # Polls T1 order until filled (≤30s), then submits trailing stop.
+        # Falls back to bracket if fill times out or trailing stop API fails.
+        t3_trail_pct = float(os.getenv("T3_TRAIL_PCT", "3"))
+        try:
+            if order_id:
+                t3_oid = place_trailing_stop_after_fill(order_id, t3_shares, t3_trail_pct, "T3")
+                if t3_oid is None:
+                    # Fill timed out — use bracket as fallback
+                    place_bracket(t3_shares, target_3, "T3-fallback")
+            else:
+                place_bracket(t3_shares, target_3, "T3-fallback")
+        except Exception as trail_err:
+            # Any other trailing stop failure → bracket fallback
+            logger.warning(f"T3 trailing stop failed ({trail_err}) — falling back to bracket")
+            place_bracket(t3_shares, target_3, "T3-fallback")
 
         return ExecutionResult(
             success=True,

@@ -391,14 +391,21 @@ def main():
         CANDIDATES.write_text(json.dumps(payload, indent=2))
         print(f"\n  Saved → {CANDIDATES}")
 
-        # Update compact flags file for signal monitor (htf + resistance only — ~1KB vs 100KB)
+        # Update compact flags file — preserve bb_squeeze from premarket scanner
         flags_file = CANDIDATES.parent / "tri-city-flags.json"
+        existing_bb_squeeze = []
+        if flags_file.exists():
+            try:
+                existing_bb_squeeze = json.loads(flags_file.read_text()).get("bb_squeeze", [])
+            except Exception:
+                pass
         flags_file.write_text(json.dumps({
             "date":       now.strftime("%Y-%m-%d"),
             "updated_at": now.strftime("%H:%M CT"),
             "source":     args.source,
             "htf":        htf_list,
             "resistance": resistance_warn,
+            "bb_squeeze": existing_bb_squeeze,
         }, indent=2))
         print(f"  Saved → {flags_file}")
 

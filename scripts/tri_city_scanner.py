@@ -59,9 +59,13 @@ W_STAGE     = 0.12   # Weinstein: split with SMA slope
 W_SMA_SLOPE = 0.08   # Weinstein: bonus when SMA50 > SMA100 (rising)
 W_CATALYST  = 0.10
 W_PARK_VOL  = 0.05   # Parkinson vol trending bonus (Ch 05 — Algo Trading Cookbook)
+W_BB_SQUEEZE = 0.05  # Bollinger Band squeeze bonus (Ch 06 — Investing for Programmers)
 
 PARK_VOL_WINDOW  = int(os.getenv("PARK_VOL_WINDOW",  "14"))   # rolling window for Parkinson vol
 PARK_VOL_LOOKBACK = int(os.getenv("PARK_VOL_LOOKBACK", "60")) # days of history for baseline
+BB_SQUEEZE_PERIOD   = int(os.getenv("BB_SQUEEZE_PERIOD",   "20"))   # BB period (standard)
+BB_SQUEEZE_STD      = float(os.getenv("BB_SQUEEZE_STD",     "2.0"))  # BB std multiplier
+BB_SQUEEZE_PCTILE   = float(os.getenv("BB_SQUEEZE_PCTILE",  "20.0")) # bottom N% = squeeze
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -127,6 +131,69 @@ def compute_parkinson_trending(symbols: list[str]) -> dict[str, bool]:
         return result
     except Exception as e:
         logger.debug(f"compute_parkinson_trending: {e}")
+        return {}
+
+
+# ── Bollinger Band Squeeze (Ch 06 — Investing for Programmers / Papp) ────────
+# A BB squeeze means current band width is compressed relative to its recent
+# intraday history — coiled energy that often precedes a strong directional move.
+# Per Papp: MUST use 5-minute bars, not daily closes — daily timeframe destroys
+# the signal for intraday ORB entries (timeframe mismatch).
+# We compute BB(20, 2) width = (upper - lower) / middle on 5-min closes.
+# yfinance gives up to 60 days of 5-min history — sufficient baseline.
+# If the most recent bar's width is in the bottom BB_SQUEEZE_PCTILE% of
+# the 60-day distribution, the stock is intraday-squeezed → score bonus.
+
+def compute_bb_squeeze(symbols: list[str]) -> dict[str, bool]:
+    """
+    Batch-fetches 60 days of 5-min bars for all symbols.
+    Returns {symbol: True} if the most recent BB(20,2) width is in the bottom
+    BB_SQUEEZE_PCTILE% of the 60-day intraday width distribution.
+    Omits symbols with insufficient data.
+    """
+    if not symbols:
+        return {}
+    try:
+        import yfinance as yf
+        import math
+
+        result = {}
+        # yfinance 5-min data must be fetched per-symbol (no batch for intraday)
+        for sym in symbols:
+            try:
+                df = yf.download(sym, period="60d", interval="5m",
+                                 progress=False, auto_adjust=True)
+                if df.empty:
+                    continue
+                if hasattr(df.columns, "levels"):
+                    df.columns = df.columns.get_level_values(0)
+                df.columns = [c.lower() for c in df.columns]
+                c = df["close"].dropna()
+                if len(c) < BB_SQUEEZE_PERIOD + 10:
+                    continue
+
+                vals = list(c)
+                widths = []
+                for i in range(BB_SQUEEZE_PERIOD, len(vals) + 1):
+                    window = vals[i - BB_SQUEEZE_PERIOD:i]
+                    mid = sum(window) / BB_SQUEEZE_PERIOD
+                    std = math.sqrt(sum((v - mid) ** 2 for v in window) / BB_SQUEEZE_PERIOD)
+                    upper = mid + BB_SQUEEZE_STD * std
+                    lower = mid - BB_SQUEEZE_STD * std
+                    width = (upper - lower) / mid if mid > 0 else 0.0
+                    widths.append(width)
+
+                if len(widths) < 10:
+                    continue
+
+                current_width = widths[-1]
+                threshold = sorted(widths)[int(len(widths) * BB_SQUEEZE_PCTILE / 100)]
+                result[sym] = current_width <= threshold
+            except Exception:
+                continue
+        return result
+    except Exception as e:
+        logger.debug(f"compute_bb_squeeze: {e}")
         return {}
 
 
@@ -257,8 +324,9 @@ def score_candidate(s: dict) -> float:
     stage_score = W_STAGE if s["stage2"] else 0.0
     sma_score   = W_SMA_SLOPE if s.get("sma_rising") else 0.0   # Weinstein
     cat_score   = W_CATALYST if s["catalyst"] else 0.0
-    park_score  = W_PARK_VOL if s.get("park_trending") else 0.0  # Parkinson vol trending
-    return round(gap_score + rvol_score + stage_score + sma_score + cat_score + park_score, 4)
+    park_score  = W_PARK_VOL  if s.get("park_trending") else 0.0  # Parkinson vol trending
+    bb_score    = W_BB_SQUEEZE if s.get("bb_squeeze")   else 0.0  # BB squeeze (coiled)
+    return round(gap_score + rvol_score + stage_score + sma_score + cat_score + park_score + bb_score, 4)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -286,12 +354,21 @@ def main():
     # Parkinson volatility regime check (batch yfinance — top 100 symbols only)
     # Identifies trending vs mean-reverting stocks before scoring; boosts trending ones.
     print(f"  Computing Parkinson volatility regime for {len(stocks)} candidates...")
-    park_syms    = [s["symbol"] for s in stocks]
-    park_results = compute_parkinson_trending(park_syms)
+    syms         = [s["symbol"] for s in stocks]
+    park_results = compute_parkinson_trending(syms)
     for s in stocks:
         s["park_trending"] = park_results.get(s["symbol"], False)
     park_trending_count = sum(1 for s in stocks if s["park_trending"])
     print(f"  Parkinson: {park_trending_count}/{len(stocks)} in trending vol regime")
+
+    # Bollinger Band squeeze check (5-min bars, 60-day intraday history per symbol)
+    # Stocks in a squeeze (compressed BB) breaking out are higher-conviction ORB setups.
+    print(f"  Computing Bollinger Band squeeze for {len(stocks)} candidates...")
+    bb_results = compute_bb_squeeze(syms)
+    for s in stocks:
+        s["bb_squeeze"] = bb_results.get(s["symbol"], False)
+    bb_squeeze_count = sum(1 for s in stocks if s["bb_squeeze"])
+    print(f"  BB Squeeze: {bb_squeeze_count}/{len(stocks)} in compressed band (coiled)")
 
     # Score and rank
     for s in stocks:
@@ -311,8 +388,8 @@ def main():
 
     # Print ranked table
     print(f"\n{'RK':<4} {'SYMBOL':<7} {'PRICE':>7} {'GAP%':>7} {'RVOL':>6} "
-          f"{'RSI':>5} {'PM VOL':>8} {'S2':>3} {'SMA↑':>4} {'52H':>4} {'HTF':>4} {'PK':>3} {'SCORE':>7}")
-    print("-" * 91)
+          f"{'RSI':>5} {'PM VOL':>8} {'S2':>3} {'SMA↑':>4} {'52H':>4} {'HTF':>4} {'PK':>3} {'BB':>3} {'SCORE':>7}")
+    print("-" * 97)
 
     for s in ranked:
         stage  = "Y" if s["stage2"] else "-"
@@ -320,25 +397,29 @@ def main():
         h52    = "⚠" if s.get("near_52wk_high") else "-"
         htf_f  = "★" if s.get("htf") else "-"
         pk     = "T" if s.get("park_trending") else "-"   # Parkinson trending
+        bb     = "S" if s.get("bb_squeeze")    else "-"   # BB Squeeze
         para   = "⚠" if s["parabolic"] else " "
         pmv    = fmt_vol(s["pm_volume"])
         print(f"{s['rank']:<4} {s['symbol']:<7} ${s['price']:>6.2f} "
               f"{s['gap_pct']:>+6.1f}% {s['rvol']:>5.1f}x "
-              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>3} {sma_r:>4} {h52:>4} {htf_f:>4} {pk:>3} "
+              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>3} {sma_r:>4} {h52:>4} {htf_f:>4} {pk:>3} {bb:>3} "
               f"{para}{s['score']:>6.4f}")
 
     park_trending_list = [s["symbol"] for s in ranked if s.get("park_trending")]
-    print(f"\n{'─'*91}")
+    bb_squeeze_list    = [s["symbol"] for s in ranked if s.get("bb_squeeze")]
+    print(f"\n{'─'*97}")
     print(f"  {len(ranked)} candidates ranked.")
     if parabolic:
-        print(f"  ⚠  PARABOLIC (>10x RVol — avoid):           {parabolic}")
+        print(f"  ⚠  PARABOLIC (>10x RVol — avoid):              {parabolic}")
     if resistance_warn:
-        print(f"  ⚠  RESISTANCE (within 5% of 52wk high):     {resistance_warn}")
+        print(f"  ⚠  RESISTANCE (within 5% of 52wk high):        {resistance_warn}")
     if htf_list:
-        print(f"  ★  HIGH & TIGHT FLAG (+90% in 3mo):          {htf_list}")
+        print(f"  ★  HIGH & TIGHT FLAG (+90% in 3mo):             {htf_list}")
     if park_trending_list:
-        print(f"  T  PARKINSON TRENDING (vol regime, ORB-ready): {park_trending_list}")
-    print(f"{'─'*86}")
+        print(f"  T  PARKINSON TRENDING (vol regime, ORB-ready):  {park_trending_list}")
+    if bb_squeeze_list:
+        print(f"  S  BB SQUEEZE (compressed band, coiled):         {bb_squeeze_list}")
+    print(f"{'─'*97}")
 
     # Top 15 non-parabolic exchange-prefixed symbols for TradingView indicator swap
     tv_symbols = [
@@ -358,12 +439,13 @@ def main():
             "tv_symbols": tv_symbols,
             "htf":        htf_list,
             "resistance": resistance_warn,
+            "bb_squeeze": bb_squeeze_list,
             "candidates": ranked,
         }
         CANDIDATES.write_text(json.dumps(payload, indent=2))
         print(f"\n  Saved → {CANDIDATES}")
 
-        # Write compact flags file for signal monitor (htf + resistance only — ~1KB vs 100KB)
+        # Write compact flags file for signal monitor (~1KB vs 100KB full candidates)
         flags_file = CANDIDATES.parent / "tri-city-flags.json"
         flags_file.write_text(json.dumps({
             "date":       now.strftime("%Y-%m-%d"),
@@ -371,6 +453,7 @@ def main():
             "source":     "gap_scan",
             "htf":        htf_list,
             "resistance": resistance_warn,
+            "bb_squeeze": bb_squeeze_list,
         }, indent=2))
         print(f"  Saved → {flags_file}")
 

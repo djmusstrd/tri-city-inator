@@ -1,0 +1,138 @@
+//@version=6
+indicator("Tri-City Positions", shorttitle="TC-Pos", overlay=false)
+
+// ── Slot 1 (in_0 … in_6) ─────────────────────────────────────────
+sym1    = input.string("", "Sym",    group="Slot 1")
+entry1  = input.float(0.0, "Entry", group="Slot 1")
+shares1 = input.float(0.0, "Qty",   group="Slot 1")
+t1_1    = input.float(0.0, "T1",    group="Slot 1")
+t2_1    = input.float(0.0, "T2",    group="Slot 1")
+stop1   = input.float(0.0, "Stop",  group="Slot 1")
+stat1   = input.string("", "Status",group="Slot 1")
+
+// ── Slot 2 (in_7 … in_13) ────────────────────────────────────────
+sym2    = input.string("", "Sym",    group="Slot 2")
+entry2  = input.float(0.0, "Entry", group="Slot 2")
+shares2 = input.float(0.0, "Qty",   group="Slot 2")
+t1_2    = input.float(0.0, "T1",    group="Slot 2")
+t2_2    = input.float(0.0, "T2",    group="Slot 2")
+stop2   = input.float(0.0, "Stop",  group="Slot 2")
+stat2   = input.string("", "Status",group="Slot 2")
+
+// ── Slot 3 (in_14 … in_20) ───────────────────────────────────────
+sym3    = input.string("", "Sym",    group="Slot 3")
+entry3  = input.float(0.0, "Entry", group="Slot 3")
+shares3 = input.float(0.0, "Qty",   group="Slot 3")
+t1_3    = input.float(0.0, "T1",    group="Slot 3")
+t2_3    = input.float(0.0, "T2",    group="Slot 3")
+stop3   = input.float(0.0, "Stop",  group="Slot 3")
+stat3   = input.string("", "Status",group="Slot 3")
+
+// ── Slot 4 (in_21 … in_27) ───────────────────────────────────────
+sym4    = input.string("", "Sym",    group="Slot 4")
+entry4  = input.float(0.0, "Entry", group="Slot 4")
+shares4 = input.float(0.0, "Qty",   group="Slot 4")
+t1_4    = input.float(0.0, "T1",    group="Slot 4")
+t2_4    = input.float(0.0, "T2",    group="Slot 4")
+stop4   = input.float(0.0, "Stop",  group="Slot 4")
+stat4   = input.string("", "Status",group="Slot 4")
+
+// ── Slot 5 (in_28 … in_34) ───────────────────────────────────────
+sym5    = input.string("", "Sym",    group="Slot 5")
+entry5  = input.float(0.0, "Entry", group="Slot 5")
+shares5 = input.float(0.0, "Qty",   group="Slot 5")
+t1_5    = input.float(0.0, "T1",    group="Slot 5")
+t2_5    = input.float(0.0, "T2",    group="Slot 5")
+stop5   = input.float(0.0, "Stop",  group="Slot 5")
+stat5   = input.string("", "Status",group="Slot 5")
+
+// ── Live prices (1-min bars) ──────────────────────────────────────
+p1 = request.security(sym1 != "" ? sym1 : syminfo.tickerid, "1", close)
+p2 = request.security(sym2 != "" ? sym2 : syminfo.tickerid, "1", close)
+p3 = request.security(sym3 != "" ? sym3 : syminfo.tickerid, "1", close)
+p4 = request.security(sym4 != "" ? sym4 : syminfo.tickerid, "1", close)
+p5 = request.security(sym5 != "" ? sym5 : syminfo.tickerid, "1", close)
+
+// ── Helpers ───────────────────────────────────────────────────────
+f_pnl_pct(price, entry) =>
+    entry > 0 and not na(price) ? (price - entry) / entry * 100 : float(na)
+
+f_pnl_dol(price, entry, qty) =>
+    entry > 0 and not na(price) ? (price - entry) * qty : float(na)
+
+f_bg(pnl_pct, price, stp) =>
+    color result = color.gray
+    if na(pnl_pct)
+        result := color.gray
+    else if stp > 0 and not na(price) and price <= stp * 1.005
+        result := color.orange
+    else if pnl_pct >= 10.0
+        result := color.teal
+    else if pnl_pct > 0.0
+        result := color.new(color.green, 60)
+    else if pnl_pct < 0.0
+        result := color.new(color.red, 60)
+    result
+
+// ── Table ─────────────────────────────────────────────────────────
+var table t = table.new(position.top_left, 9, 6,
+     border_width=1, border_color=color.new(color.gray, 70),
+     frame_width=1,  frame_color=color.new(color.gray, 50))
+
+if barstate.islast
+    hdr = color.new(color.navy, 20)
+    tw  = color.white
+
+    table.cell(t, 0, 0, "SYMBOL", bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 1, 0, "PRICE",  bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 2, 0, "ENTRY",  bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 3, 0, "P&L $",  bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 4, 0, "P&L %",  bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 5, 0, "T1",     bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 6, 0, "T2",     bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 7, 0, "STOP",   bgcolor=hdr, text_color=tw, text_size=size.small)
+    table.cell(t, 8, 0, "STATUS", bgcolor=hdr, text_color=tw, text_size=size.small)
+
+    syms    = array.from(sym1,    sym2,    sym3,    sym4,    sym5)
+    prices  = array.from(p1,      p2,      p3,      p4,      p5)
+    entries = array.from(entry1,  entry2,  entry3,  entry4,  entry5)
+    qtys    = array.from(shares1, shares2, shares3, shares4, shares5)
+    t1s     = array.from(t1_1,    t1_2,    t1_3,    t1_4,    t1_5)
+    t2s     = array.from(t2_1,    t2_2,    t2_3,    t2_4,    t2_5)
+    stps    = array.from(stop1,   stop2,   stop3,   stop4,   stop5)
+    stats   = array.from(stat1,   stat2,   stat3,   stat4,   stat5)
+
+    for i = 0 to 4
+        row   = i + 1
+        sym   = array.get(syms,    i)
+        price = array.get(prices,  i)
+        ent   = array.get(entries, i)
+        qty   = array.get(qtys,    i)
+        t1v   = array.get(t1s,     i)
+        t2v   = array.get(t2s,     i)
+        stp   = array.get(stps,    i)
+        stat  = array.get(stats,   i)
+
+        pp = f_pnl_pct(price, ent)
+        pd = f_pnl_dol(price, ent, qty)
+        bg = f_bg(pp, price, stp)
+
+        s_sym  = sym  != "" ? sym : "---"
+        s_pr   = not na(price) and ent > 0 ? str.tostring(price, "#.##") : "---"
+        s_en   = ent  > 0 ? str.tostring(ent, "#.##") : "---"
+        s_pd   = not na(pd) ? (pd  >= 0 ? "+" : "") + str.tostring(pd,  "#.00") : "---"
+        s_pp   = not na(pp) ? (pp  >= 0 ? "+" : "") + str.tostring(pp,  "#.00") + "%" : "---"
+        s_t1   = t1v  > 0 ? str.tostring(t1v, "#.##") : "---"
+        s_t2   = t2v  > 0 ? str.tostring(t2v, "#.##") : "---"
+        s_stp  = stp  > 0 ? str.tostring(stp, "#.##") : "---"
+        s_stat = stat != "" ? stat : "---"
+
+        table.cell(t, 0, row, s_sym,  bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 1, row, s_pr,   bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 2, row, s_en,   bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 3, row, s_pd,   bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 4, row, s_pp,   bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 5, row, s_t1,   bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 6, row, s_t2,   bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 7, row, s_stp,  bgcolor=bg, text_color=tw, text_size=size.small)
+        table.cell(t, 8, row, s_stat, bgcolor=bg, text_color=tw, text_size=size.small)

@@ -78,6 +78,9 @@ LOG_FILE = WORKSPACE / "logs" / "tri-city-executions.json"
 
 STOP_OFFSET = 0.13   # 13 cents below ORH (all setup types)
 
+# ── ORB timing ────────────────────────────────────────────────────────────────
+ORB_MINUTES = int(os.getenv("ORB_MINUTES", "15"))   # opening range duration from .env
+
 # ── Guard parameters (all overridable via .env) ───────────────────────────────
 MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",        "3"))
 MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS",     "-300"))
@@ -516,7 +519,8 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                      ema_dev: float = 0.0, rvol: float | None = None,
                      candle_type: str = "UNKNOWN",
                      cup: bool = False,
-                     htf: bool = False) -> dict:
+                     htf: bool = False,
+                     bb_squeeze: bool = False) -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
@@ -606,6 +610,19 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
         )
         position_size = var_shares
 
+    # BB squeeze — upper band extension reduction (Papp Ch 06):
+    # If a BB squeeze was flagged at open but price is already extended above the upper
+    # band at ORH breakout (ema_dev > 2%), the coil has already fired — entry is late.
+    # Reduce size 25% to account for the diminished risk/reward at extended prices.
+    if bb_squeeze and setup == "BREAKOUT" and ema_dev > 2.0:
+        reduced = max(1, int(position_size * 0.75))
+        if reduced != position_size:
+            logger.info(
+                f"BB squeeze extended: BREAKOUT size {position_size}→{reduced} "
+                f"(-25%, price above upper band, EMA Dev {ema_dev:+.2f}%)"
+            )
+        position_size = reduced
+
     # Cap to 90% of available buying power to prevent insufficient-funds errors
     bp = get_buying_power()
     if bp is not None and bp > 0 and price > 0:
@@ -643,6 +660,7 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
                   spy_regime: str | None = None,
                   spy_change: float | None = None,
                   cup: bool = False,
+                  bb_squeeze: bool = False,
                   rsi: float | None = None,
                   ema_dev: float | None = None,
                   scanner_signal: str | None = None,
@@ -659,6 +677,7 @@ def log_execution(symbol: str, setup: str, signal: dict, result,
         "symbol":         symbol,
         "setup":          setup,
         "cup":            cup,
+        "bb_squeeze":     bb_squeeze,
         "candle_type":    candle_type or signal.get("candle_type"),
         "entry_price":    signal["entry_price"],
         "stop_loss":      signal["stop_loss"],
@@ -706,6 +725,11 @@ def main():
                         help="Cup pattern detected (high-conviction flag from scanner)")
     parser.add_argument("--htf",         action="store_true",
                         help="High & Tight Flag: +90%% in 3 months — bypasses candle/pennant size penalties")
+    parser.add_argument("--bb_squeeze",  action="store_true",
+                        help="Bollinger Band squeeze detected at open (intraday-compressed, coiled)")
+    parser.add_argument("--rvol",         default=None, type=float,
+                        help="Scanner RVOL value. If provided, skips internal yfinance RVOL "
+                             "calculation and uses this value for guard and sizing.")
     parser.add_argument("--candle_type", default=None,
                         help="Override candle type (HAMMER/NEUTRAL/BEARISH/DOJI). "
                              "Auto-detected from last 1-min bar if not provided.")
@@ -721,6 +745,20 @@ def main():
     symbol = args.symbol.upper()
     now    = datetime.now(CT)
     today  = now.strftime("%Y-%m-%d")
+
+    # ── Guard 0: pre-ORB block ─────────────────────────────────────────────────
+    # Signals must not execute until the opening range has closed and ORH/ORL are
+    # locked.  Premarket ORH values are frozen scanner prices — not valid levels.
+    # Lock time = 8:30 AM CT + ORB_MINUTES.
+    if not args.dry_run:
+        orb_lock = now.replace(hour=8, minute=30, second=0, microsecond=0) + timedelta(minutes=ORB_MINUTES)
+        if now < orb_lock:
+            print(
+                f"PRE_ORB: {now.strftime('%H:%M CT')} — ORB closes at "
+                f"{orb_lock.strftime('%H:%M CT')} ({ORB_MINUTES}-min). "
+                f"Levels not locked yet — skipping {args.setup} on {symbol}."
+            )
+            sys.exit(0)
 
     # Finding 2: PULLBACK only valid when price is at or above EMA (EMA Dev% >= 0).
     # Bulkowski: entries below EMA (-0.5% to 0%) have lower follow-through.
@@ -781,7 +819,8 @@ def main():
             print(f"ORH: ${args.orh:.2f} | ORL: ${args.orl:.2f} | "
                   f"RSI: {args.rsi:.1f} | EMA Dev%: {args.ema_dev:+.2f}%")
             print("=" * 64)
-        signal_preview = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev)
+        signal_preview = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev,
+                                          bb_squeeze=getattr(args, "bb_squeeze", False))
         risk_per_share = round(args.price - signal_preview["stop_loss"], 2)
         print(
             f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup} | "
@@ -803,7 +842,10 @@ def main():
         sys.exit(0)
 
     # ── Guard 7: relative volume (setup-specific + afternoon floor) ──────────
-    rvol = get_rvol(symbol)
+    # If --rvol passed from scanner table, use it directly (avoids yfinance
+    # premarket-inflation bug early in session). Fall back to internal calc only
+    # when scanner value is unavailable.
+    rvol = args.rvol if args.rvol is not None else get_rvol(symbol)
     rvol_str = f"{rvol:.2f}x" if rvol is not None else "N/A"
     is_afternoon = now.hour >= PM_START_HOUR
     # #4: each setup has its own minimum; afternoon tightens the floor further
@@ -855,7 +897,8 @@ def main():
     # ── Build signal ───────────────────────────────────────────────────────────
     signal       = calculate_signal(symbol, args.price, args.orh, args.setup,
                                     args.ema_dev, rvol=rvol, candle_type=candle_type,
-                                    cup=args.cup, htf=getattr(args, "htf", False))
+                                    cup=args.cup, htf=getattr(args, "htf", False),
+                                    bb_squeeze=getattr(args, "bb_squeeze", False))
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
@@ -873,6 +916,8 @@ def main():
         print(f"  Cup:    YES — high-conviction setup")
     if getattr(args, "htf", False):
         print(f"  HTF:    YES — High & Tight Flag (Bulkowski 82% target, 15% failure)")
+    if getattr(args, "bb_squeeze", False):
+        print(f"  BB:     SQUEEZE — intraday band compressed, coiled for expansion")
 
     if args.dry_run:
         print("\n[DRY RUN] — no order placed.")
@@ -885,7 +930,8 @@ def main():
     if result.success:
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
-                      cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
+                      cup=args.cup, bb_squeeze=getattr(args, "bb_squeeze", False),
+                      rsi=args.rsi, ema_dev=args.ema_dev,
                       scanner_signal=args.signal, orh=args.orh, orl=args.orl,
                       candle_type=candle_type)
         print(f"\n✅ ORDERS PLACED")
@@ -897,7 +943,8 @@ def main():
         print(f"\n❌ EXECUTION FAILED: {result.error}")
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
-                      cup=args.cup, rsi=args.rsi, ema_dev=args.ema_dev,
+                      cup=args.cup, bb_squeeze=getattr(args, "bb_squeeze", False),
+                      rsi=args.rsi, ema_dev=args.ema_dev,
                       scanner_signal=args.signal, orh=args.orh, orl=args.orl,
                       candle_type=candle_type)
         sys.exit(1)

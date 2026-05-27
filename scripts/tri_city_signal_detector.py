@@ -51,7 +51,7 @@ import json
 import logging
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -73,6 +73,9 @@ PULLBACK_EMA_MAX  = 0.8   # EMA Dev% upper bound for PULLBACK
 CONT_EMA_MAX      = 1.0   # EMA Dev% upper bound for CONTINUATION
 PULLBACK_RSI_MIN  = 38
 PULLBACK_RSI_MAX  = 55
+
+# MACD valid after this many minutes into session (26 × 5-min bars = 130 min)
+MACD_VALID_AFTER_MIN = 130   # ~10:30 AM CT
 BREAKOUT_RSI_MIN  = 50
 
 RVOL_SPIKE_THRESH     = 0.50   # ≥50% increase triggers alert
@@ -143,32 +146,176 @@ def parse_table_rows(rows: list[str]) -> list[dict]:
     return results
 
 
+# ── MACD confirmation (Ch 10, Listing 10.5 — Papp) ───────────────────────────
+# Used to filter CONTINUATION signals: require MACD line > Signal line.
+# Only valid after MACD_VALID_AFTER_MIN minutes into session (needs 26 5-min bars).
+# Returns True  = MACD bullish (allow CONTINUATION)
+#         False = MACD bearish (block CONTINUATION)
+#         None  = data unavailable or too early (allow — never block on missing data)
+
+_macd_cache: dict[str, tuple[datetime, bool | None]] = {}  # symbol → (fetched_at, result)
+_MACD_CACHE_TTL = 180  # seconds — refresh every 3 min (matches signal monitor cycle)
+
+
+def _ema_series(values: list[float], period: int) -> list[float]:
+    """Compute EMA over a list of floats. Returns list same length as input."""
+    k = 2 / (period + 1)
+    ema = [values[0]]
+    for v in values[1:]:
+        ema.append(v * k + ema[-1] * (1 - k))
+    return ema
+
+
+def macd_is_bullish(symbol: str, now: datetime) -> bool | None:
+    """
+    Fetch 5-min bars via yfinance and compute MACD(12,26,9).
+    Returns True if MACD line > Signal line (bullish momentum).
+    Returns None if before MACD_VALID_AFTER_MIN or data unavailable (no block).
+    Caches result for _MACD_CACHE_TTL seconds to avoid redundant fetches.
+    """
+    # Check cache
+    if symbol in _macd_cache:
+        fetched_at, cached_result = _macd_cache[symbol]
+        if (now - fetched_at).total_seconds() < _MACD_CACHE_TTL:
+            return cached_result
+
+    # Only valid after 130 min into session
+    session_open = now.replace(hour=8, minute=30, second=0, microsecond=0)
+    elapsed_min = (now - session_open).total_seconds() / 60
+    if elapsed_min < MACD_VALID_AFTER_MIN:
+        return None  # too early — skip filter
+
+    try:
+        import yfinance as yf
+        df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
+        if df.empty or len(df) < 35:
+            _macd_cache[symbol] = (now, None)
+            return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        closes = list(df["close"].dropna())
+        if len(closes) < 35:
+            _macd_cache[symbol] = (now, None)
+            return None
+
+        ema12 = _ema_series(closes, 12)
+        ema26 = _ema_series(closes, 26)
+        macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
+        signal_line = _ema_series(macd_line, 9)
+
+        bullish = macd_line[-1] > signal_line[-1]
+        _macd_cache[symbol] = (now, bullish)
+        return bullish
+    except Exception as e:
+        logger.debug(f"macd_is_bullish {symbol}: {e}")
+        _macd_cache[symbol] = (now, None)
+        return None
+
+
+# ── EMA Ribbon Spread (Ch 10, Listing 10.3 — Papp) ──────────────────────────
+# Compares EMA10/EMA20 spread on 5-min bars: today's last spread vs yesterday's.
+# Expanding spread → momentum building → lower RSI threshold for BREAKOUT.
+# Compressing spread → momentum fading → tighter EMA dev window for CONTINUATION.
+# Returns "EXPANDING" | "COMPRESSING" | None (unavailable — no change to rules).
+# Caches per symbol for _MACD_CACHE_TTL seconds (shared with MACD cycle time).
+
+_ribbon_cache: dict[str, tuple[datetime, str | None]] = {}
+
+
+def ema_ribbon_trend(symbol: str, now: datetime) -> str | None:
+    """
+    Fetch 2 days of 5-min bars, compute EMA10 and EMA20.
+    Return "EXPANDING" if today's EMA10-EMA20 spread > yesterday's last spread.
+    Return "COMPRESSING" if today's spread < yesterday's last spread.
+    Return None if data unavailable (never blocks or forces a signal).
+    """
+    if symbol in _ribbon_cache:
+        fetched_at, cached = _ribbon_cache[symbol]
+        if (now - fetched_at).total_seconds() < _MACD_CACHE_TTL:
+            return cached
+
+    try:
+        import yfinance as yf
+        df = yf.download(symbol, period="2d", interval="5m", progress=False, auto_adjust=True)
+        if df.empty or len(df) < 22:
+            _ribbon_cache[symbol] = (now, None)
+            return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        closes = list(df["close"].dropna())
+        if len(closes) < 22:
+            _ribbon_cache[symbol] = (now, None)
+            return None
+
+        ema10 = _ema_series(closes, 10)
+        ema20 = _ema_series(closes, 20)
+        spreads = [abs(e10 - e20) for e10, e20 in zip(ema10, ema20)]
+
+        # Need at least one yesterday bar and one today bar
+        today_open = now.replace(hour=8, minute=30, second=0, microsecond=0)
+        import pandas as pd
+        timestamps = list(df.index)
+        today_idx = [i for i, t in enumerate(timestamps)
+                     if pd.Timestamp(t).tz_convert("America/Chicago") >= today_open]
+        if not today_idx or today_idx[0] == 0:
+            _ribbon_cache[symbol] = (now, None)
+            return None
+
+        yesterday_last = spreads[today_idx[0] - 1]
+        today_last = spreads[-1]
+
+        trend = "EXPANDING" if today_last > yesterday_last else "COMPRESSING"
+        _ribbon_cache[symbol] = (now, trend)
+        return trend
+    except Exception as e:
+        logger.debug(f"ema_ribbon_trend {symbol}: {e}")
+        _ribbon_cache[symbol] = (now, None)
+        return None
+
+
 # ── Setup detection ───────────────────────────────────────────────────────────
 
-def detect_setup(row: dict) -> str | None:
+def detect_setup(row: dict, now: datetime | None = None) -> str | None:
     """
     Apply the three setup rules in priority order.
     Returns "BREAKOUT" | "CONTINUATION" | "PULLBACK" | None.
+
+    CONTINUATION: requires MACD line > Signal line (Ch 10, Papp).
+    BREAKOUT:     EMA ribbon expanding → RSI threshold lowered by 5 pts (more permissive).
+    CONTINUATION: EMA ribbon compressing → EMA dev window tightened to 0.5% (stricter).
+    Ribbon/MACD filters are skipped (never block) when data is unavailable.
     """
     sig     = row["signal"]
     price   = row["price"]
     orh     = row["orh"]
     rsi     = row["rsi"]
     ema_dev = row["ema_dev"]
+    now     = now or datetime.now(CT)
 
     above_orh = orh > 0 and price > orh
+    ribbon    = ema_ribbon_trend(row["symbol"], now)
 
     # SETUP 1: BREAKOUT
+    # EMA ribbon expanding → momentum confirmed → allow RSI as low as 45 (vs 50 default)
+    breakout_rsi_min = BREAKOUT_RSI_MIN - 5 if ribbon == "EXPANDING" else BREAKOUT_RSI_MIN
     if (sig == "BREAKOUT"
             and above_orh
-            and rsi > BREAKOUT_RSI_MIN
+            and rsi > breakout_rsi_min
             and ema_dev > 0):
         return "BREAKOUT"
 
-    # SETUP 2: CONTINUATION
+    # SETUP 2: CONTINUATION — MACD + ribbon checks
+    # EMA ribbon compressing → tighten EMA dev window to 0–0.5% (vs 0–1.0% default)
+    cont_ema_max = 0.5 if ribbon == "COMPRESSING" else CONT_EMA_MAX
     if (sig == "CONTINUATION"
             and above_orh
-            and 0 <= ema_dev <= CONT_EMA_MAX):
+            and 0 <= ema_dev <= cont_ema_max):
+        macd_ok = macd_is_bullish(row["symbol"], now)
+        if macd_ok is False:
+            logger.info(f"CONTINUATION {row['symbol']} blocked: MACD bearish")
+            return None
         return "CONTINUATION"
 
     # SETUP 3: PULLBACK
@@ -231,14 +378,16 @@ def main():
         _write_empty(now_ct, args.dry_run)
         return
 
-    # ── Load flags (htf / resistance) ───────────────────────────────────────
+    # ── Load flags (htf / resistance / bb_squeeze) ──────────────────────────
     htf_set        : set[str] = set()
     resistance_set : set[str] = set()
+    bb_squeeze_set : set[str] = set()
     if FLAGS_FILE.exists():
         try:
-            flags     = json.loads(FLAGS_FILE.read_text())
+            flags          = json.loads(FLAGS_FILE.read_text())
             htf_set        = set(flags.get("htf", []))
             resistance_set = set(flags.get("resistance", []))
+            bb_squeeze_set = set(flags.get("bb_squeeze", []))
         except Exception:
             pass
 
@@ -253,7 +402,7 @@ def main():
     # ── Detect signals ──────────────────────────────────────────────────────
     signals: list[dict] = []
     for row in rows:
-        setup = detect_setup(row)
+        setup = detect_setup(row, now_ct)
         if setup is None:
             continue
         sym = row["symbol"]
@@ -269,6 +418,7 @@ def main():
             "cup":        row["cup"],
             "htf":        sym in htf_set,
             "resistance": sym in resistance_set,
+            "bb_squeeze": sym in bb_squeeze_set,
         })
 
     # ── Detect RVOL spikes ──────────────────────────────────────────────────
@@ -299,10 +449,11 @@ def main():
             cup_tag = " CUP" if s["cup"] else ""
             htf_tag = " HTF" if s["htf"] else ""
             res_tag = " ⚠RES" if s["resistance"] else ""
+            bb_tag  = " BB✓" if s.get("bb_squeeze") else ""
             print(f"SIGNAL: {s['setup']} {s['symbol']} ${s['price']} "
                   f"ORH=${s['orh']} ORL=${s['orl']} "
                   f"RSI={s['rsi']} EMA={s['ema_dev']:+.2f}% "
-                  f"RVOL={s['rvol']:.1f}x{cup_tag}{htf_tag}{res_tag}")
+                  f"RVOL={s['rvol']:.1f}x{cup_tag}{htf_tag}{res_tag}{bb_tag}")
 
     for spike in rvol_spikes:
         print(f"RVOL_SPIKE: {spike['symbol']} {spike['prev']:.1f}x → {spike['now']:.1f}x")
