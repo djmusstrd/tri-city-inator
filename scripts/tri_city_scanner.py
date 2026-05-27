@@ -58,9 +58,76 @@ W_RVOL      = 0.35
 W_STAGE     = 0.12   # Weinstein: split with SMA slope
 W_SMA_SLOPE = 0.08   # Weinstein: bonus when SMA50 > SMA100 (rising)
 W_CATALYST  = 0.10
+W_PARK_VOL  = 0.05   # Parkinson vol trending bonus (Ch 05 — Algo Trading Cookbook)
+
+PARK_VOL_WINDOW  = int(os.getenv("PARK_VOL_WINDOW",  "14"))   # rolling window for Parkinson vol
+PARK_VOL_LOOKBACK = int(os.getenv("PARK_VOL_LOOKBACK", "60")) # days of history for baseline
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+# ── Parkinson Volatility (Ch 05 — Python for Algorithmic Trading Cookbook) ────
+# Uses high/low range rather than close-to-close — more efficient estimator for
+# gap-up stocks where intraday range carries more information than the close.
+# A stock with Parkinson vol ABOVE its rolling average is in a trending regime
+# (good for ORB); below average suggests mean-reversion (avoid for breakouts).
+
+def compute_parkinson_trending(symbols: list[str]) -> dict[str, bool]:
+    """
+    Batch-fetches 60-day daily H/L for all symbols.
+    Returns {symbol: True} if current Parkinson vol > rolling avg (trending),
+    False if below average (mean-reverting), omitted if data unavailable.
+    """
+    if not symbols:
+        return {}
+    try:
+        import yfinance as yf
+        import math
+        df = yf.download(
+            symbols, period=f"{PARK_VOL_LOOKBACK * 2}d", interval="1d",
+            progress=False, auto_adjust=True
+        )
+        if df.empty:
+            return {}
+
+        # Extract High and Low — handle single vs multi-symbol column structure
+        if hasattr(df.columns, "levels"):
+            highs = df["High"]
+            lows  = df["Low"]
+        else:
+            # Single symbol — wrap in dict-like structure
+            highs = df[["High"]].rename(columns={"High": symbols[0]})
+            lows  = df[["Low"]].rename(columns={"Low":  symbols[0]})
+
+        result = {}
+        for sym in symbols:
+            try:
+                h = highs[sym].dropna()
+                l = lows[sym].dropna()
+                if len(h) < PARK_VOL_WINDOW + 5:
+                    continue
+                # Parkinson estimator per bar: (ln(H/L))^2 / (4 * ln(2))
+                hl_sq  = [(math.log(float(hi) / float(lo)) ** 2) / (4 * math.log(2))
+                          for hi, lo in zip(h, l) if float(lo) > 0]
+                if len(hl_sq) < PARK_VOL_WINDOW + 2:
+                    continue
+                # Rolling window vol values
+                park_series = [
+                    math.sqrt(sum(hl_sq[i - PARK_VOL_WINDOW:i]) / PARK_VOL_WINDOW)
+                    for i in range(PARK_VOL_WINDOW, len(hl_sq) + 1)
+                ]
+                if len(park_series) < 2:
+                    continue
+                current_vol = park_series[-1]
+                avg_vol     = sum(park_series[:-1]) / len(park_series[:-1])
+                result[sym] = current_vol > avg_vol  # True = trending regime
+            except Exception:
+                continue
+        return result
+    except Exception as e:
+        logger.debug(f"compute_parkinson_trending: {e}")
+        return {}
 
 
 # ── Fetch from TradingView screener ───────────────────────────────────────────
@@ -190,7 +257,8 @@ def score_candidate(s: dict) -> float:
     stage_score = W_STAGE if s["stage2"] else 0.0
     sma_score   = W_SMA_SLOPE if s.get("sma_rising") else 0.0   # Weinstein
     cat_score   = W_CATALYST if s["catalyst"] else 0.0
-    return round(gap_score + rvol_score + stage_score + sma_score + cat_score, 4)
+    park_score  = W_PARK_VOL if s.get("park_trending") else 0.0  # Parkinson vol trending
+    return round(gap_score + rvol_score + stage_score + sma_score + cat_score + park_score, 4)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -215,6 +283,16 @@ def main():
         print(f"\n{'='*72}\n")
         return
 
+    # Parkinson volatility regime check (batch yfinance — top 100 symbols only)
+    # Identifies trending vs mean-reverting stocks before scoring; boosts trending ones.
+    print(f"  Computing Parkinson volatility regime for {len(stocks)} candidates...")
+    park_syms    = [s["symbol"] for s in stocks]
+    park_results = compute_parkinson_trending(park_syms)
+    for s in stocks:
+        s["park_trending"] = park_results.get(s["symbol"], False)
+    park_trending_count = sum(1 for s in stocks if s["park_trending"])
+    print(f"  Parkinson: {park_trending_count}/{len(stocks)} in trending vol regime")
+
     # Score and rank
     for s in stocks:
         s["score"] = score_candidate(s)
@@ -233,22 +311,24 @@ def main():
 
     # Print ranked table
     print(f"\n{'RK':<4} {'SYMBOL':<7} {'PRICE':>7} {'GAP%':>7} {'RVOL':>6} "
-          f"{'RSI':>5} {'PM VOL':>8} {'S2':>3} {'SMA↑':>4} {'52H':>4} {'HTF':>4} {'SCORE':>7}")
-    print("-" * 86)
+          f"{'RSI':>5} {'PM VOL':>8} {'S2':>3} {'SMA↑':>4} {'52H':>4} {'HTF':>4} {'PK':>3} {'SCORE':>7}")
+    print("-" * 91)
 
     for s in ranked:
         stage  = "Y" if s["stage2"] else "-"
         sma_r  = "Y" if s.get("sma_rising") else "-"
         h52    = "⚠" if s.get("near_52wk_high") else "-"
         htf_f  = "★" if s.get("htf") else "-"
+        pk     = "T" if s.get("park_trending") else "-"   # Parkinson trending
         para   = "⚠" if s["parabolic"] else " "
         pmv    = fmt_vol(s["pm_volume"])
         print(f"{s['rank']:<4} {s['symbol']:<7} ${s['price']:>6.2f} "
               f"{s['gap_pct']:>+6.1f}% {s['rvol']:>5.1f}x "
-              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>3} {sma_r:>4} {h52:>4} {htf_f:>4} "
+              f"{s['rsi']:>5.1f} {pmv:>8} {stage:>3} {sma_r:>4} {h52:>4} {htf_f:>4} {pk:>3} "
               f"{para}{s['score']:>6.4f}")
 
-    print(f"\n{'─'*86}")
+    park_trending_list = [s["symbol"] for s in ranked if s.get("park_trending")]
+    print(f"\n{'─'*91}")
     print(f"  {len(ranked)} candidates ranked.")
     if parabolic:
         print(f"  ⚠  PARABOLIC (>10x RVol — avoid):           {parabolic}")
@@ -256,6 +336,8 @@ def main():
         print(f"  ⚠  RESISTANCE (within 5% of 52wk high):     {resistance_warn}")
     if htf_list:
         print(f"  ★  HIGH & TIGHT FLAG (+90% in 3mo):          {htf_list}")
+    if park_trending_list:
+        print(f"  T  PARKINSON TRENDING (vol regime, ORB-ready): {park_trending_list}")
     print(f"{'─'*86}")
 
     # Top 15 non-parabolic exchange-prefixed symbols for TradingView indicator swap

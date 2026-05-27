@@ -9,7 +9,9 @@ Usage:
 """
 
 import argparse
+import os
 import sys
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -35,6 +37,84 @@ OUTCOME_ICON = {
     "scratch":     "⚪",
     "loss":        "🔴",
 }
+
+# Rolling drawdown config (overridable via .env)
+DD_WINDOW     = int(os.getenv("DD_WINDOW", "20"))      # rolling window in trading days
+DD_WARN_PCT   = float(os.getenv("DD_WARN_PCT", "15"))  # warn if rolling DD > 15% of peak equity
+
+
+def _build_equity_curve(closed: list) -> list[tuple[str, float, float]]:
+    """Return sorted list of (date, daily_pnl, cumulative_equity) tuples."""
+    by_date: dict[str, float] = defaultdict(float)
+    for t in closed:
+        if t.get("date"):
+            by_date[t["date"]] += t["realized_pnl"]
+    if not by_date:
+        return []
+    sorted_dates = sorted(by_date)
+    equity, curve = 0.0, []
+    for d in sorted_dates:
+        equity += by_date[d]
+        curve.append((d, by_date[d], round(equity, 2)))
+    return curve
+
+
+def print_rolling_drawdown(closed: list) -> None:
+    """Print rolling drawdown analysis section. Only shown when >= 5 closed trades."""
+    if len(closed) < 5:
+        return
+
+    curve = _build_equity_curve(closed)
+    if not curve:
+        return
+
+    # Compute drawdown series: equity - running peak
+    peak, drawdowns = float("-inf"), []
+    for date, daily_pnl, equity in curve:
+        peak = max(peak, equity)
+        drawdown = equity - peak  # <= 0
+        drawdowns.append((date, equity, peak, drawdown))
+
+    # Rolling DD_WINDOW max-drawdown: worst (most negative) drawdown within each window
+    rolling_worst = []
+    for i in range(len(drawdowns)):
+        window = drawdowns[max(0, i - DD_WINDOW + 1): i + 1]
+        worst_in_window = min(d[3] for d in window)
+        rolling_worst.append(worst_in_window)
+
+    current_equity  = drawdowns[-1][1]
+    current_peak    = drawdowns[-1][2]
+    current_dd      = drawdowns[-1][3]
+    max_rolling_dd  = min(rolling_worst)                         # most negative ever in any window
+    last_window_dd  = min(rolling_worst[-DD_WINDOW:])            # worst in most recent 20 days
+
+    # Last 20 trading-day P&L
+    last_n = curve[-DD_WINDOW:]
+    last_n_pnl = sum(r[1] for r in last_n)
+
+    print("\n" + "─" * 72)
+    print(f"  ROLLING DRAWDOWN  (window: {DD_WINDOW} trading days)")
+    print("─" * 72)
+    print(f"  Equity (cum P&L) : ${current_equity:>+8.2f}")
+    print(f"  Peak equity      : ${current_peak:>+8.2f}")
+    print(f"  Current drawdown : ${current_dd:>+8.2f}", end="")
+    if current_peak != 0 and current_dd < 0:
+        print(f"  ({abs(current_dd/current_peak)*100:.1f}% from peak)", end="")
+    print()
+    print(f"  Max roll-{DD_WINDOW}d DD  : ${max_rolling_dd:>+8.2f}")
+    print(f"  Last {DD_WINDOW}d P&L    : ${last_n_pnl:>+8.2f}  "
+          f"({len(last_n)} trading days)")
+
+    # Advisory
+    warn_threshold = -(abs(current_peak) * DD_WARN_PCT / 100) if current_peak > 0 else -300
+    if last_window_dd <= warn_threshold:
+        print(f"\n  ⚠  DRAWDOWN ADVISORY: Last {DD_WINDOW}-day worst DD "
+              f"(${last_window_dd:+.2f}) exceeds {DD_WARN_PCT}% of peak.")
+        print(f"     Consider reducing MAX_POSITIONS 3 → 2 next session.")
+    elif last_n_pnl < 0:
+        print(f"\n  ↘  Last {DD_WINDOW} days negative (${last_n_pnl:+.2f}) — monitor closely.")
+    else:
+        print(f"\n  ✓  Drawdown within normal range — no position adjustment needed.")
 
 
 def print_report(trades: list, label: str = "ALL TIME"):
@@ -87,6 +167,7 @@ def print_report(trades: list, label: str = "ALL TIME"):
             print(f"  {setup:<12} {v['trades']:>6} "
                   f"${v['pnl']:>+8.2f} {v['avg_r']:>+8.3f}R")
 
+    print_rolling_drawdown(closed)
     print("\n" + "=" * 72 + "\n")
 
 

@@ -57,9 +57,15 @@ def check_env() -> tuple[str, str]:
         return "FAIL", "ALPACA_API_KEY not set in .env"
     if not sec or sec.startswith("YOUR_"):
         return "FAIL", "ALPACA_SECRET_KEY not set in .env"
+    return "PASS", "API keys present"
+
+
+def check_trading_mode() -> tuple[str, str]:
+    """Confirm paper vs live mode. Shows WARN when LIVE so it's impossible to miss."""
     paper = os.getenv("ALPACA_PAPER", "true").lower() == "true"
-    mode = "PAPER" if paper else "LIVE"
-    return "PASS", f"Keys present, {mode} mode"
+    if paper:
+        return "PASS", "PAPER mode (ALPACA_PAPER=true)"
+    return "WARN", "*** LIVE TRADING MODE *** (ALPACA_PAPER=false) — real money"
 
 
 def check_candidates(today: str) -> tuple[str, str]:
@@ -116,7 +122,8 @@ def check_levels() -> tuple[str, str]:
 
 
 def check_alpaca() -> tuple[str, str]:
-    """Check Alpaca API connectivity."""
+    """Check Alpaca API connectivity and minimum account balance."""
+    min_balance = float(os.getenv("MIN_ACCOUNT_BALANCE", "500"))
     try:
         sys.path.insert(0, str(WORKSPACE))
         from scripts.tri_city_execute import get_account_equity, get_buying_power
@@ -124,7 +131,13 @@ def check_alpaca() -> tuple[str, str]:
         bp     = get_buying_power()
         if equity is None:
             return "WARN", "get_account_equity() returned None — check API keys"
-        return "PASS", f"equity=${equity:,.0f}, buying_power=${bp:,.0f}" if bp else f"equity=${equity:,.0f}"
+        bp_str = f", buying_power=${bp:,.0f}" if bp else ""
+        if equity < min_balance:
+            return "FAIL", (
+                f"equity=${equity:,.0f}{bp_str} — BELOW minimum "
+                f"${min_balance:,.0f} (set MIN_ACCOUNT_BALANCE in .env)"
+            )
+        return "PASS", f"equity=${equity:,.0f}{bp_str}  (min=${min_balance:,.0f} ✓)"
     except Exception as e:
         return "FAIL", f"Alpaca connection failed: {e}"
 
@@ -161,10 +174,11 @@ def main():
 
     checks = [
         ("ENV / API Keys",      check_env()),
+        ("Trading Mode",        check_trading_mode()),
         ("candidates.json",     check_candidates(today)),
         ("flags.json",          check_flags(today)),
         ("levels.json (ORH)",   check_levels()),
-        ("Alpaca Connectivity", check_alpaca()),
+        ("Alpaca / Balance",    check_alpaca()),
         ("Execution Log",       check_executions(today)),
     ]
 
