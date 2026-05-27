@@ -13,11 +13,20 @@ Setup types:
 Guards (in order):
   1. already_executed_today   — no duplicate setups per symbol per day
   2. already_in_position      — no duplicate symbols
+     → correlation warning    — advisory: flags ≥0.75 correlation with open positions
   3. max_positions             — no more than MAX_POSITIONS open at once (default: 3)
   4. daily_loss_limit          — circuit breaker if down MAX_DAILY_LOSS (default: -$300)
   5. time_window               — no new entries after NO_ENTRY_AFTER (default: 1:00 PM CT)
   6. market_regime             — block LONGs if SPY down > SPY_BEAR_THRESHOLD (default: -1.5%)
   7. rvol                      — require RVol >= MIN_RVOL vs 20-day avg (default: 1.5x)
+
+Position sizing layers (applied in order, each can only reduce shares):
+  base    — equity × RISK_PCT% / risk_per_share
+  RVOL    — boost up to RVOL_SIZE_BOOST_MAX when volume elevated
+  candle  — -25% for non-hammer on PULLBACK
+  pennant — -15% for loose consolidation (no CUP) on PULLBACK
+  VaR     — Monte Carlo 95th-pct daily loss cap (volatility-adjusted)
+  BP      — cap to 90% of available buying power
 
 Position structure (50-25-25 scale-out):
     T1 (+T1_PCT%): sell 50% → move stop to breakeven
@@ -44,6 +53,12 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+try:
+    import numpy as np
+    _NUMPY_AVAILABLE = True
+except ImportError:
+    _NUMPY_AVAILABLE = False
 
 WORKSPACE = Path.home() / "tri-city-inator"
 sys.path.insert(0, str(WORKSPACE))
@@ -290,6 +305,121 @@ def get_rvol(symbol: str) -> float | None:
         return None
 
 
+# ── Monte Carlo VaR sizing (Ch 7 — Investing for Programmers) ─────────────────
+# Simulates 5 000 next-day return scenarios from historical daily return
+# distribution (mu, sigma). Returns the max position value that keeps the
+# 95th-percentile simulated daily loss within max_risk_dollars.
+# Only ever REDUCES the share count — never increases it.
+# Falls back to flat risk_per_share sizing if numpy or history unavailable.
+
+VAR_SIMULATIONS = int(os.getenv("VAR_SIMULATIONS", "5000"))
+VAR_CONFIDENCE  = float(os.getenv("VAR_CONFIDENCE", "0.95"))   # 95th percentile
+VAR_LOOKBACK    = int(os.getenv("VAR_LOOKBACK",    "60"))       # 60 trading days
+
+
+def var_position_size(symbol: str, price: float, max_risk_dollars: float) -> int | None:
+    """
+    Monte Carlo VaR-based position sizing.
+    Returns max shares that keep simulated 1-day VaR within max_risk_dollars,
+    or None if calculation is unavailable (fall through to standard sizing).
+    """
+    if not _NUMPY_AVAILABLE:
+        return None
+    try:
+        import yfinance as yf
+        df = yf.download(symbol, period=f"{VAR_LOOKBACK * 2}d", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < 20:
+            return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+
+        closes = df["close"].dropna().tail(VAR_LOOKBACK)
+        returns = closes.pct_change().dropna()
+        if len(returns) < 15:
+            return None
+
+        mu    = float(returns.mean())
+        sigma = float(returns.std())
+        if sigma <= 0:
+            return None
+
+        # Simulate return scenarios
+        rng          = np.random.default_rng(seed=42)
+        sim_returns  = rng.normal(mu, sigma, VAR_SIMULATIONS)
+
+        # VaR: worst-case daily loss at VAR_CONFIDENCE level
+        # We want: position_value × abs(percentile(sim_returns, 1-conf)) ≤ max_risk_dollars
+        loss_pct     = abs(np.percentile(sim_returns, (1 - VAR_CONFIDENCE) * 100))
+        if loss_pct <= 0:
+            return None
+
+        max_position_value = max_risk_dollars / loss_pct
+        var_shares         = max(1, int(max_position_value / price))
+        return var_shares
+    except Exception as e:
+        logger.debug(f"var_position_size {symbol}: {e}")
+        return None
+
+
+# ── Correlation check (Ch 7 — sector concentration guard) ─────────────────────
+# Computes 20-day Pearson correlation between the incoming symbol and each open
+# position. Logs a warning if any pair is ≥ CORR_WARN_THRESHOLD — does NOT block
+# the trade, but the warning appears in execution output so the user can decide.
+
+CORR_WARN_THRESHOLD = float(os.getenv("CORR_WARN_THRESHOLD", "0.75"))
+CORR_LOOKBACK       = int(os.getenv("CORR_LOOKBACK",        "20"))
+
+
+def check_correlation_warning(symbol: str) -> list[str]:
+    """
+    Returns a list of warning strings for any open position highly correlated
+    with symbol over the last CORR_LOOKBACK trading days.
+    Returns [] if no correlated positions found or data unavailable.
+    """
+    if not _NUMPY_AVAILABLE:
+        return []
+    open_positions = get_open_positions()
+    open_tickers   = [p["ticker"] for p in open_positions if p["ticker"] != symbol]
+    if not open_tickers:
+        return []
+    warnings = []
+    try:
+        import yfinance as yf
+        all_syms  = [symbol] + open_tickers
+        df        = yf.download(all_syms, period=f"{CORR_LOOKBACK * 2}d",
+                                interval="1d", progress=False, auto_adjust=True)
+        if df.empty:
+            return []
+
+        # Flatten multi-level columns if needed
+        if hasattr(df.columns, "levels"):
+            close_df = df["Close"] if "Close" in df.columns.get_level_values(0) else df.xs("close", axis=1, level=0)
+        else:
+            close_df = df[["Close"]] if "Close" in df.columns else df
+
+        returns = close_df.pct_change().dropna().tail(CORR_LOOKBACK)
+
+        for ticker in open_tickers:
+            try:
+                s1 = returns[symbol]
+                s2 = returns[ticker]
+                if len(s1) < 10 or len(s2) < 10:
+                    continue
+                corr = float(s1.corr(s2))
+                if corr >= CORR_WARN_THRESHOLD:
+                    warnings.append(
+                        f"⚠ CORRELATION: {symbol} vs {ticker} = {corr:.2f} "
+                        f"(≥{CORR_WARN_THRESHOLD:.2f} threshold — sector concentration risk)"
+                    )
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"check_correlation_warning: {e}")
+    return warnings
+
+
 # ── Account equity ─────────────────────────────────────────────────────────────
 
 def get_account_equity() -> float | None:
@@ -466,6 +596,16 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                     )
                 position_size = reduced
 
+    # Monte Carlo VaR cap: simulate historical return distribution; reduce size if
+    # 95th-pct simulated daily loss would exceed max_risk_dollars. Only reduces.
+    var_shares = var_position_size(symbol, price, max_risk_dollars)
+    if var_shares is not None and var_shares < position_size:
+        logger.info(
+            f"VaR cap: {position_size}→{var_shares} shares "
+            f"(volatility-adjusted 95% daily loss limit ${max_risk_dollars:.0f})"
+        )
+        position_size = var_shares
+
     # Cap to 90% of available buying power to prevent insufficient-funds errors
     bp = get_buying_power()
     if bp is not None and bp > 0 and price > 0:
@@ -609,6 +749,11 @@ def main():
         if not args.quiet:
             print(f"SKIP: Already holding {symbol}.")
         sys.exit(0)
+
+    # ── Correlation warning (advisory — does not block) ────────────────────────
+    corr_warnings = check_correlation_warning(symbol)
+    for w in corr_warnings:
+        print(w)  # always print regardless of --quiet; user must see sector risk
 
     # ── Guard 3: max positions ─────────────────────────────────────────────────
     if check_max_positions():
