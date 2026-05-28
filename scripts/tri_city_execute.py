@@ -104,9 +104,10 @@ RVOL_LOOKBACK      = int(os.getenv("RVOL_LOOKBACK",        "20"))
 
 # Setup-specific RVOL minimums (#4) — BREAKOUT needs most conviction
 # BREAKOUT_MIN_RVOL restored to 2.0x — original floor that produced winning trades; 2.5x was too restrictive
-BREAKOUT_MIN_RVOL     = float(os.getenv("BREAKOUT_MIN_RVOL",     "2.0"))
-CONTINUATION_MIN_RVOL = float(os.getenv("CONTINUATION_MIN_RVOL", "1.75"))
-PULLBACK_MIN_RVOL     = float(os.getenv("PULLBACK_MIN_RVOL",     "1.5"))
+BREAKOUT_MIN_RVOL      = float(os.getenv("BREAKOUT_MIN_RVOL",      "2.0"))
+CONTINUATION_MIN_RVOL  = float(os.getenv("CONTINUATION_MIN_RVOL",  "1.75"))
+PULLBACK_MIN_RVOL      = float(os.getenv("PULLBACK_MIN_RVOL",       "1.5"))
+EMA20_PB_MIN_RVOL      = float(os.getenv("EMA20_PB_MIN_RVOL",       "0.8"))  # lower — mid-morning vol distributes
 
 # BREAKOUT extension guardrails — blocks parabolic chasing without filtering legitimate setups
 # EMA Dev ceiling raised 8% → 12%: 15-min ORB breakouts naturally carry 8–12% dev at entry
@@ -920,9 +921,10 @@ def main():
     is_afternoon = now.hour >= PM_START_HOUR
     # #4: each setup has its own minimum; afternoon tightens the floor further
     _setup_rvol_floor = {
-        "BREAKOUT":     BREAKOUT_MIN_RVOL,
-        "CONTINUATION": CONTINUATION_MIN_RVOL,
-        "PULLBACK":     PULLBACK_MIN_RVOL,
+        "BREAKOUT":       BREAKOUT_MIN_RVOL,
+        "CONTINUATION":   CONTINUATION_MIN_RVOL,
+        "PULLBACK":       PULLBACK_MIN_RVOL,
+        "EMA20_PULLBACK": EMA20_PB_MIN_RVOL,
     }
     base_floor   = _setup_rvol_floor.get(args.setup, MIN_RVOL)
     rvol_floor   = max(base_floor, PM_MIN_RVOL) if is_afternoon else base_floor

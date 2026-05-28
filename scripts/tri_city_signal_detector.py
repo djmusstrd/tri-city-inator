@@ -86,6 +86,24 @@ RVOL_SPIKE_MIN        = 2.0    # must be ≥2.0x after spike
 VWAP_PROXIMITY_PCT    = 0.003  # 0.3% — price within this % of VWAP = "near VWAP"
 VWAP_STOP_OFFSET      = 0.05   # 5 cents below VWAP for VWAP-reclaim stops
 
+# ── EMA20 Pullback signal thresholds ─────────────────────────────────────────
+# Fires when: stock had a significant run, pulled back to EMA20, holds above VWAP
+# Based on CODX/ONDS/PONY pattern analysis — multiple entries per day available
+EMA20_PB_EMA_MIN   = -0.5   # EMA Dev% lower bound (at or just below EMA20)
+EMA20_PB_EMA_MAX   =  1.5   # EMA Dev% upper bound (at or just above EMA20)
+EMA20_PB_RSI_MIN   =  45    # RSI cooled from overbought
+EMA20_PB_RSI_MAX   =  68    # RSI not reversed (still bullish context)
+EMA20_PB_MIN_RUN   =  5.0   # minimum % move from open to confirm a real run
+EMA20_PB_MIN_RVOL  =  0.8   # sustained volume (bar-level, not just opening spike)
+EMA20_PB_ORH_MULT  =  1.05  # price must be at least 5% above ORH (confirms gap/run)
+EMA20_PB_START_H   =  9     # earliest CT hour for this signal
+EMA20_PB_START_M   = 15     # earliest CT minute (9:15 AM)
+EMA20_PB_END_H     = 11     # latest CT hour
+EMA20_PB_END_M     = 30     # latest CT minute (11:30 AM, before lunch)
+
+# ── BREAKOUT quality filters ──────────────────────────────────────────────────
+BREAKOUT_MAX_ORH_ORL_SPREAD = 8.0  # % of price — wide spread = indecision, skip
+
 
 # ── Table row parser ──────────────────────────────────────────────────────────
 
@@ -280,20 +298,24 @@ def ema_ribbon_trend(symbol: str, now: datetime) -> str | None:
         return None
 
 
-# ── VWAP (Aziz methodology) ───────────────────────────────────────────────────
+# ── VWAP + bar data (Aziz methodology) ───────────────────────────────────────
 # VWAP = cumsum(typical_price × volume) / cumsum(volume), reset each session.
 # Used to:
 #   1. Block BREAKOUT/CONTINUATION when price < VWAP (no longs below VWAP)
 #   2. Flag VWAP_RECLAIM when price crossed above VWAP since the previous cycle
 #   3. Provide a tighter VWAP-based stop for reclaim entries (5¢ below VWAP)
+#   4. Supply last-bar OHLC for candlestick quality filters (EMA20_PULLBACK)
 #
-# Only fetched for symbols that have a non-"---" signal label from Pine (0–3/cycle).
+# Fetched for Pine-signaled rows AND EMA20_PULLBACK basic candidates.
 # Previous-cycle price+VWAP stored in tri-city-vwap-state.json for reclaim detection.
 
-def fetch_vwap(symbol: str, now: datetime) -> float | None:
+def fetch_vwap_data(symbol: str, now: datetime) -> dict | None:
     """
-    Compute intraday VWAP from yfinance 5-min bars.
-    Returns None if data unavailable — callers must never block on missing VWAP.
+    Compute intraday VWAP from yfinance 5-min bars. Also returns:
+      last_bar: {open, high, low, close} — most recent completed 5-min bar
+      change_from_open_pct: % move from first regular-session bar open to last close
+
+    Returns None on any failure — callers must never block on missing data.
     """
     try:
         import yfinance as yf
@@ -306,54 +328,130 @@ def fetch_vwap(symbol: str, now: datetime) -> float | None:
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
 
-        # Restrict to today's session bars
-        today_str = now.strftime("%Y-%m-%d")
         df.index = pd.to_datetime(df.index)
         if df.index.tz is None:
             df.index = df.index.tz_localize("UTC")
-        df_today = df[df.index.tz_convert("America/Chicago").strftime("%Y-%m-%d") == today_str]
+        ct_index = df.index.tz_convert("America/Chicago")
+
+        # Today's bars (all hours including premarket)
+        today_str = now.strftime("%Y-%m-%d")
+        df_today = df[ct_index.strftime("%Y-%m-%d") == today_str]
         if df_today.empty:
-            df_today = df  # fallback — use all bars if timezone filtering fails
+            df_today = df
 
         h = df_today["high"].astype(float).values
         l = df_today["low"].astype(float).values
         c = df_today["close"].astype(float).values
         v = df_today["volume"].astype(float).values
+        o = df_today["open"].astype(float).values
 
         if v.sum() == 0:
             return None
 
-        tp = (h + l + c) / 3.0     # typical price
+        tp   = (h + l + c) / 3.0
         vwap = float((tp * v).cumsum()[-1] / v.cumsum()[-1])
-        return round(vwap, 4)
+
+        # Last completed bar
+        last_bar = {
+            "open":  round(float(o[-1]), 4),
+            "high":  round(float(h[-1]), 4),
+            "low":   round(float(l[-1]), 4),
+            "close": round(float(c[-1]), 4),
+        }
+
+        # Change from first regular-session bar open (8:30 CT)
+        session_open = now.replace(hour=8, minute=30, second=0, microsecond=0)
+        ct_today = ct_index[ct_index.strftime("%Y-%m-%d") == today_str]
+        session_bars = [i for i, t in enumerate(ct_today) if t >= session_open]
+        if session_bars:
+            first_open = float(df_today["open"].iloc[session_bars[0]])
+            last_close = float(c[-1])
+            change_pct = (last_close - first_open) / first_open * 100 if first_open > 0 else 0.0
+        else:
+            change_pct = 0.0
+
+        return {
+            "vwap":                round(vwap, 4),
+            "last_bar":            last_bar,
+            "change_from_open_pct": round(change_pct, 2),
+        }
     except Exception as e:
-        logger.debug(f"fetch_vwap {symbol}: {e}")
+        logger.debug(f"fetch_vwap_data {symbol}: {e}")
         return None
+
+
+# ── Candlestick quality filters ───────────────────────────────────────────────
+
+def is_rejection_bar(bar: dict) -> bool:
+    """
+    Shooting star / spike bar: long upper wick, close near the low.
+    Identifies failed breakout bars (AEHL, PCLA, FUTG pattern).
+    Blocks BREAKOUT signals when the most recent bar looks like distribution.
+    """
+    o, h, l, c = bar["open"], bar["high"], bar["low"], bar["close"]
+    bar_range = h - l
+    if bar_range < 0.01:
+        return False
+    upper_wick = h - max(o, c)
+    return (
+        upper_wick / bar_range > 0.50          # upper wick > half the range
+        and c < (l + bar_range * 0.35)         # close in bottom 35% of bar
+    )
+
+
+def is_bounce_bar(bar: dict) -> bool:
+    """
+    Hammer / dragonfly: bullish close, lower wick present, real body.
+    Confirms EMA20 pullback entries (CODX/ONDS/PONY pattern).
+    Price tested EMA20 support and buyers stepped in.
+    """
+    o, h, l, c = bar["open"], bar["high"], bar["low"], bar["close"]
+    bar_range = h - l
+    if bar_range < 0.01:
+        return True   # no data = don't block
+    lower_wick = min(o, c) - l
+    body       = abs(c - o)
+    return (
+        c > o                                  # bullish close
+        and lower_wick / bar_range > 0.20      # tested lower, rejected
+        and body / bar_range > 0.25            # real body, not a doji
+    )
 
 
 # ── Setup detection ───────────────────────────────────────────────────────────
 
 def detect_setup(row: dict, now: datetime | None = None,
-                  vwap: float | None = None) -> str | None:
+                  vwap_data: dict | None = None) -> str | None:
     """
-    Apply the three setup rules in priority order.
-    Returns "BREAKOUT" | "CONTINUATION" | "PULLBACK" | None.
+    Apply setup rules in priority order.
+    Returns "BREAKOUT" | "CONTINUATION" | "PULLBACK" | "EMA20_PULLBACK" | None.
 
-    CONTINUATION: requires MACD line > Signal line (Ch 10, Papp).
-    BREAKOUT:     EMA ribbon expanding → RSI threshold lowered by 5 pts (more permissive).
-    CONTINUATION: EMA ribbon compressing → EMA dev window tightened to 0.5% (stricter).
-    Ribbon/MACD filters are skipped (never block) when data is unavailable.
+    CONTINUATION:    requires MACD line > Signal line (Ch 10, Papp).
+    BREAKOUT:        EMA ribbon expanding → RSI threshold lowered by 5 pts.
+                     ORH/ORL spread > 8% of price → blocked (wide range = indecision).
+                     Rejection bar (shooting star) on last 5-min bar → blocked.
+    CONTINUATION:    EMA ribbon compressing → EMA dev window tightened to 0.5%.
+    EMA20_PULLBACK:  New signal. Price at EMA20 after a run, above rising VWAP,
+                     RSI cooled 45–68. Bounce bar confirms. 9:15–11:30 CT only.
 
     VWAP filter (Aziz): BREAKOUT and CONTINUATION blocked when price < VWAP.
     PULLBACK is not blocked (a dip to VWAP is the Aziz entry zone).
-    VWAP data is optional — never blocks when unavailable.
+    EMA20_PULLBACK requires price > VWAP (EMA20 > VWAP = bullish ribbon).
+    All VWAP/bar checks are optional — never block when data unavailable.
     """
-    sig     = row["signal"]
-    price   = row["price"]
-    orh     = row["orh"]
-    rsi     = row["rsi"]
-    ema_dev = row["ema_dev"]
-    now     = now or datetime.now(CT)
+    sig      = row["signal"]
+    price    = row["price"]
+    orh      = row["orh"]
+    orl      = row["orl"]
+    rsi      = row["rsi"]
+    ema_dev  = row["ema_dev"]
+    rvol     = row["rvol"]
+    now      = now or datetime.now(CT)
+
+    # Unpack VWAP data
+    vwap             = vwap_data["vwap"]             if vwap_data else None
+    last_bar         = vwap_data.get("last_bar")     if vwap_data else None
+    change_from_open = vwap_data.get("change_from_open_pct", 0.0) if vwap_data else 0.0
 
     # VWAP guard: no BREAKOUT or CONTINUATION longs below VWAP (Aziz)
     if vwap is not None and vwap > 0 and price < vwap:
@@ -370,10 +468,20 @@ def detect_setup(row: dict, now: datetime | None = None,
     # SETUP 1: BREAKOUT
     # EMA ribbon expanding → momentum confirmed → allow RSI as low as 45 (vs 50 default)
     breakout_rsi_min = BREAKOUT_RSI_MIN - 5 if ribbon == "EXPANDING" else BREAKOUT_RSI_MIN
-    if (sig == "BREAKOUT"
-            and above_orh
-            and rsi > breakout_rsi_min
-            and ema_dev > 0):
+    if sig == "BREAKOUT" and above_orh and rsi > breakout_rsi_min and ema_dev > 0:
+        # ORH/ORL spread filter: wide range = uncertain direction (FUTG pattern)
+        if orh > 0 and orl > 0 and price > 0:
+            spread_pct = (orh - orl) / price * 100
+            if spread_pct > BREAKOUT_MAX_ORH_ORL_SPREAD:
+                logger.info(
+                    f"BREAKOUT {row['symbol']} blocked: ORH/ORL spread "
+                    f"{spread_pct:.1f}% > {BREAKOUT_MAX_ORH_ORL_SPREAD}%"
+                )
+                return None
+        # Rejection bar filter: spike-and-reverse pattern on last bar
+        if last_bar and is_rejection_bar(last_bar):
+            logger.info(f"BREAKOUT {row['symbol']} blocked: rejection/spike bar on last 5-min bar")
+            return None
         return "BREAKOUT"
 
     # SETUP 2: CONTINUATION — MACD + ribbon checks
@@ -393,6 +501,26 @@ def detect_setup(row: dict, now: datetime | None = None,
             and 0 <= ema_dev <= PULLBACK_EMA_MAX
             and PULLBACK_RSI_MIN <= rsi <= PULLBACK_RSI_MAX):
         return "PULLBACK"
+
+    # SETUP 4: EMA20_PULLBACK
+    # Price has pulled back to EMA20 after a significant run. Above rising VWAP.
+    # RSI cooled. Bounce bar confirms buyers at EMA20. Pine has no flag for this.
+    # Based on CODX/ONDS/PONY pattern: multiple clean entries per day.
+    pb_start = now.replace(hour=EMA20_PB_START_H, minute=EMA20_PB_START_M,
+                            second=0, microsecond=0)
+    pb_end   = now.replace(hour=EMA20_PB_END_H,   minute=EMA20_PB_END_M,
+                            second=0, microsecond=0)
+    in_window = pb_start <= now <= pb_end
+
+    if (in_window
+            and EMA20_PB_EMA_MIN <= ema_dev <= EMA20_PB_EMA_MAX
+            and vwap is not None and price > vwap          # price above rising VWAP
+            and EMA20_PB_RSI_MIN <= rsi <= EMA20_PB_RSI_MAX
+            and rvol >= EMA20_PB_MIN_RVOL
+            and change_from_open >= EMA20_PB_MIN_RUN       # confirmed run from open
+            and (orh <= 0 or price >= orh * EMA20_PB_ORH_MULT)  # well above ORH
+            and (last_bar is None or is_bounce_bar(last_bar))):  # bounce bar preferred
+        return "EMA20_PULLBACK"
 
     return None
 
@@ -477,21 +605,39 @@ def main():
         except Exception:
             pass
 
-    # ── Fetch VWAP for candidate rows (have non-"---" signal label) ─────────
-    # Only fetch for rows that Pine has already flagged — keeps cycle fast.
-    candidate_syms = [r["symbol"] for r in rows if r["signal"] not in ("---", "")]
-    vwap_map: dict[str, float | None] = {}
-    for sym in candidate_syms:
-        vwap_map[sym] = fetch_vwap(sym, now_ct)
+    # ── Identify VWAP fetch candidates ─────────────────────────────────────
+    # 1. Pine-signaled rows (existing logic)
+    # 2. EMA20_PULLBACK basic candidates: time window + EMA/RSI/RVOL pre-filter
+    #    (Pine won't flag these — we detect them independently)
+    pb_start = now_ct.replace(hour=EMA20_PB_START_H, minute=EMA20_PB_START_M,
+                               second=0, microsecond=0)
+    pb_end   = now_ct.replace(hour=EMA20_PB_END_H,   minute=EMA20_PB_END_M,
+                               second=0, microsecond=0)
+    in_pb_window = pb_start <= now_ct <= pb_end
+
+    fetch_syms: set[str] = set(
+        r["symbol"] for r in rows if r["signal"] not in ("---", "")
+    )
+    if in_pb_window:
+        for r in rows:
+            if (EMA20_PB_EMA_MIN <= r["ema_dev"] <= EMA20_PB_EMA_MAX
+                    and EMA20_PB_RSI_MIN <= r["rsi"] <= EMA20_PB_RSI_MAX
+                    and r["rvol"] >= EMA20_PB_MIN_RVOL):
+                fetch_syms.add(r["symbol"])
+
+    vwap_map: dict[str, dict | None] = {}
+    for sym in fetch_syms:
+        vwap_map[sym] = fetch_vwap_data(sym, now_ct)
 
     # ── Detect signals ──────────────────────────────────────────────────────
     signals: list[dict] = []
     new_vwap_state: dict[str, dict] = {}
     for row in rows:
-        sym   = row["symbol"]
-        vwap  = vwap_map.get(sym)  # None for non-candidate rows
+        sym       = row["symbol"]
+        vwap_data = vwap_map.get(sym)   # dict | None
+        vwap      = vwap_data["vwap"] if vwap_data else None
 
-        setup = detect_setup(row, now_ct, vwap=vwap)
+        setup = detect_setup(row, now_ct, vwap_data=vwap_data)
         if setup is None:
             continue
 
@@ -506,27 +652,29 @@ def main():
             and row["price"] >= vwap     # now at or above VWAP
         )
 
-        vwap_above = (vwap is not None and vwap > 0 and row["price"] >= vwap)
+        vwap_above       = (vwap is not None and vwap > 0 and row["price"] >= vwap)
+        change_from_open = vwap_data.get("change_from_open_pct", 0.0) if vwap_data else 0.0
 
         signals.append({
-            "symbol":       sym,
-            "setup":        setup,
-            "price":        row["price"],
-            "orh":          row["orh"],
-            "orl":          row["orl"],
-            "rsi":          row["rsi"],
-            "ema_dev":      row["ema_dev"],
-            "rvol":         row["rvol"],
-            "cup":          row["cup"],
-            "htf":          sym in htf_set,
-            "resistance":   sym in resistance_set,
-            "bb_squeeze":   sym in bb_squeeze_set,
-            "vwap":         vwap,
-            "vwap_above":   vwap_above,
-            "vwap_reclaim": vwap_reclaim,
+            "symbol":             sym,
+            "setup":              setup,
+            "price":              row["price"],
+            "orh":                row["orh"],
+            "orl":                row["orl"],
+            "rsi":                row["rsi"],
+            "ema_dev":            row["ema_dev"],
+            "rvol":               row["rvol"],
+            "cup":                row["cup"],
+            "htf":                sym in htf_set,
+            "resistance":         sym in resistance_set,
+            "bb_squeeze":         sym in bb_squeeze_set,
+            "vwap":               vwap,
+            "vwap_above":         vwap_above,
+            "vwap_reclaim":       vwap_reclaim,
+            "change_from_open":   change_from_open,
         })
 
-        # Track VWAP state for this symbol for next cycle's reclaim detection
+        # Track VWAP state for next cycle's reclaim detection
         if vwap is not None:
             new_vwap_state[sym] = {"price": row["price"], "vwap": vwap}
 
@@ -558,17 +706,19 @@ def main():
     # Print summary for Claude context (minimal — just what matters)
     if signals:
         for s in signals:
-            cup_tag    = " CUP"      if s["cup"]                  else ""
-            htf_tag    = " HTF"      if s["htf"]                  else ""
-            res_tag    = " ⚠RES"    if s["resistance"]            else ""
-            bb_tag     = " BB✓"     if s.get("bb_squeeze")        else ""
-            vwap_tag   = f" VWAP=${s['vwap']:.2f}" if s.get("vwap") else ""
-            reclaim_tag = " VWAP_RECLAIM" if s.get("vwap_reclaim") else ""
+            cup_tag     = " CUP"           if s["cup"]                    else ""
+            htf_tag     = " HTF"           if s["htf"]                    else ""
+            res_tag     = " ⚠RES"         if s["resistance"]              else ""
+            bb_tag      = " BB✓"          if s.get("bb_squeeze")          else ""
+            vwap_tag    = f" VWAP=${s['vwap']:.2f}" if s.get("vwap")      else ""
+            reclaim_tag = " VWAP_RECLAIM" if s.get("vwap_reclaim")        else ""
+            run_tag     = (f" +{s['change_from_open']:.1f}%fromOpen"
+                           if s.get("change_from_open", 0) > 0            else "")
             print(f"SIGNAL: {s['setup']} {s['symbol']} ${s['price']} "
                   f"ORH=${s['orh']} ORL=${s['orl']} "
                   f"RSI={s['rsi']} EMA={s['ema_dev']:+.2f}% "
                   f"RVOL={s['rvol']:.1f}x{cup_tag}{htf_tag}{res_tag}{bb_tag}"
-                  f"{vwap_tag}{reclaim_tag}")
+                  f"{vwap_tag}{reclaim_tag}{run_tag}")
 
     for spike in rvol_spikes:
         print(f"RVOL_SPIKE: {spike['symbol']} {spike['prev']:.1f}x → {spike['now']:.1f}x")
