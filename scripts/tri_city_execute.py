@@ -163,10 +163,10 @@ def already_executed_today(symbol: str, setup: str) -> bool:
     allow one re-entry. Bulkowski: re-entry after a scratch has 65-70% win rate.
     """
     today = datetime.now(CT).strftime("%Y-%m-%d")
-    for e in load_log():
+    for e in reversed(load_log()):
         if (e.get("symbol") == symbol and e.get("setup") == setup
-                and e.get("date") == today):
-            # Re-entry allowed if prior exit was a Fix B scratch within loss limit
+                and e.get("date") == today and e.get("success")):
+            # Most recent execution found — check if it was a Fix B scratch
             if (e.get("fix_b_exit")
                     and e.get("pnl_per_share") is not None
                     and e["pnl_per_share"] >= -RE_ENTRY_MAX_LOSS):

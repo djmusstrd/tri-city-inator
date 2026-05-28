@@ -555,8 +555,9 @@ def check_rvol_collapse(positions: list, today: str) -> list[str]:
 
 def check_trailing(positions: list, today: str) -> list[str]:
     """
-    For T3 (trailing) lot: if price drops below EMA20 AND VWAP → close.
+    For T3 (trailing) lot: exit on first bar close below EMA20.
     Only applies when breakeven has been set (T1 hit) and T2 stop not yet active.
+    Uses bar close (not live price) to avoid wick-triggered exits.
     """
     actions = []
     entries = load_executions()
@@ -581,21 +582,24 @@ def check_trailing(positions: list, today: str) -> list[str]:
         if entry.get("t2_stop_set"):
             continue
 
-        ema20, vwap = get_intraday_ema_vwap(ticker)
-        if ema20 is None or vwap is None:
+        ema20, _ = get_intraday_ema_vwap(ticker)
+        if ema20 is None:
             continue
 
-        if curr_price < ema20 and curr_price < vwap:
+        bar_close = get_last_bar_close(ticker)
+        check_price = bar_close if bar_close is not None else curr_price
+
+        if check_price < ema20:
+            price_label = f"bar close ${bar_close:.2f}" if bar_close is not None else f"live ${curr_price:.2f}"
             logger.info(
-                f"TRAIL EXIT: {ticker} ${curr_price:.2f} < "
-                f"EMA20 ${ema20:.2f} AND VWAP ${vwap:.2f}"
+                f"TRAIL EXIT: {ticker} {price_label} < EMA20 ${ema20:.2f}"
             )
             cancel_all_orders(ticker)
-            success = close_position(ticker, reason="Trailing stop (EMA+VWAP breach)")
+            success = close_position(ticker, reason="Trailing stop (EMA20 bar close breach)")
             if success:
                 actions.append(
                     f"TRAIL EXIT: {ticker} @ ${curr_price:.2f} "
-                    f"(below EMA20 ${ema20:.2f} + VWAP ${vwap:.2f})"
+                    f"(EMA20 bar close breach — {price_label} < EMA20 ${ema20:.2f})"
                 )
                 try:
                     from managers.trade_journal import log_exit, fetch_exit_price
@@ -605,7 +609,7 @@ def check_trailing(positions: list, today: str) -> list[str]:
                         setup=entry.get("setup", "UNKNOWN"),
                         date=today,
                         exit_price=exit_price,
-                        exit_reason="Trailing stop (EMA+VWAP breach)",
+                        exit_reason="Trailing stop (EMA20 bar close breach)",
                         shares=entry.get("position_size", 0),
                     )
                 except Exception as _je:
@@ -707,6 +711,122 @@ def print_status(positions: list, today: str):
     print()
 
 
+# ── Bracket stop reconciliation ────────────────────────────────────────────────
+
+def reconcile_bracket_stops(today: str, open_tickers: set) -> list[str]:
+    """
+    Detect bracket stop fills that fired via Alpaca (bypassing this manager).
+
+    For each today's execution that has no journal exit and no open Alpaca position,
+    fetch the most recent filled stop/sell order from Alpaca and log the exit.
+    Returns a list of reconciliation messages (printed by caller).
+    """
+    actions = []
+    entries = load_executions()
+    today_entries = [e for e in entries if e.get("date") == today and e.get("success")]
+    if not today_entries:
+        return actions
+
+    try:
+        JOURNAL_PATH = WORKSPACE / "logs" / "tri-city-journal.json"
+        journal = json.loads(JOURNAL_PATH.read_text()) if JOURNAL_PATH.exists() else []
+    except Exception:
+        journal = []
+
+    logged_ids = {t["trade_id"] for t in journal}
+
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import OrderStatus, QueryOrderStatus
+        from datetime import timedelta, timezone
+
+        tc = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+    except Exception as e:
+        logger.warning(f"reconcile_bracket_stops: Alpaca client init failed: {e}")
+        return actions
+
+    # Build a de-dup set: (symbol, setup) pairs we already reconciled this call
+    reconciled = set()
+
+    for entry in reversed(today_entries):
+        symbol = entry.get("symbol")
+        setup  = entry.get("setup", "UNKNOWN")
+        key    = (symbol, setup)
+
+        if key in reconciled:
+            continue
+
+        # Check if journal already has an exit for this exact execution
+        # Use a suffix counter to find the right trade_id
+        base_id = f"{today}-{symbol}-{setup}"
+        # Any trade_id starting with base_id is considered covered
+        covered = any(jid == base_id or jid.startswith(base_id + "-") for jid in logged_ids)
+        if covered and symbol not in open_tickers:
+            # Journal has it logged and no open position — already reconciled
+            reconciled.add(key)
+            continue
+
+        if symbol in open_tickers:
+            # Position still open — nothing to reconcile yet
+            continue
+
+        # Position is closed but no journal exit — find the bracket stop fill
+        try:
+            today_start = datetime.now(CT).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).astimezone(timezone.utc)
+
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                symbols=[symbol],
+                after=today_start,
+                limit=20,
+            )
+            orders = tc.get_orders(filter=req)
+        except Exception as e:
+            logger.warning(f"reconcile_bracket_stops: order fetch failed for {symbol}: {e}")
+            continue
+
+        # Find the most recent filled sell (stop or market) order
+        stop_fill = None
+        for o in sorted(orders, key=lambda x: x.filled_at or x.submitted_at, reverse=True):
+            if (o.side.value == "sell"
+                    and o.status.value == "filled"
+                    and o.filled_avg_price is not None):
+                stop_fill = o
+                break
+
+        if not stop_fill:
+            continue
+
+        fill_price = float(stop_fill.filled_avg_price)
+        fill_time_utc = stop_fill.filled_at
+        fill_time_ct  = fill_time_utc.astimezone(CT).strftime("%H:%M:%S CT") if fill_time_utc else "unknown"
+        order_type = stop_fill.order_type.value if stop_fill.order_type else "stop"
+        shares = entry.get("position_size", int(stop_fill.filled_qty or 0))
+
+        try:
+            from managers.trade_journal import log_exit
+            log_exit(
+                symbol=symbol,
+                setup=setup,
+                date=today,
+                exit_price=fill_price,
+                exit_reason=f"Stop loss hit — Alpaca bracket {order_type} filled (auto-reconciled)",
+                shares=shares,
+            )
+            reconciled.add(key)
+            actions.append(
+                f"RECONCILED: {symbol} {setup} stop fill ${fill_price:.3f} @ {fill_time_ct} "
+                f"({shares} shares)"
+            )
+        except Exception as e:
+            logger.warning(f"reconcile_bracket_stops: log_exit failed for {symbol}: {e}")
+
+    return actions
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -726,6 +846,12 @@ def main():
         return  # Silent outside market hours
 
     positions = get_open_positions()
+    open_tickers = {p["ticker"] for p in positions}
+
+    # Reconcile any bracket stops that fired via Alpaca without our manager seeing them
+    recon_actions = reconcile_bracket_stops(today, open_tickers)
+    for msg in recon_actions:
+        print(msg)
 
     if args.status:
         print_status(positions, today)

@@ -96,8 +96,8 @@ EMA20_PB_RSI_MAX   =  68    # RSI not reversed (still bullish context)
 EMA20_PB_MIN_RUN   =  5.0   # minimum % move from open to confirm a real run
 EMA20_PB_MIN_RVOL  =  0.8   # sustained volume (bar-level, not just opening spike)
 EMA20_PB_ORH_MULT  =  1.05  # price must be at least 5% above ORH (confirms gap/run)
-EMA20_PB_START_H   =  9     # earliest CT hour for this signal
-EMA20_PB_START_M   = 15     # earliest CT minute (9:15 AM)
+EMA20_PB_START_H   =  8     # earliest CT hour for this signal
+EMA20_PB_START_M   = 35     # earliest CT minute (8:35 AM — 5 min after ORB with ORB_MINUTES=5)
 EMA20_PB_END_H     = 11     # latest CT hour
 EMA20_PB_END_M     = 30     # latest CT minute (11:30 AM, before lunch)
 
@@ -500,6 +500,15 @@ def detect_setup(row: dict, now: datetime | None = None,
     if (sig == "PULLBACK"
             and 0 <= ema_dev <= PULLBACK_EMA_MAX
             and PULLBACK_RSI_MIN <= rsi <= PULLBACK_RSI_MAX):
+        # Block afternoon re-entries on extended runners (likely exhaustion)
+        if change_from_open >= 25.0:
+            pm_cutoff = now.replace(hour=11, minute=30, second=0, microsecond=0)
+            if now >= pm_cutoff:
+                logger.info(
+                    f"PULLBACK {row['symbol']} blocked: extended run "
+                    f"{change_from_open:.1f}% from open after 11:30 CT"
+                )
+                return None
         return "PULLBACK"
 
     # SETUP 4: EMA20_PULLBACK
