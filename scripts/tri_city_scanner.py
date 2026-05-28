@@ -33,6 +33,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 WORKSPACE = Path.home() / "tri-city-inator"
+WATCHLIST_SEEDS = WORKSPACE / "shared" / "tri-city-watchlist-seeds.json"
 sys.path.insert(0, str(WORKSPACE))
 
 try:
@@ -475,6 +476,93 @@ def fetch_news(symbols: list[str]) -> dict[str, dict]:
         return {}
 
 
+# ── Watchlist seed candidates ─────────────────────────────────────────────────
+# Symbols in the TradingView watchlist (written by the 7:30 AM cron) are vetted
+# day-2 movers and previously traded winners. They may not appear in the gap
+# screener but are worth scoring against the same criteria so they can be ranked
+# alongside fresh gappers.
+
+def fetch_watchlist_candidates(seed_symbols: list[str]) -> list[dict]:
+    """
+    Fetches current stats for watchlist seed symbols via yfinance.
+    Returns a list of candidate dicts in the same shape as fetch_gappers().
+    Symbols that fail the yfinance lookup (delisted, no data) are silently skipped.
+    """
+    if not seed_symbols:
+        return []
+    try:
+        import yfinance as yf
+        import random
+        import time
+
+        _YF_TO_TV = {"NYSE": "NYSE", "NMS": "NASDAQ", "NCM": "NASDAQ",
+                     "NGM": "NASDAQ", "PCX": "AMEX", "AMEX": "AMEX"}
+
+        candidates = []
+        for sym in seed_symbols:
+            bare = sym.split(":")[-1] if ":" in sym else sym
+            try:
+                time.sleep(random.uniform(0.05, 0.15))
+                tk = yf.Ticker(bare)
+                fi = tk.fast_info
+
+                price = float(getattr(fi, "last_price", None) or getattr(fi, "regular_market_price", None) or 0)
+                if price <= 0:
+                    continue
+                prev_close = float(getattr(fi, "previous_close", None) or getattr(fi, "regular_market_previous_close", None) or price)
+                gap_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+                volume  = float(getattr(fi, "last_volume", None) or getattr(fi, "regular_market_volume", None) or 0)
+                avg_vol = float(getattr(fi, "three_month_average_volume", None) or 1)
+                rel_vol = round(volume / avg_vol, 2) if avg_vol > 0 else 0.0
+                high_52 = float(getattr(fi, "year_high", None) or 0)
+                sma50_est = 0.0  # not available via fast_info
+                exch = getattr(fi, "exchange", "NMS") or "NMS"
+                tv_prefix = _YF_TO_TV.get(exch, "NASDAQ")
+                tv_sym = sym if ":" in sym else f"{tv_prefix}:{bare}"
+
+                if not (MIN_PRICE <= price <= MAX_PRICE):
+                    continue
+
+                candidates.append({
+                    "symbol":          bare,
+                    "tv_symbol":       tv_sym,
+                    "price":           round(price, 2),
+                    "gap_pct":         round(gap_pct, 2),
+                    "rvol":            rel_vol,
+                    "rsi":             50.0,         # unavailable via fast_info
+                    "sma50":           sma50_est,
+                    "sma100":          0.0,
+                    "stage2":          False,
+                    "sma_rising":      False,
+                    "near_52wk_high":  high_52 > 0 and price / high_52 > 0.95,
+                    "htf":             False,
+                    "candle_hammer":   False,
+                    "perf_3m":         0.0,
+                    "high_52w":        round(high_52, 2),
+                    "catalyst":        gap_pct >= 5.0,
+                    "parabolic":       rel_vol >= PARABOLIC_VOL,
+                    "float_cat":       "unknown",
+                    "float_shares":    0,
+                    "tech_rating":     "neutral",
+                    "volume":          int(volume),
+                    "avg_volume":      int(avg_vol),
+                    "pm_volume":       0,
+                    "park_trending":   False,
+                    "bb_squeeze":      False,
+                    "earnings_soon":   False,
+                    "news_headline":   "",
+                    "news_url":        "",
+                    "news_publisher":  "",
+                    "_source":         "watchlist",  # tag for visibility in output
+                })
+            except Exception:
+                continue
+        return candidates
+    except Exception as e:
+        logger.debug(f"fetch_watchlist_candidates: {e}")
+        return []
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -496,6 +584,22 @@ def main():
         print("  This is normal before 4:00 AM CT — try again closer to market open.")
         print(f"\n{'='*72}\n")
         return
+
+    # Watchlist seeds — include previously vetted day-2 movers and winners
+    # Written by the 7:30 AM cron (watchlist_get → shared/tri-city-watchlist-seeds.json)
+    if WATCHLIST_SEEDS.exists():
+        try:
+            seed_data = json.loads(WATCHLIST_SEEDS.read_text())
+            seed_syms = seed_data.get("symbols", []) if isinstance(seed_data, dict) else seed_data
+            existing  = {s["symbol"] for s in stocks}
+            to_fetch  = [s for s in seed_syms if (s.split(":")[-1] if ":" in s else s) not in existing]
+            if to_fetch:
+                print(f"  Fetching {len(to_fetch)} watchlist seed symbols via yfinance: {to_fetch}")
+                wl_cands = fetch_watchlist_candidates(to_fetch)
+                stocks.extend(wl_cands)
+                print(f"  Added {len(wl_cands)} watchlist candidates to universe")
+        except Exception as e:
+            logger.debug(f"watchlist seeds merge failed: {e}")
 
     # Parkinson volatility regime check (batch yfinance — top 100 symbols only)
     # Identifies trending vs mean-reverting stocks before scoring; boosts trending ones.
@@ -589,11 +693,29 @@ def main():
         print(f"  S  BB SQUEEZE (compressed band, coiled):         {bb_squeeze_list}")
     print(f"{'─'*101}")
 
-    # Top 15 non-parabolic exchange-prefixed symbols for TradingView indicator swap
-    tv_symbols = [
+    # Top 20 non-parabolic exchange-prefixed symbols for TradingView indicator swap
+    # Validate each ticker via yfinance fast_info — skip delisted/unavailable ones
+    candidate_tv = [
         s.get("tv_symbol", f"NASDAQ:{s['symbol']}")
         for s in ranked if not s["parabolic"]
     ][:20]
+
+    tv_symbols = []
+    try:
+        import yfinance as yf
+        for tv_sym in candidate_tv:
+            bare = tv_sym.split(":")[-1]
+            try:
+                fi = yf.Ticker(bare).fast_info
+                price = getattr(fi, "last_price", None) or getattr(fi, "regular_market_price", None)
+                if price and float(price) > 0:
+                    tv_symbols.append(tv_sym)
+                else:
+                    print(f"  SKIP {bare} — no price data (possibly delisted)")
+            except Exception:
+                print(f"  SKIP {bare} — yfinance lookup failed")
+    except ImportError:
+        tv_symbols = candidate_tv  # fallback: no validation
 
     print(f"\n  TV WATCHLIST (top 20, parabolic excluded, exchange-prefixed):")
     print(f"  {', '.join(tv_symbols)}")

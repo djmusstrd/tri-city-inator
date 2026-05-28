@@ -51,7 +51,7 @@ CANDIDATES = WORKSPACE / "shared" / "tri-city-candidates.json"
 MIN_CHANGE_PCT = float(os.getenv("MIN_INTRADAY_PCT", os.getenv("MIN_GAP_PCT", "3.0")))
 MIN_PRICE      = float(os.getenv("MIN_PRICE",   "2.0"))
 MAX_PRICE      = float(os.getenv("MAX_PRICE",   "500.0"))
-MIN_RVOL       = float(os.getenv("MIN_RVOL",    "1.5"))
+MIN_RVOL       = float(os.getenv("MIN_INTRADAY_RVOL", "0.8"))
 PARABOLIC_VOL  = 10.0
 
 W_GAP       = 0.35

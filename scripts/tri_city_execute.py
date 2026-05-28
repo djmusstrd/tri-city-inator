@@ -76,7 +76,8 @@ from managers.trade_executor import execute_tri_city_trade, get_open_positions
 CT       = ZoneInfo("America/Chicago")
 LOG_FILE = WORKSPACE / "logs" / "tri-city-executions.json"
 
-STOP_OFFSET = 0.13   # 13 cents below ORH (all setup types)
+STOP_OFFSET      = 0.13   # 13 cents below ORH (all setup types)
+VWAP_STOP_OFFSET = float(os.getenv("VWAP_STOP_OFFSET", "0.05"))  # 5 cents below VWAP (Aziz)
 
 # ── ORB timing ────────────────────────────────────────────────────────────────
 ORB_MINUTES = int(os.getenv("ORB_MINUTES", "15"))   # opening range duration from .env
@@ -562,7 +563,8 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                      candle_type: str = "UNKNOWN",
                      cup: bool = False,
                      htf: bool = False,
-                     bb_squeeze: bool = False) -> dict:
+                     bb_squeeze: bool = False,
+                     vwap: float | None = None) -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
@@ -587,6 +589,18 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
             stop  = round(price * (1 - STOP_PCT / 100), 2)
     else:
         stop = round(price * (1 - STOP_PCT / 100), 2)
+
+    # VWAP stop tightening (Aziz): if VWAP is provided and VWAP stop is tighter
+    # (higher price) than the standard stop, use VWAP stop instead.
+    # "Just below VWAP" = cleaner invalidation level than arbitrary % stops.
+    if vwap is not None and vwap > 0:
+        vwap_stop = round(vwap - VWAP_STOP_OFFSET, 2)
+        if vwap_stop > stop:
+            logger.info(
+                f"VWAP stop: ${stop:.2f} → ${vwap_stop:.2f} "
+                f"(VWAP ${vwap:.2f} − ${VWAP_STOP_OFFSET:.2f})"
+            )
+            stop = vwap_stop
 
     # Safety guard: stop must always be below entry
     if stop >= price:
@@ -775,6 +789,9 @@ def main():
     parser.add_argument("--rvol",         default=None, type=float,
                         help="Scanner RVOL value. If provided, skips internal yfinance RVOL "
                              "calculation and uses this value for guard and sizing.")
+    parser.add_argument("--vwap",         default=None, type=float,
+                        help="Current session VWAP. If provided, tightens stop to just below "
+                             "VWAP when that gives a better (higher) stop than the standard stop.")
     parser.add_argument("--candle_type", default=None,
                         help="Override candle type (HAMMER/NEUTRAL/BEARISH/DOJI). "
                              "Auto-detected from last 1-min bar if not provided.")
@@ -872,7 +889,8 @@ def main():
                   f"RSI: {args.rsi:.1f} | EMA Dev%: {args.ema_dev:+.2f}%")
             print("=" * 64)
         signal_preview = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev,
-                                          bb_squeeze=getattr(args, "bb_squeeze", False))
+                                          bb_squeeze=getattr(args, "bb_squeeze", False),
+                                          vwap=getattr(args, "vwap", None))
         risk_per_share = round(args.price - signal_preview["stop_loss"], 2)
         print(
             f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup} | "
@@ -950,7 +968,8 @@ def main():
     signal       = calculate_signal(symbol, args.price, args.orh, args.setup,
                                     args.ema_dev, rvol=rvol, candle_type=candle_type,
                                     cup=args.cup, htf=getattr(args, "htf", False),
-                                    bb_squeeze=getattr(args, "bb_squeeze", False))
+                                    bb_squeeze=getattr(args, "bb_squeeze", False),
+                                    vwap=getattr(args, "vwap", None))
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )

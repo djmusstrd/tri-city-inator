@@ -60,6 +60,7 @@ SHARED     = WORKSPACE / "shared"
 TABLE_FILE = SHARED / "tri-city-table.json"
 FLAGS_FILE = SHARED / "tri-city-flags.json"
 RVOL_FILE  = SHARED / "tri-city-rvol-state.json"
+VWAP_FILE  = SHARED / "tri-city-vwap-state.json"
 SIG_FILE   = SHARED / "tri-city-signals.json"
 
 CT = ZoneInfo("America/Chicago")
@@ -80,6 +81,10 @@ BREAKOUT_RSI_MIN  = 50
 
 RVOL_SPIKE_THRESH     = 0.50   # ≥50% increase triggers alert
 RVOL_SPIKE_MIN        = 2.0    # must be ≥2.0x after spike
+
+# VWAP settings (Aziz methodology)
+VWAP_PROXIMITY_PCT    = 0.003  # 0.3% — price within this % of VWAP = "near VWAP"
+VWAP_STOP_OFFSET      = 0.05   # 5 cents below VWAP for VWAP-reclaim stops
 
 
 # ── Table row parser ──────────────────────────────────────────────────────────
@@ -275,9 +280,61 @@ def ema_ribbon_trend(symbol: str, now: datetime) -> str | None:
         return None
 
 
+# ── VWAP (Aziz methodology) ───────────────────────────────────────────────────
+# VWAP = cumsum(typical_price × volume) / cumsum(volume), reset each session.
+# Used to:
+#   1. Block BREAKOUT/CONTINUATION when price < VWAP (no longs below VWAP)
+#   2. Flag VWAP_RECLAIM when price crossed above VWAP since the previous cycle
+#   3. Provide a tighter VWAP-based stop for reclaim entries (5¢ below VWAP)
+#
+# Only fetched for symbols that have a non-"---" signal label from Pine (0–3/cycle).
+# Previous-cycle price+VWAP stored in tri-city-vwap-state.json for reclaim detection.
+
+def fetch_vwap(symbol: str, now: datetime) -> float | None:
+    """
+    Compute intraday VWAP from yfinance 5-min bars.
+    Returns None if data unavailable — callers must never block on missing VWAP.
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+
+        df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+
+        # Restrict to today's session bars
+        today_str = now.strftime("%Y-%m-%d")
+        df.index = pd.to_datetime(df.index)
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        df_today = df[df.index.tz_convert("America/Chicago").strftime("%Y-%m-%d") == today_str]
+        if df_today.empty:
+            df_today = df  # fallback — use all bars if timezone filtering fails
+
+        h = df_today["high"].astype(float).values
+        l = df_today["low"].astype(float).values
+        c = df_today["close"].astype(float).values
+        v = df_today["volume"].astype(float).values
+
+        if v.sum() == 0:
+            return None
+
+        tp = (h + l + c) / 3.0     # typical price
+        vwap = float((tp * v).cumsum()[-1] / v.cumsum()[-1])
+        return round(vwap, 4)
+    except Exception as e:
+        logger.debug(f"fetch_vwap {symbol}: {e}")
+        return None
+
+
 # ── Setup detection ───────────────────────────────────────────────────────────
 
-def detect_setup(row: dict, now: datetime | None = None) -> str | None:
+def detect_setup(row: dict, now: datetime | None = None,
+                  vwap: float | None = None) -> str | None:
     """
     Apply the three setup rules in priority order.
     Returns "BREAKOUT" | "CONTINUATION" | "PULLBACK" | None.
@@ -286,6 +343,10 @@ def detect_setup(row: dict, now: datetime | None = None) -> str | None:
     BREAKOUT:     EMA ribbon expanding → RSI threshold lowered by 5 pts (more permissive).
     CONTINUATION: EMA ribbon compressing → EMA dev window tightened to 0.5% (stricter).
     Ribbon/MACD filters are skipped (never block) when data is unavailable.
+
+    VWAP filter (Aziz): BREAKOUT and CONTINUATION blocked when price < VWAP.
+    PULLBACK is not blocked (a dip to VWAP is the Aziz entry zone).
+    VWAP data is optional — never blocks when unavailable.
     """
     sig     = row["signal"]
     price   = row["price"]
@@ -293,6 +354,15 @@ def detect_setup(row: dict, now: datetime | None = None) -> str | None:
     rsi     = row["rsi"]
     ema_dev = row["ema_dev"]
     now     = now or datetime.now(CT)
+
+    # VWAP guard: no BREAKOUT or CONTINUATION longs below VWAP (Aziz)
+    if vwap is not None and vwap > 0 and price < vwap:
+        if sig in ("BREAKOUT", "CONTINUATION"):
+            logger.info(
+                f"VWAP block: {row['symbol']} ${price:.2f} below VWAP ${vwap:.2f} "
+                f"— skipping {sig}"
+            )
+            return None
 
     above_orh = orh > 0 and price > orh
     ribbon    = ema_ribbon_trend(row["symbol"], now)
@@ -399,27 +469,66 @@ def main():
         except Exception:
             pass
 
+    # ── Load previous VWAP state (for reclaim detection) ───────────────────
+    prev_vwap_state: dict[str, dict] = {}
+    if VWAP_FILE.exists():
+        try:
+            prev_vwap_state = json.loads(VWAP_FILE.read_text())
+        except Exception:
+            pass
+
+    # ── Fetch VWAP for candidate rows (have non-"---" signal label) ─────────
+    # Only fetch for rows that Pine has already flagged — keeps cycle fast.
+    candidate_syms = [r["symbol"] for r in rows if r["signal"] not in ("---", "")]
+    vwap_map: dict[str, float | None] = {}
+    for sym in candidate_syms:
+        vwap_map[sym] = fetch_vwap(sym, now_ct)
+
     # ── Detect signals ──────────────────────────────────────────────────────
     signals: list[dict] = []
+    new_vwap_state: dict[str, dict] = {}
     for row in rows:
-        setup = detect_setup(row, now_ct)
+        sym   = row["symbol"]
+        vwap  = vwap_map.get(sym)  # None for non-candidate rows
+
+        setup = detect_setup(row, now_ct, vwap=vwap)
         if setup is None:
             continue
-        sym = row["symbol"]
+
+        # VWAP reclaim: prev cycle price was below VWAP, now above
+        prev = prev_vwap_state.get(sym, {})
+        prev_price = prev.get("price")
+        prev_vwap  = prev.get("vwap")
+        vwap_reclaim = (
+            vwap is not None and vwap > 0
+            and prev_price is not None and prev_vwap is not None
+            and prev_price < prev_vwap   # was below VWAP last cycle
+            and row["price"] >= vwap     # now at or above VWAP
+        )
+
+        vwap_above = (vwap is not None and vwap > 0 and row["price"] >= vwap)
+
         signals.append({
-            "symbol":     sym,
-            "setup":      setup,
-            "price":      row["price"],
-            "orh":        row["orh"],
-            "orl":        row["orl"],
-            "rsi":        row["rsi"],
-            "ema_dev":    row["ema_dev"],
-            "rvol":       row["rvol"],
-            "cup":        row["cup"],
-            "htf":        sym in htf_set,
-            "resistance": sym in resistance_set,
-            "bb_squeeze": sym in bb_squeeze_set,
+            "symbol":       sym,
+            "setup":        setup,
+            "price":        row["price"],
+            "orh":          row["orh"],
+            "orl":          row["orl"],
+            "rsi":          row["rsi"],
+            "ema_dev":      row["ema_dev"],
+            "rvol":         row["rvol"],
+            "cup":          row["cup"],
+            "htf":          sym in htf_set,
+            "resistance":   sym in resistance_set,
+            "bb_squeeze":   sym in bb_squeeze_set,
+            "vwap":         vwap,
+            "vwap_above":   vwap_above,
+            "vwap_reclaim": vwap_reclaim,
         })
+
+        # Track VWAP state for this symbol for next cycle's reclaim detection
+        if vwap is not None:
+            new_vwap_state[sym] = {"price": row["price"], "vwap": vwap}
 
     # ── Detect RVOL spikes ──────────────────────────────────────────────────
     rvol_spikes = detect_rvol_spikes(rows, prev_rvol)
@@ -428,6 +537,9 @@ def main():
     new_rvol_state = {row["symbol"]: row["rvol"] for row in rows}
     if not args.dry_run:
         RVOL_FILE.write_text(json.dumps(new_rvol_state))
+        # Merge new VWAP state into existing (preserve other symbols)
+        merged_vwap = {**prev_vwap_state, **new_vwap_state}
+        VWAP_FILE.write_text(json.dumps(merged_vwap))
 
     # ── Write output ────────────────────────────────────────────────────────
     output = {
@@ -446,14 +558,17 @@ def main():
     # Print summary for Claude context (minimal — just what matters)
     if signals:
         for s in signals:
-            cup_tag = " CUP" if s["cup"] else ""
-            htf_tag = " HTF" if s["htf"] else ""
-            res_tag = " ⚠RES" if s["resistance"] else ""
-            bb_tag  = " BB✓" if s.get("bb_squeeze") else ""
+            cup_tag    = " CUP"      if s["cup"]                  else ""
+            htf_tag    = " HTF"      if s["htf"]                  else ""
+            res_tag    = " ⚠RES"    if s["resistance"]            else ""
+            bb_tag     = " BB✓"     if s.get("bb_squeeze")        else ""
+            vwap_tag   = f" VWAP=${s['vwap']:.2f}" if s.get("vwap") else ""
+            reclaim_tag = " VWAP_RECLAIM" if s.get("vwap_reclaim") else ""
             print(f"SIGNAL: {s['setup']} {s['symbol']} ${s['price']} "
                   f"ORH=${s['orh']} ORL=${s['orl']} "
                   f"RSI={s['rsi']} EMA={s['ema_dev']:+.2f}% "
-                  f"RVOL={s['rvol']:.1f}x{cup_tag}{htf_tag}{res_tag}{bb_tag}")
+                  f"RVOL={s['rvol']:.1f}x{cup_tag}{htf_tag}{res_tag}{bb_tag}"
+                  f"{vwap_tag}{reclaim_tag}")
 
     for spike in rvol_spikes:
         print(f"RVOL_SPIKE: {spike['symbol']} {spike['prev']:.1f}x → {spike['now']:.1f}x")
