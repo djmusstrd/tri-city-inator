@@ -210,7 +210,7 @@ def macd_is_bullish(symbol: str, now: datetime) -> bool | None:
 
     try:
         import yfinance as yf
-        df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
+        df = yf.download(symbol, period="1d", interval="2m", progress=False, auto_adjust=True)
         if df.empty or len(df) < 35:
             _macd_cache[symbol] = (now, None)
             return None
@@ -260,7 +260,7 @@ def ema_ribbon_trend(symbol: str, now: datetime) -> str | None:
 
     try:
         import yfinance as yf
-        df = yf.download(symbol, period="2d", interval="5m", progress=False, auto_adjust=True)
+        df = yf.download(symbol, period="2d", interval="2m", progress=False, auto_adjust=True)
         if df.empty or len(df) < 22:
             _ribbon_cache[symbol] = (now, None)
             return None
@@ -321,7 +321,7 @@ def fetch_vwap_data(symbol: str, now: datetime) -> dict | None:
         import yfinance as yf
         import pandas as pd
 
-        df = yf.download(symbol, period="1d", interval="5m", progress=False, auto_adjust=True)
+        df = yf.download(symbol, period="1d", interval="2m", progress=False, auto_adjust=True)
         if df.empty:
             return None
         if hasattr(df.columns, "levels"):

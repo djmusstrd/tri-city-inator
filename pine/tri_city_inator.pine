@@ -15,7 +15,7 @@ i_orb_min = input.int(5,     "ORB Minutes (5 / 15 / 30)", minval=1,   group="Sca
 i_rsi_len = input.int(14,    "RSI Length",                minval=1,   group="Scanner")
 i_ema_m   = input.int(21,    "EMA Mid",                   minval=1,   group="Scanner")
 i_hi_vol  = input.float(1.5, "High-Vol RVol threshold",   minval=0.1, group="Scanner")
-i_tf      = input.timeframe("5", "Scanner timeframe",                 group="Scanner")
+i_tf      = input.timeframe("2", "Scanner timeframe",                 group="Scanner")
 
 _tf_mins  = math.max(1.0, nz(str.tonumber(i_tf), 1.0))
 _orb_bars = math.max(1, math.round(i_orb_min / _tf_mins))
