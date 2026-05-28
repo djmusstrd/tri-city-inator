@@ -170,21 +170,23 @@ Run `python -W ignore ~/tri-city-inator/scripts/journal_report.py` via Bash and 
 ## Dashboard
 
 ```bash
-# Launch trading dashboard (4 pages: Overview, Trade Log, Signal Analysis, Risk & Sizing)
+# Launch trading dashboard (5 pages: Overview, Trade Log, Signal Analysis, Risk & Sizing, Candidates)
 python3 -m streamlit run ~/tri-city-inator/scripts/dashboard.py
 ```
 
 Reads from:
 - `logs/tri-city-journal.json` — closed trades (P&L, R, outcome, durations)
 - `logs/tri-city-executions.json` — entry signals (RSI, RVOL, EMA dev, cup, BB squeeze)
+- `shared/tri-city-candidates.json` — premarket scanner output (score breakdown, news links)
 
 Pages:
 | Page | Shows |
 |------|-------|
-| Overview | Cumulative P&L, daily P&L bars, outcome donut |
-| Trade Log | Sortable trade table + per-trade detail expander |
-| Signal Analysis | Win rate / Avg R by setup, RVOL+RSI histograms, cup/BB squeeze, P&L by hour |
-| Risk & Sizing | R distribution, streak analysis, rolling drawdown, risk scatter |
+| Overview | Cumulative P&L, daily P&L bars, outcome donut, Sharpe (R), Calmar |
+| Trade Log | Sortable trade table + per-trade detail expander, signal/fill/slippage columns |
+| Signal Analysis | Win rate / Avg R by setup, RVOL+RSI+EMA Dev% histograms, cup/BB squeeze, P&L by hour |
+| Risk & Sizing | R distribution, position notional vs R scatter, streak analysis, rolling drawdown, risk scatter |
+| Candidates | Full top-100 premarket ranked list, score component breakdown, flags, clickable news links |
 
 > Uses `plotly.graph_objects` only — no `plotly.express` (avoids xarray/dask/scipy compat issue on Anaconda Python 3.9).
 
@@ -224,7 +226,7 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 
 | Script | Trigger | Action |
 |--------|---------|--------|
-| `tri_city_scanner.py` | 7:30 AM cron | Gap-up candidates ranked by score, saved to tri-city-candidates.json + tri-city-flags.json |
+| `tri_city_scanner.py` | 7:30 AM cron | Gap-up candidates ranked by score; saves score components (sc_*), news headline+URL, earnings flag to tri-city-candidates.json + tri-city-flags.json |
 | Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on Kbzkkm (in_7–in_26, 20 slots) |
 | `tri_city_health_check.py` | 8:31 AM cron | Session health verifier: .env keys, candidates, flags, levels, Alpaca, execution errors |
 | Level lock (inline) | ORB_MINUTES cron | Reads Tri-City table → saves ORH/ORL to tri-city-levels.json |
