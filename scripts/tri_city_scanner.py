@@ -446,11 +446,19 @@ def fetch_news(symbols: list[str]) -> dict[str, dict]:
                 news = yf.Ticker(sym).news
                 if news:
                     item = news[0]
-                    return sym, {
-                        "headline":  item.get("title", ""),
-                        "url":       item.get("link", ""),
-                        "publisher": item.get("publisher", ""),
-                    }
+                    # yfinance v0.2.38+ nests data under item["content"]
+                    content = item.get("content", {})
+                    if content:
+                        headline  = content.get("title", "")
+                        url       = (content.get("clickThroughUrl") or {}).get("url", "") \
+                                    or (content.get("canonicalUrl") or {}).get("url", "")
+                        publisher = (content.get("provider") or {}).get("displayName", "")
+                    else:
+                        headline  = item.get("title", "")
+                        url       = item.get("link", "")
+                        publisher = item.get("publisher", "")
+                    if headline:
+                        return sym, {"headline": headline, "url": url, "publisher": publisher}
                 return sym, {}
             except Exception:
                 return sym, {}
