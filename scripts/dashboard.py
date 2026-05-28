@@ -16,6 +16,7 @@ import streamlit as st
 BASE_DIR = Path(__file__).parent.parent
 JOURNAL_PATH = BASE_DIR / "logs" / "tri-city-journal.json"
 EXECUTIONS_PATH = BASE_DIR / "logs" / "tri-city-executions.json"
+CANDIDATES_PATH = BASE_DIR / "shared" / "tri-city-candidates.json"
 
 # ─── Theme constants ──────────────────────────────────────────────────────────
 PLOTLY_THEME = "plotly_dark"
@@ -106,6 +107,16 @@ def load_data(refresh_token: int):
         merged = jdf.merge(exec_key, on=["date", "symbol"], how="left", suffixes=("", "_exec"))
 
     return jdf, edf, merged
+
+
+def load_candidates() -> dict:
+    """Load tri-city-candidates.json. Not cached — refreshes each scan cycle."""
+    if not CANDIDATES_PATH.exists():
+        return {}
+    try:
+        return json.loads(CANDIDATES_PATH.read_text()) or {}
+    except Exception:
+        return {}
 
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
@@ -226,7 +237,7 @@ def _base_layout(fig, title: str, height: int = 320, **kwargs):
 # ═══════════════════════════════════════════════════════════════════════════════
 page = st.sidebar.radio(
     "Navigation",
-    ["Overview", "Trade Log", "Signal Analysis", "Risk & Sizing"],
+    ["Overview", "Trade Log", "Signal Analysis", "Risk & Sizing", "Candidates"],
     label_visibility="collapsed",
 )
 
@@ -792,3 +803,149 @@ elif page == "Risk & Sizing":
         st.plotly_chart(fig_scatter, use_container_width=True)
     else:
         no_data_msg("Risk/sizing data not available.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PAGE 5 — CANDIDATES
+# ──────────────────────────────────────────────────────────────────────────────
+elif page == "Candidates":
+    st.title("Candidate Scanner")
+
+    raw = load_candidates()
+    if not raw or not raw.get("candidates"):
+        st.info("No candidate data found. Run the premarket scanner first: `python -W ignore scripts/tri_city_scanner.py`")
+        st.stop()
+
+    # Metadata header
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Scan Date", raw.get("date", "—"))
+    mc2.metric("Scanned At", raw.get("scanned_at", "—"))
+    mc3.metric("Total Candidates", raw.get("total", len(raw["candidates"])))
+
+    if st.button("🔄 Refresh Candidates", use_container_width=False):
+        st.rerun()
+
+    st.divider()
+
+    cdf = pd.DataFrame(raw["candidates"])
+
+    # ── Filters ──
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        float_opts = ["All"] + sorted(cdf["float_cat"].dropna().unique().tolist()) if "float_cat" in cdf.columns else ["All"]
+        float_filter = st.selectbox("Float Tier", float_opts)
+    with fc2:
+        min_score = st.slider("Min Score", 0.0, 1.0, 0.0, 0.05)
+    with fc3:
+        hide_parabolic = st.checkbox("Hide Parabolic (>10x RVol)", value=False)
+    with fc4:
+        earnings_only = st.checkbox("Earnings Only", value=False)
+
+    filtered = cdf.copy()
+    if float_filter != "All" and "float_cat" in filtered.columns:
+        filtered = filtered[filtered["float_cat"] == float_filter]
+    if "score" in filtered.columns:
+        filtered = filtered[filtered["score"] >= min_score]
+    if hide_parabolic and "parabolic" in filtered.columns:
+        filtered = filtered[~filtered["parabolic"]]
+    if earnings_only and "earnings_soon" in filtered.columns:
+        filtered = filtered[filtered["earnings_soon"] == True]
+
+    st.caption(f"Showing {len(filtered)} of {len(cdf)} candidates")
+
+    # ── Build flags column ──
+    def build_flags(row):
+        flags = []
+        if row.get("earnings_soon"):  flags.append("E")
+        if row.get("near_52wk_high"): flags.append("⚠52H")
+        if row.get("parabolic"):      flags.append("⚡PARA")
+        if row.get("htf"):            flags.append("★HTF")
+        if row.get("bb_squeeze"):     flags.append("SQZ")
+        if row.get("park_trending"):  flags.append("TRD")
+        return " ".join(flags) if flags else "—"
+
+    filtered = filtered.copy()
+    filtered["flags"] = filtered.apply(build_flags, axis=1)
+
+    # ── Main table ──
+    st.subheader("Ranked Candidates")
+
+    # Score component columns (only show if present)
+    sc_cols = ["sc_gap", "sc_rvol", "sc_stage", "sc_sma", "sc_catalyst",
+               "sc_float", "sc_rsi", "sc_park", "sc_bb", "sc_penalty"]
+    show_breakdown = st.checkbox("Show score breakdown columns", value=False)
+
+    display_cols = ["rank", "symbol", "price", "gap_pct", "rvol", "rsi",
+                    "float_cat", "float_shares", "score", "flags"]
+    if show_breakdown:
+        display_cols += [c for c in sc_cols if c in filtered.columns]
+    display_cols += ["news_headline", "news_url"]
+
+    # Keep only columns that exist
+    display_cols = [c for c in display_cols if c in filtered.columns]
+
+    tbl = filtered[display_cols].sort_values("rank").copy()
+
+    # Format numeric columns
+    for col, fmt in [("price", "${:.2f}"), ("gap_pct", "{:+.1f}%"),
+                     ("rvol", "{:.1f}x"), ("rsi", "{:.1f}"),
+                     ("score", "{:.4f}")]:
+        if col in tbl.columns:
+            tbl[col] = tbl[col].apply(
+                lambda v, f=fmt: f.format(v) if pd.notna(v) else "—"
+            )
+
+    if "float_shares" in tbl.columns:
+        def fmt_float(v):
+            if pd.isna(v) or v == 0: return "—"
+            if v >= 1e6: return f"{v/1e6:.1f}M"
+            if v >= 1e3: return f"{v/1e3:.0f}K"
+            return str(int(v))
+        tbl["float_shares"] = tbl["float_shares"].apply(fmt_float)
+
+    for sc in sc_cols:
+        if sc in tbl.columns:
+            tbl[sc] = tbl[sc].apply(lambda v: f"{v:+.4f}" if pd.notna(v) else "—")
+
+    col_labels = {
+        "rank": "Rank", "symbol": "Symbol", "price": "Price",
+        "gap_pct": "Gap%", "rvol": "RVOL", "rsi": "RSI",
+        "float_cat": "Float Tier", "float_shares": "Float Shares",
+        "score": "Score", "flags": "Flags",
+        "sc_gap": "sc:gap", "sc_rvol": "sc:rvol", "sc_stage": "sc:stage",
+        "sc_sma": "sc:sma", "sc_catalyst": "sc:cat", "sc_float": "sc:float",
+        "sc_rsi": "sc:rsi", "sc_park": "sc:park", "sc_bb": "sc:bb",
+        "sc_penalty": "sc:penalty",
+        "news_headline": "Headline", "news_url": "News Link",
+    }
+    tbl = tbl.rename(columns={k: v for k, v in col_labels.items() if k in tbl.columns})
+
+    # Configure news URL column as clickable link
+    col_config = {}
+    if "News Link" in tbl.columns:
+        col_config["News Link"] = st.column_config.LinkColumn(
+            "News Link", display_text="Open", help="Click to open news article"
+        )
+
+    st.dataframe(tbl, use_container_width=True, height=520,
+                 hide_index=True, column_config=col_config)
+
+    # ── Score weight reference ──
+    with st.expander("Score weight reference"):
+        weights = {
+            "Gap %":       ("sc:gap",     0.30, "Size of overnight move — capped at 20%"),
+            "RVOL":        ("sc:rvol",    0.30, "Relative volume — institutional conviction; parabolic >10x gets 50% credit"),
+            "Stage 2":     ("sc:stage",   0.10, "Price above SMA50 — Weinstein uptrend"),
+            "SMA Slope":   ("sc:sma",     0.07, "SMA50 above SMA100 — rising trend"),
+            "Catalyst":    ("sc:cat",     0.08, "Gap ≥5% treated as catalyst-driven"),
+            "Float":       ("sc:float",   0.06, "Low float (<10M) = full; medium = half; large = 0"),
+            "RSI":         ("sc:rsi",     0.05, "50–70 = full; 40–80 = half; outside = 0"),
+            "Parkinson":   ("sc:park",    0.02, "Vol regime trending (H/L estimator)"),
+            "BB Squeeze":  ("sc:bb",      0.02, "5-min BB compressed — coiled energy"),
+            "52wk Penalty":("sc:penalty",-0.08, "Within 5% of 52-week high — resistance zone"),
+        }
+        wdf = pd.DataFrame([
+            {"Factor": k, "Column": v[0], "Weight": f"{v[1]:+.2f}", "Description": v[2]}
+            for k, v in weights.items()
+        ])
+        st.dataframe(wdf, use_container_width=True, hide_index=True)

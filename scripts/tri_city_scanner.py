@@ -381,7 +381,8 @@ def fetch_gappers() -> list[dict]:
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
-def score_candidate(s: dict) -> float:
+def score_candidate(s: dict) -> dict:
+    """Returns a dict with 'score' (composite) and all sc_* component values."""
     gap_score   = min(s["gap_pct"] / 20.0, 1.0) * W_GAP
     raw_rvol    = min(s["rvol"] / 5.0, 1.0) * W_RVOL
     rvol_score  = raw_rvol * 0.5 if s["parabolic"] else raw_rvol
@@ -405,11 +406,65 @@ def score_candidate(s: dict) -> float:
     # 52-week high penalty: within 5% of high = resistance zone, reduces score
     penalty = W_52WK_PENALTY if s.get("near_52wk_high") else 0.0
 
-    return round(
+    total = round(
         gap_score + rvol_score + stage_score + sma_score + cat_score +
         park_score + bb_score + float_score + rsi_score - penalty,
         4
     )
+    return {
+        "score":        total,
+        "sc_gap":       round(gap_score,   4),
+        "sc_rvol":      round(rvol_score,  4),
+        "sc_stage":     round(stage_score, 4),
+        "sc_sma":       round(sma_score,   4),
+        "sc_catalyst":  round(cat_score,   4),
+        "sc_park":      round(park_score,  4),
+        "sc_bb":        round(bb_score,    4),
+        "sc_float":     round(float_score, 4),
+        "sc_rsi":       round(rsi_score,   4),
+        "sc_penalty":   round(-penalty,    4),
+    }
+
+
+def fetch_news(symbols: list[str]) -> dict[str, dict]:
+    """
+    Fetches the most recent news headline + URL per symbol via yfinance (parallel).
+    Returns {symbol: {"headline": str, "url": str, "publisher": str}}.
+    Used by the dashboard Candidates page to surface the catalyst behind each gap.
+    """
+    if not symbols:
+        return {}
+    try:
+        import yfinance as yf
+        import random
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _get_news(sym: str) -> tuple:
+            try:
+                time.sleep(random.uniform(0.05, 0.15))
+                news = yf.Ticker(sym).news
+                if news:
+                    item = news[0]
+                    return sym, {
+                        "headline":  item.get("title", ""),
+                        "url":       item.get("link", ""),
+                        "publisher": item.get("publisher", ""),
+                    }
+                return sym, {}
+            except Exception:
+                return sym, {}
+
+        result = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_get_news, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                sym, news_data = future.result()
+                result[sym] = news_data
+        return result
+    except Exception as e:
+        logger.debug(f"fetch_news: {e}")
+        return {}
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -460,9 +515,20 @@ def main():
     earnings_count = sum(1 for s in stocks if s["earnings_soon"])
     print(f"  Earnings: {earnings_count}/{len(stocks)} reporting within 5 trading days")
 
-    # Score and rank
+    # News headlines for dashboard catalyst links
+    print(f"  Fetching news headlines for {len(stocks)} candidates (parallel)...")
+    news_results = fetch_news(syms)
     for s in stocks:
-        s["score"] = score_candidate(s)
+        nd = news_results.get(s["symbol"], {})
+        s["news_headline"] = nd.get("headline", "")
+        s["news_url"]      = nd.get("url", "")
+        s["news_publisher"] = nd.get("publisher", "")
+    news_found = sum(1 for s in stocks if s.get("news_url"))
+    print(f"  News: {news_found}/{len(stocks)} headlines found")
+
+    # Score and rank — returns dict with score + sc_* components
+    for s in stocks:
+        s.update(score_candidate(s))
     ranked = sorted(stocks, key=lambda x: x["score"], reverse=True)[:args.top]
     for i, s in enumerate(ranked, 1):
         s["rank"] = i
