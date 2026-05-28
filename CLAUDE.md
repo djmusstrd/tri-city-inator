@@ -133,9 +133,10 @@ Override any default by editing the values in `.env`.
 
 | Signal | Action | Notes |
 |--------|--------|-------|
-| BREAKOUT | Auto-execute | Price above ORH, high vol, RSI > 50, EMA Dev > 0 |
+| BREAKOUT | Auto-execute | Price above ORH, high vol, RSI > 50, EMA Dev > 0. Blocked if ORH/ORL spread >8% or last bar is a rejection/spike bar. |
 | CONTINUATION | Auto-execute | Above ORH pullback, EMA dev 0–1%, RSI 50–65 |
 | PULLBACK | Auto-execute | At/above EMA, dev 0–+0.8%, RSI 38–55 |
+| EMA20_PULLBACK | Auto-execute | Mid-morning EMA20 touch after a significant run. EMA dev -0.5→+1.5%, price > VWAP, RSI 45–68, RVOL ≥0.8x, ≥5% from open, bounce bar confirmed. 9:15–11:30 CT only. VWAP stop. |
 | --- | Silent | No signal — skip |
 | CUP = YES | +cup flag | Add --cup to execute call for high-conviction log |
 
