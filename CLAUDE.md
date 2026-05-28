@@ -43,6 +43,9 @@ When a session starts:
 **Step 0 — Session resumption check**
 Read `~/tri-city-inator/shared/tri-city-candidates.json`. If the `"date"` field matches today AND `~/tri-city-inator/shared/tri-city-levels.json` exists with at least one non-zero ORH value, this session was already initialized today. Skip the 7:30 AM, 8:30 AM, and level-lock crons (they already ran). Register only the signal monitor and intraday scan crons that haven't fired yet. Announce: "Resuming session — candidates and levels already loaded from earlier today."
 
+**Step 0.5 — Connect TradingView via CDP**
+Call `tv_launch(kill_existing=true)`. This restarts TradingView with Chrome DevTools Protocol enabled on port 9222 so all MCP tools can connect. (The `tricity` alias uses `open -a TradingView` which does NOT enable CDP — this step fixes that automatically.) After launch succeeds, call `layout_switch("TRI CITY INATOR III")` to ensure the correct layout is active. Wait ~5 seconds for the layout to load before proceeding.
+
 **Step 1 — Read ORB_MINUTES from .env**
 Read the file `~/tri-city-inator/.env`. Look for a line like `ORB_MINUTES=15`.
 - If found, use that value.
