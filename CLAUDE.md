@@ -233,8 +233,8 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 | Symbol swap (inline) | 8:30 AM cron | Reads tv_symbols → `indicator_set_inputs` on Kbzkkm (in_7–in_26, 20 slots) |
 | `tri_city_health_check.py` | 8:31 AM cron | Session health verifier: .env keys, candidates, flags, levels, Alpaca, execution errors |
 | Level lock (inline) | ORB_MINUTES cron | Reads Tri-City table → saves ORH/ORL to tri-city-levels.json |
-| `tri_city_intraday_scanner.py` | 9:30 AM + 11:30 AM crons | Re-scores intraday movers; writes tv_symbols + intraday_symbols + tri-city-flags.json |
-| `tri_city_signal_detector.py` | Signal monitor (sub-step) | Reads tri-city-table.json; detects BREAKOUT/CONT/PULLBACK + RVOL spikes; writes tri-city-signals.json |
+| `tri_city_intraday_scanner.py` | 9:30 AM + 11:30 AM crons | Re-scores intraday movers; RVOL floor 0.8x (MIN_INTRADAY_RVOL, lower than premarket 1.5x to catch mid-morning runners); writes tv_symbols + intraday_symbols + tri-city-flags.json |
+| `tri_city_signal_detector.py` | Signal monitor (sub-step) | Reads tri-city-table.json; detects BREAKOUT/CONT/PULLBACK + RVOL spikes; fetches VWAP via yfinance for signaled symbols; blocks BREAKOUT/CONT when price < VWAP; detects VWAP reclaims; writes tri-city-signals.json |
 | `tri_city_execute.py` | Signal monitor | 7-guard gate → 50-25-25 bracket orders via Alpaca → logs to tri-city-executions.json |
 | `tri_city_position_manager.py` | Signal monitor | T1 hit → breakeven stop; 2:45 PM CT → EOD close all; logs exits to journal |
 | `tri_city_backtest.py` | Manual | Historical simulation with P&L report |
