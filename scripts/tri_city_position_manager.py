@@ -5,9 +5,10 @@ TRI-CITY POSITION MANAGER — Post-entry management for open Tri-City positions.
 Called every 3 minutes as part of the tri_city_monitor.py loop.
 
 Actions (in order):
-  1. T1 CHECK:    If price >= T1 → move stop to breakeven for remaining shares
+  0. FREE RIDE:   Bank 50% when unrealized >= max($300, 1R) AND price >= entry+2%; stop → entry-$0.05
+  1. T1 CHECK:    If price >= T1% target → stop → entry-$0.05 (% trigger fallback)
   2. T2 CHECK:    If price >= T2 → move stop to T2 level (lock T2 gains on T3)
-  3. TRAILING:    If in normal mode and price < EMA20 AND < VWAP → close T3 lot
+  3. TRAILING:    Bar close < EMA20 → close T3 lot (free ride only, after breakeven set)
   4. EOD CLOSE:   If time >= 2:45 PM CT → cancel all orders → close all positions
 
 Usage:
@@ -52,6 +53,14 @@ PULLBACK_TIMEOUT     = int(os.getenv("PULLBACK_TIMEOUT_MIN",   "25"))    # Fix A
 PULLBACK_FAIL_BUFFER = float(os.getenv("PULLBACK_FAIL_BUFFER", "0.005")) # Fix B: 0.5% buffer below entry
 RVOL_EXIT_FLOOR      = float(os.getenv("RVOL_EXIT_FLOOR",      "1.0"))  # #5: collapse exit
 RVOL_LOOKBACK       = int(os.getenv("RVOL_LOOKBACK",         "20"))
+
+# ── Pro T1 banking rules ──────────────────────────────────────────────────────
+# Pro fix 1: bank at $DOLLAR_T1_TRIGGER OR 1R — whichever is greater
+# Pro fix 2: price must be >= entry*(1+T1_MIN_MOVE_PCT%) before $ trigger activates
+# Pro fix 3: stop set to entry - BREAKEVEN_BUFFER (not exact entry) to survive noise
+DOLLAR_T1_TRIGGER   = float(os.getenv("DOLLAR_T1_TRIGGER",   "300"))   # min $ unrealized to bank T1
+T1_MIN_MOVE_PCT     = float(os.getenv("T1_MIN_MOVE_PCT",      "2.0"))   # min % from entry before trigger
+BREAKEVEN_BUFFER    = float(os.getenv("BREAKEVEN_BUFFER",     "0.05"))  # stop = entry - $0.05
 EXEC_LOG            = WORKSPACE / "logs" / "tri-city-executions.json"
 
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
@@ -322,17 +331,19 @@ def check_failed_pullback(positions: list, today: str, now: datetime) -> list[st
 
 def check_free_ride(positions: list, today: str) -> list[str]:
     """
-    FREE RIDE: When price >= entry * (1 + FREE_RIDE_PCT%), automatically:
-      1. Cancel all open orders for the symbol
-      2. Sell T1 lot (50%) at market
-      3. Move stop to breakeven for remaining shares
-      4. Place trailing stop (T3_TRAIL_PCT%) on T3 lot (25%)
+    PRO T1 BANKING: Bank 50% and go to free ride as soon as possible.
 
-    Runs before check_targets() every cycle. Disabled when FREE_RIDE_PCT <= 0.
+    Trigger fires when ANY of the following is true (whichever comes first):
+      A) % trigger: price >= entry * (1 + FREE_RIDE_PCT%)    [default 3%]
+      B) $ trigger: unrealized P&L >= max($DOLLAR_T1_TRIGGER, 1R)
+                    AND price >= entry * (1 + T1_MIN_MOVE_PCT%)  [min 2% move guard]
+
+    Pro fix 1: 1R = risk_dollars from execution log — dollar trigger scales with position size
+    Pro fix 2: T1_MIN_MOVE_PCT guard prevents banking on micro-moves on large positions
+    Pro fix 3: Stop set to entry - BREAKEVEN_BUFFER ($0.05) not exact entry — survives spread noise
+    Pro fix 4: Remaining 50% trails EMA20 bar close (handled by check_trailing)
+    Pro fix 5: Net P&L (wins + losses) tracked — T1 partial logged so journal fallback is accurate
     """
-    if FREE_RIDE_PCT <= 0:
-        return []
-
     actions  = []
     entries  = load_executions()
     modified = False
@@ -356,29 +367,55 @@ def check_free_ride(positions: list, today: str) -> list[str]:
         if entry.get("breakeven_set") or entry.get("t2_stop_set"):
             continue
 
-        trigger = entry_price * (1 + FREE_RIDE_PCT / 100)
-        if curr_price < trigger:
+        # ── Determine trigger ─────────────────────────────────────────────────
+        # Primary: unrealized P&L >= max($DOLLAR_T1_TRIGGER, 1R) AND price >= entry+T1_MIN_MOVE_PCT%
+        # The dollar floor is ALWAYS enforced — % trigger alone cannot fire below $300 unrealized.
+        # This guarantees the user banks a meaningful amount, not a micro-gain from a large position.
+        unrealized_pnl = (curr_price - entry_price) * shares
+        one_r_dollars  = float(entry.get("risk_dollars") or 0)
+        dollar_floor   = max(DOLLAR_T1_TRIGGER, one_r_dollars)  # $300 OR 1R, whichever greater
+        min_move_price = entry_price * (1 + T1_MIN_MOVE_PCT / 100)
+
+        # % trigger as an additional check — only fires if dollar floor is also met
+        pct_trigger_price = entry_price * (1 + FREE_RIDE_PCT / 100) if FREE_RIDE_PCT > 0 else None
+        pct_met    = pct_trigger_price is not None and curr_price >= pct_trigger_price
+        dollar_met = curr_price >= min_move_price and unrealized_pnl >= dollar_floor
+
+        # Both paths require dollar floor — no banking below $DOLLAR_T1_TRIGGER
+        if not (dollar_met or (pct_met and unrealized_pnl >= dollar_floor)):
             continue
 
-        # Split shares: T1=50%, T2=25%, T3=25%
+        if dollar_met:
+            trigger_label = (
+                f"${unrealized_pnl:.0f} unrealized >= "
+                f"max(${DOLLAR_T1_TRIGGER:.0f}, 1R=${one_r_dollars:.0f}) = ${dollar_floor:.0f}"
+            )
+        else:
+            trigger_label = (
+                f"+{FREE_RIDE_PCT}% price target (${unrealized_pnl:.0f} unrealized >= ${dollar_floor:.0f} floor)"
+            )
+
+        # ── Execute T1 bank ───────────────────────────────────────────────────
         t1_shares  = max(1, shares // 2)
         t3_shares  = max(1, (shares - t1_shares) // 2)
         remaining  = shares - t1_shares
+        # Pro fix 3: stop = entry - buffer, not exact entry (survives spread/noise)
+        be_stop    = round(entry_price - BREAKEVEN_BUFFER, 4)
 
         logger.info(
-            f"FREE RIDE: {ticker} ${curr_price:.2f} >= trigger ${trigger:.2f} "
-            f"(+{FREE_RIDE_PCT}%) — selling {t1_shares} T1 shares"
+            f"FREE RIDE: {ticker} ${curr_price:.2f} — {trigger_label} "
+            f"— selling {t1_shares} T1 shares, stop → ${be_stop:.2f}"
         )
 
         cancel_all_orders(ticker)
         time.sleep(1.5)
 
-        sold      = sell_shares_at_market(ticker, t1_shares)
+        sold   = sell_shares_at_market(ticker, t1_shares)
         time.sleep(1.0)
-        be_set    = set_stop_loss(
+        be_set = set_stop_loss(
             order_id=entry.get("order_id", ""),
             ticker=ticker,
-            stop_price=entry_price,
+            stop_price=be_stop,           # Pro fix 3: entry - $0.05
             shares=remaining,
             direction="BULLISH",
         )
@@ -386,15 +423,33 @@ def check_free_ride(positions: list, today: str) -> list[str]:
 
         if sold and be_set:
             entry["breakeven_set"]       = True
-            entry["breakeven_price"]     = entry_price
+            entry["breakeven_price"]     = be_stop      # actual stop price logged
             entry["free_ride_triggered"] = True
             entry["free_ride_price"]     = curr_price
+            entry["t1_banked_shares"]    = t1_shares
+            entry["t1_banked_price"]     = curr_price
+            entry["t1_banked_pnl"]       = round((curr_price - entry_price) * t1_shares, 2)
             modified = True
-            trail_note = f", trailing stop {T3_TRAIL_PCT}% on {t3_shares} shares" if trail_set else ""
+            trail_note = f", EMA20 trail on {t3_shares} remaining" if trail_set else ""
             actions.append(
-                f"FREE RIDE: {ticker} @ ${curr_price:.2f} (+{FREE_RIDE_PCT}%) "
-                f"— sold {t1_shares} shares, stop → entry ${entry_price:.2f}{trail_note}"
+                f"FREE RIDE: {ticker} @ ${curr_price:.2f} — {trigger_label} "
+                f"— banked {t1_shares}sh (${entry['t1_banked_pnl']:+.2f}), "
+                f"stop → ${be_stop:.2f}{trail_note}"
             )
+            # Pro fix 5: log T1 partial to journal so net P&L fallback is accurate
+            try:
+                from managers.trade_journal import log_exit, fetch_exit_price
+                actual_price = fetch_exit_price(ticker) or curr_price
+                log_exit(
+                    symbol=ticker,
+                    setup=entry.get("setup", "UNKNOWN"),
+                    date=today,
+                    exit_price=actual_price,
+                    exit_reason=f"T1 bank — {trigger_label}",
+                    shares=t1_shares,
+                )
+            except Exception as _je:
+                logger.warning(f"journal.log_exit T1 partial failed for {ticker}: {_je}")
         else:
             actions.append(f"FREE RIDE FAILED: {ticker} — sold={sold} be={be_set}, check Alpaca")
 
@@ -459,20 +514,21 @@ def check_targets(positions: list, today: str) -> list[str]:
         if t1 > 0 and curr_price >= t1 and not entry.get("breakeven_set"):
             cancel_all_orders(ticker)
             time.sleep(1.5)
+            be_stop = round(entry_price - BREAKEVEN_BUFFER, 4)  # Pro fix 3
             success = set_stop_loss(
                 order_id=entry.get("order_id", ""),
                 ticker=ticker,
-                stop_price=entry_price,   # Move stop to breakeven
+                stop_price=be_stop,       # entry - $0.05, not exact entry
                 shares=max(1, shares - shares // 2),
                 direction="BULLISH",
             )
             if success:
                 entry["breakeven_set"]   = True
-                entry["breakeven_price"] = entry_price
+                entry["breakeven_price"] = be_stop
                 modified = True
                 actions.append(
                     f"T1 HIT: {ticker} @ ${curr_price:.2f} >= T1 ${t1:.2f} "
-                    f"— stop moved to breakeven ${entry_price:.2f}"
+                    f"— stop moved to ${be_stop:.2f} (entry ${entry_price:.2f} - ${BREAKEVEN_BUFFER:.2f} buffer)"
                 )
 
     if modified:
