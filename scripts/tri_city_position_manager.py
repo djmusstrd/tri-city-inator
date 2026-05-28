@@ -678,8 +678,30 @@ def check_trailing(positions: list, today: str) -> list[str]:
 
 # ── Action 4: EOD close ────────────────────────────────────────────────────────
 
+def _has_pending_sell(ticker: str) -> bool:
+    """Return True if there are any open sell orders for ticker (T1/T2 in flight)."""
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        return False
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca.trading.enums import OrderSide
+        client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+        orders = client.get_orders()
+        for o in orders:
+            if str(o.symbol) == ticker and o.side == OrderSide.SELL:
+                return True
+    except Exception as e:
+        logger.warning(f"_has_pending_sell {ticker}: {e}")
+    return False
+
+
 def check_eod(positions: list, now: datetime) -> list[str]:
-    """Close all positions at 2:45 PM CT (15 min before 3:00 PM CT market close)."""
+    """Close all positions at 2:45 PM CT (15 min before 3:00 PM CT market close).
+
+    Gap #5 fix: if a T1 sell is in flight when EOD fires, wait up to 5 seconds
+    for it to settle before canceling. Prevents EOD cancel racing a T1 fill
+    and wiping out banked profit from the journal.
+    """
     actions = []
     eod = now.replace(hour=EOD_HOUR, minute=EOD_MINUTE, second=0, microsecond=0)
 
@@ -693,6 +715,10 @@ def check_eod(positions: list, now: datetime) -> list[str]:
 
     for pos in positions:
         ticker = pos["ticker"]
+        # Gap #5: wait for any inflight T1/T2 sells to settle before canceling
+        if _has_pending_sell(ticker):
+            logger.info(f"EOD: pending sell detected for {ticker} — waiting 5s for fill")
+            time.sleep(5)
         cancel_all_orders(ticker)
         time.sleep(1.5)
         success = close_position(ticker, reason="EOD auto-close 2:45 PM CT")
@@ -789,7 +815,20 @@ def reconcile_bracket_stops(today: str, open_tickers: set) -> list[str]:
     except Exception:
         journal = []
 
-    logged_ids = {t["trade_id"] for t in journal}
+    # Gap #6 fix: index journal by trade_id so we can check exit_reason, not just presence.
+    # Partial exits (T1 bank) must NOT mark a trade as covered — only closing exits count.
+    _CLOSING_KEYWORDS = ("stop", "trail", "eod", "timeout", "failed pullback",
+                         "rvol collapse", "reconciled")
+    journal_by_id = {t["trade_id"]: t for t in journal}
+
+    def _has_closing_exit(base_id: str) -> bool:
+        """True if journal has at least one CLOSING exit for this base_id."""
+        for jid, jentry in journal_by_id.items():
+            if jid == base_id or jid.startswith(base_id + "-"):
+                reason = jentry.get("exit_reason", "").lower()
+                if any(kw in reason for kw in _CLOSING_KEYWORDS):
+                    return True
+        return False
 
     try:
         from alpaca.trading.client import TradingClient
@@ -813,13 +852,12 @@ def reconcile_bracket_stops(today: str, open_tickers: set) -> list[str]:
         if key in reconciled:
             continue
 
-        # Check if journal already has an exit for this exact execution
-        # Use a suffix counter to find the right trade_id
         base_id = f"{today}-{symbol}-{setup}"
-        # Any trade_id starting with base_id is considered covered
-        covered = any(jid == base_id or jid.startswith(base_id + "-") for jid in logged_ids)
+        # Gap #6: only treat as covered if a CLOSING exit is logged, not just any exit
+        # (T1 partials logged via check_free_ride have "T1 bank" reason — not closing)
+        covered = _has_closing_exit(base_id)
         if covered and symbol not in open_tickers:
-            # Journal has it logged and no open position — already reconciled
+            # Journal has a closing exit and no open position — already reconciled
             reconciled.add(key)
             continue
 

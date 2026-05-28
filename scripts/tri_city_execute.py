@@ -85,6 +85,7 @@ ORB_MINUTES = int(os.getenv("ORB_MINUTES", "15"))   # opening range duration fro
 # ── Guard parameters (all overridable via .env) ───────────────────────────────
 MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",        "3"))
 MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS",     "-300"))
+DOLLAR_T1_TRIGGER  = float(os.getenv("DOLLAR_T1_TRIGGER",  "300"))   # min $ at T1 bank — must match position_manager
 MIN_RVOL           = float(os.getenv("MIN_RVOL",           "1.5"))
 PM_MIN_RVOL        = float(os.getenv("PM_MIN_RVOL",        "2.0"))   # tighter floor after noon
 PM_START_HOUR      = int(os.getenv("PM_START_HOUR",        "12"))    # noon CT
@@ -976,11 +977,23 @@ def main():
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
 
+    # Gap #1 guard: T1 yield must cover minimum banking threshold.
+    # If position is too small to produce $DOLLAR_T1_TRIGGER at T1, the free-ride
+    # trigger in position_manager can never fire — trade enters with no banking mechanism.
+    t1_yield = round((signal["target_1"] - signal["entry_price"]) * (signal["position_size"] // 2), 2)
+    if t1_yield < DOLLAR_T1_TRIGGER and not args.dry_run:
+        print(
+            f"SKIP: T1 yield ${t1_yield:.0f} ({signal['position_size']}sh × "
+            f"${signal['target_1'] - signal['entry_price']:.2f}/sh) < "
+            f"${DOLLAR_T1_TRIGGER:.0f} minimum. Position too small to bank meaningfully."
+        )
+        sys.exit(0)
+
     print(f"\nSignal:")
     print(f"  Entry:  ${signal['entry_price']:.2f}")
     print(f"  Stop:   ${signal['stop_loss']:.2f}  "
           f"(${signal['entry_price'] - signal['stop_loss']:.2f}/share)")
-    print(f"  T1:     ${signal['target_1']:.2f}  (+{T1_PCT:.0f}%) — sell 50%")
+    print(f"  T1:     ${signal['target_1']:.2f}  (+{T1_PCT:.0f}%) — sell 50%  [T1 yield: ${t1_yield:.0f}]")
     print(f"  T2:     ${signal['target_2']:.2f}  (+{T2_PCT:.0f}%) — sell 25%")
     print(f"  T3:     ${signal['target_3']:.2f}  (+{T3_PCT:.0f}%) — trail 25%")
     print(f"  Size:   {signal['position_size']} shares")
