@@ -31,8 +31,7 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
                                           every 30 min after 9:30: runs intraday scanner internally
                    Position manager   →  T1 breakeven, T2 lock, T3 trail, EOD close
                    Journal            →  every exit auto-logged (P&L, R, outcome)
-9:30 AM CT         Symbol push        →  push updated intraday candidates into Pine slots
-11:30 AM CT        Symbol push        →  push updated intraday candidates into Pine slots
+9:00 AM+ CT        Symbol push        →  every 30 min all day: push updated candidates into Pine slots
 ```
 
 > **ORB timeframe:** Set `ORB_MINUTES` in `.env` (5, 15, or 30 — default 15). Claude reads this
@@ -73,11 +72,8 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
 4. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
    /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Inator". Use the first study (20 symbols). Extract ORH and ORL for every non-blank symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json as {"_date": "YYYY-MM-DD", "SYMBOL": {"orh": float, "orl": float}, ...} (include today's date in the "_date" field so stale data from a prior session is detectable). Report symbols loaded. Then immediately start the poller via Bash: `bash ~/tri-city-inator/scripts/start_poller.sh`. The poller runs headlessly every 3 min — no further action needed.
 
-5. Intraday symbol push — weekdays at 9:30 AM CT:
-   /loop 9:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Then read the current Pine scanner table (data_get_pine_tables with study_filter="Inator") and for any symbol in the new tv_symbols that does NOT already have an entry in shared/tri-city-levels.json, read its ORH/ORL from the Pine table "ORH/ORL" column and append it to tri-city-levels.json. Report: how many symbols were pushed to Kbzkkm.
-
-6. Intraday symbol push — weekdays at 11:30 AM CT:
-   /loop 11:30am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Then read the current Pine scanner table (data_get_pine_tables with study_filter="Inator") and for any symbol in the new tv_symbols that does NOT already have an entry in shared/tri-city-levels.json, read its ORH/ORL from the Pine table "ORH/ORL" column and append it to tri-city-levels.json. Report: how many symbols were pushed to Kbzkkm.
+5. Intraday symbol push — every 30 min all day (fires continuously after registration):
+   /loop 30m weekdays Check current CT time. If before 9:00 AM, skip silently. Otherwise: read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Then read the current Pine scanner table (data_get_pine_tables with study_filter="Inator") and for any symbol in the new tv_symbols that does NOT already have an entry in shared/tri-city-levels.json, read its ORH/ORL from the Pine table "ORH/ORL" column and append it to tri-city-levels.json. Report: how many symbols were pushed to Kbzkkm. If before 9 AM, report nothing.
 
 > **Signal monitor is handled by `tri_city_tv_poller.py` (NOT a Claude cron).**
 > The poller connects directly to TradingView via CDP port 9222, reads the Pine table, runs
@@ -85,7 +81,7 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
 > after 9:30 AM CT. Sends macOS desktop notifications. Claude is invoked only for EOD summary.
 
 **Step 3 — Confirm with one line only:**
-"Session ready. Scanner 7:30 AM, swap 8:00 AM, re-scan + health 8:15 AM, levels + poller {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), symbol push 9:30 AM + 11:30 AM, all CT. Signal monitor running headless."
+"Session ready. Scanner 7:30 AM, swap 8:00 AM, re-scan + health 8:15 AM, levels + poller {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), symbol push every 30 min from 9 AM, all CT. Signal monitor running headless."
 
 Do not show the /loop commands to the user. Do not ask them to paste anything.
 
