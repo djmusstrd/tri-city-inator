@@ -103,20 +103,33 @@ def check_flags(today: str) -> tuple[str, str]:
         return "FAIL", f"JSON parse error: {e}"
 
 
-def check_levels() -> tuple[str, str]:
-    """Check tri-city-levels.json exists and has non-zero ORH values."""
+def check_levels(today: str) -> tuple[str, str]:
+    """
+    Check tri-city-levels.json exists, matches today's date, and has non-zero ORH values.
+
+    Always WARN (never FAIL) — the level lock cron runs at 8:35 AM (or later depending on
+    ORB_MINUTES) and health check runs at 8:31 AM, so levels are intentionally absent or
+    stale at health check time. This is expected behavior, not a session-blocking error.
+    """
     f = SHARED / "tri-city-levels.json"
     if not f.exists():
-        return "WARN", "tri-city-levels.json missing — level lock hasn't run yet (normal pre-8:45 AM)"
+        return "WARN", "tri-city-levels.json missing — level lock runs at 8:35+ AM (expected pre-lock)"
     try:
-        data = json.loads(f.read_text())
+        raw = json.loads(f.read_text())
+        file_date = raw.get("_date", "")
+        if file_date != today:
+            return "WARN", (
+                f"_date={file_date or 'missing'} (expected {today}) — "
+                f"level lock hasn't run yet today (expected, health check runs before lock)"
+            )
+        data = {k: v for k, v in raw.items() if k != "_date"}
         if not data:
-            return "WARN", "levels file empty — level lock produced no symbols"
-        zero_orh = [sym for sym, v in data.items() if v.get("orh", 0) <= 0]
+            return "WARN", "levels file has no symbols — level lock produced no data"
+        zero_orh = [sym for sym, v in data.items() if isinstance(v, dict) and v.get("orh", 0) <= 0]
         ok_count = len(data) - len(zero_orh)
         if zero_orh:
             return "WARN", f"{ok_count}/{len(data)} valid ORH; zeros: {zero_orh[:5]}"
-        return "PASS", f"{len(data)} symbols with valid ORH/ORL"
+        return "PASS", f"{len(data)} symbols with valid ORH/ORL (locked {today})"
     except Exception as e:
         return "FAIL", f"JSON parse error: {e}"
 
@@ -140,6 +153,29 @@ def check_alpaca() -> tuple[str, str]:
         return "PASS", f"equity=${equity:,.0f}{bp_str}  (min=${min_balance:,.0f} ✓)"
     except Exception as e:
         return "FAIL", f"Alpaca connection failed: {e}"
+
+
+def check_poller() -> tuple[str, str]:
+    """Check whether the Phase 3 TV poller daemon is running."""
+    import os
+    pid_file = SHARED / "tri-city-poller.pid"
+    if not pid_file.exists():
+        return "WARN", "tri-city-poller.pid missing — poller not started (starts at level lock)"
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)  # signal 0 = existence check, no actual signal
+        # Check log recency
+        log_file = LOGS / "tri-city-tv-poller.log"
+        if log_file.exists():
+            import time
+            age = time.time() - log_file.stat().st_mtime
+            if age > 600:  # 10 min
+                return "WARN", f"PID {pid} alive but log stale ({age/60:.0f}m) — may be stuck"
+        return "PASS", f"PID {pid} alive (headless signal monitor running)"
+    except (ValueError, ProcessLookupError):
+        return "FAIL", f"PID in pid file is dead — poller crashed; run: bash scripts/start_poller.sh"
+    except PermissionError:
+        return "PASS", "PID exists (permission check only)"
 
 
 def check_executions(today: str) -> tuple[str, str]:
@@ -177,7 +213,8 @@ def main():
         ("Trading Mode",        check_trading_mode()),
         ("candidates.json",     check_candidates(today)),
         ("flags.json",          check_flags(today)),
-        ("levels.json (ORH)",   check_levels()),
+        ("levels.json (ORH)",   check_levels(today)),
+        ("TV Poller (Phase 3)", check_poller()),
         ("Alpaca / Balance",    check_alpaca()),
         ("Execution Log",       check_executions(today)),
     ]

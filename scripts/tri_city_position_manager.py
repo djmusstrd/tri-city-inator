@@ -67,7 +67,14 @@ ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_PAPER      = os.getenv("ALPACA_PAPER", "true").lower() == "true"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+_PM_LOG_DIR = Path.home() / "tri-city-inator" / "logs"
+_PM_LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.FileHandler(_PM_LOG_DIR / "tri-city-position-manager.log")],
+    force=True,  # override any handlers set by imported modules
+)
 logger = logging.getLogger(__name__)
 
 

@@ -55,25 +55,35 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-WORKSPACE  = Path.home() / "tri-city-inator"
-SHARED     = WORKSPACE / "shared"
-TABLE_FILE = SHARED / "tri-city-table.json"
-FLAGS_FILE = SHARED / "tri-city-flags.json"
-RVOL_FILE  = SHARED / "tri-city-rvol-state.json"
-VWAP_FILE  = SHARED / "tri-city-vwap-state.json"
-SIG_FILE   = SHARED / "tri-city-signals.json"
+WORKSPACE    = Path.home() / "tri-city-inator"
+SHARED       = WORKSPACE / "shared"
+TABLE_FILE   = SHARED / "tri-city-table.json"
+FLAGS_FILE   = SHARED / "tri-city-flags.json"
+RVOL_FILE    = SHARED / "tri-city-rvol-state.json"
+VWAP_FILE    = SHARED / "tri-city-vwap-state.json"
+SIG_FILE     = SHARED / "tri-city-signals.json"
+LEVELS_FILE  = SHARED / "tri-city-levels.json"
 
 CT = ZoneInfo("America/Chicago")
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+# Silence noisy third-party loggers that spam stderr every cycle
+for _noisy in ("yfinance", "peewee", "urllib3", "requests"):
+    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
 
 # ── Setup thresholds (mirror CLAUDE.md) ──────────────────────────────────────
 
-PULLBACK_EMA_MAX  = 0.8   # EMA Dev% upper bound for PULLBACK
-CONT_EMA_MAX      = 1.0   # EMA Dev% upper bound for CONTINUATION
+PULLBACK_EMA_MAX  = 1.2   # EMA Dev% upper bound for PULLBACK (raised from 0.8 — Pine already filters)
+CONT_EMA_MAX      = 1.5   # EMA Dev% upper bound for CONTINUATION (raised from 1.0)
 PULLBACK_RSI_MIN  = 38
-PULLBACK_RSI_MAX  = 55
+PULLBACK_RSI_MAX  = 65    # raised from 62 — looser guard, valid pullback zone is wider
+
+# Locked-level detection thresholds (Pine-independent)
+# Used when Pine shows "---" because its live ORH chases price up.
+# On green SPY days, RSI is naturally elevated; locked-level checks use wider RSI bands.
+LOCKED_PULLBACK_RSI_MAX = 65  # wider than Pine's 55 ceiling — valid on green-day pullbacks
+LOCKED_CONT_RSI_MAX     = 68  # continuation on elevated momentum days
 
 # MACD valid after this many minutes into session (26 × 5-min bars = 130 min)
 MACD_VALID_AFTER_MIN = 130   # ~10:30 AM CT
@@ -92,10 +102,10 @@ VWAP_STOP_OFFSET      = 0.05   # 5 cents below VWAP for VWAP-reclaim stops
 EMA20_PB_EMA_MIN   = -0.5   # EMA Dev% lower bound (at or just below EMA20)
 EMA20_PB_EMA_MAX   =  1.5   # EMA Dev% upper bound (at or just above EMA20)
 EMA20_PB_RSI_MIN   =  45    # RSI cooled from overbought
-EMA20_PB_RSI_MAX   =  68    # RSI not reversed (still bullish context)
+EMA20_PB_RSI_MAX   =  70    # RSI not reversed (still bullish context)
 EMA20_PB_MIN_RUN   =  5.0   # minimum % move from open to confirm a real run
 EMA20_PB_MIN_RVOL  =  0.8   # sustained volume (bar-level, not just opening spike)
-EMA20_PB_ORH_MULT  =  1.05  # price must be at least 5% above ORH (confirms gap/run)
+EMA20_PB_ORH_MULT  =  1.02  # price must be at least 2% above ORH (was 1.05 — missed RCAT bounce at 13.20 when locked ORH=12.85)
 EMA20_PB_START_H   =  8     # earliest CT hour for this signal
 EMA20_PB_START_M   = 35     # earliest CT minute (8:35 AM — 5 min after ORB with ORB_MINUTES=5)
 EMA20_PB_END_H     = 11     # latest CT hour
@@ -103,6 +113,15 @@ EMA20_PB_END_M     = 30     # latest CT minute (11:30 AM, before lunch)
 
 # ── BREAKOUT quality filters ──────────────────────────────────────────────────
 BREAKOUT_MAX_ORH_ORL_SPREAD = 8.0  # % of price — wide spread = indecision, skip
+
+# ── Symbols that should skip yfinance VWAP/data fetches ───────────────────────
+# SPACs and units (e.g. QETAU, ASPCU) cause yfinance "possibly delisted" errors
+# every cycle because yfinance cannot fetch price data for SPAC unit tickers.
+# These symbols are still tracked by the scanner table for signal purposes, but
+# we skip the yfinance data fetch silently to avoid noisy error output.
+SKIP_VWAP_SYMBOLS: set[str] = {
+    "QETAU", "ASPCU",
+}
 
 
 # ── Table row parser ──────────────────────────────────────────────────────────
@@ -202,6 +221,9 @@ def macd_is_bullish(symbol: str, now: datetime) -> bool | None:
         if (now - fetched_at).total_seconds() < _MACD_CACHE_TTL:
             return cached_result
 
+    if symbol in SKIP_VWAP_SYMBOLS:
+        return None
+
     # Only valid after 130 min into session
     session_open = now.replace(hour=8, minute=30, second=0, microsecond=0)
     elapsed_min = (now - session_open).total_seconds() / 60
@@ -251,8 +273,12 @@ def ema_ribbon_trend(symbol: str, now: datetime) -> str | None:
     Fetch 2 days of 5-min bars, compute EMA10 and EMA20.
     Return "EXPANDING" if today's EMA10-EMA20 spread > yesterday's last spread.
     Return "COMPRESSING" if today's spread < yesterday's last spread.
+    Return None for symbols in SKIP_VWAP_SYMBOLS.
     Return None if data unavailable (never blocks or forces a signal).
     """
+    if symbol in SKIP_VWAP_SYMBOLS:
+        return None
+
     if symbol in _ribbon_cache:
         fetched_at, cached = _ribbon_cache[symbol]
         if (now - fetched_at).total_seconds() < _MACD_CACHE_TTL:
@@ -421,7 +447,8 @@ def is_bounce_bar(bar: dict) -> bool:
 # ── Setup detection ───────────────────────────────────────────────────────────
 
 def detect_setup(row: dict, now: datetime | None = None,
-                  vwap_data: dict | None = None) -> str | None:
+                  vwap_data: dict | None = None,
+                  locked_orh: float = 0.0, locked_orl: float = 0.0) -> str | None:
     """
     Apply setup rules in priority order.
     Returns "BREAKOUT" | "CONTINUATION" | "PULLBACK" | "EMA20_PULLBACK" | None.
@@ -500,36 +527,78 @@ def detect_setup(row: dict, now: datetime | None = None,
     if (sig == "PULLBACK"
             and 0 <= ema_dev <= PULLBACK_EMA_MAX
             and PULLBACK_RSI_MIN <= rsi <= PULLBACK_RSI_MAX):
-        # Block afternoon re-entries on extended runners (likely exhaustion)
+        return "PULLBACK"
+
+    # SETUP 4: EMA20_PULLBACK — price at EMA20 after a significant run, above VWAP
+    # No time window — valid throughout the day wherever the pattern appears
+    if (EMA20_PB_EMA_MIN <= ema_dev <= EMA20_PB_EMA_MAX
+            and vwap is not None and price > vwap
+            and EMA20_PB_RSI_MIN <= rsi <= EMA20_PB_RSI_MAX
+            and rvol >= EMA20_PB_MIN_RVOL
+            and change_from_open >= EMA20_PB_MIN_RUN
+            and (orh <= 0 or price >= orh * EMA20_PB_ORH_MULT)):
+        if last_bar and not is_bounce_bar(last_bar):
+            logger.info(f"EMA20_PULLBACK {row['symbol']}: no bounce bar — entering anyway")
+        return "EMA20_PULLBACK"
+
+    # ── Locked-level detection (Setups 5–7) ─────────────────────────────────
+    # Pine's live ORH chases price upward throughout the session, so price is
+    # never "above ORH" for BREAKOUT/CONTINUATION in Pine's own logic.
+    # These checks use the ORH/ORL locked at the end of the ORB window
+    # (loaded from tri-city-levels.json) to detect setups independently of
+    # Pine's SIGNAL column. Only fires when sig == "---" (Pine didn't signal).
+
+    if sig not in ("---", "") or locked_orh <= 0:
+        return None
+
+    above_locked_orh = price > locked_orh
+
+    # SETUP 5: LOCKED-LEVEL CONTINUATION (checked BEFORE BREAKOUT)
+    # Tight EMA dev means price is consolidating above locked ORH — cleaner signal
+    # than a wide-EMA breakout. Order matters: tight-dev setups should be CONT, not BO.
+    if (above_locked_orh
+            and 0 <= ema_dev <= CONT_EMA_MAX
+            and 50 <= rsi <= LOCKED_CONT_RSI_MAX):
+        if vwap is not None and vwap > 0 and price < vwap:
+            return None  # VWAP guard
+        macd_ok = macd_is_bullish(row["symbol"], now)
+        if macd_ok is False:
+            logger.info(f"LOCKED CONT {row['symbol']} blocked: MACD bearish")
+            return None
+        return "CONTINUATION"
+
+    # SETUP 6: LOCKED-LEVEL BREAKOUT
+    # Price above locked ORH with extended EMA dev (>CONT_EMA_MAX) = fresh momentum.
+    # Guards: not reversing from open (change_from_open > -5%), no rejection bar,
+    # ORH/ORL spread within bounds, price above VWAP.
+    if (above_locked_orh
+            and ema_dev > CONT_EMA_MAX          # tight EMA dev = CONTINUATION (handled above)
+            and rsi > BREAKOUT_RSI_MIN
+            and change_from_open > -5.0):        # skip if stock is reversing hard from open
+        if vwap is not None and vwap > 0 and price < vwap:
+            return None  # VWAP guard
+        if locked_orl > 0:
+            spread_pct = (locked_orh - locked_orl) / price * 100
+            if spread_pct > BREAKOUT_MAX_ORH_ORL_SPREAD:
+                logger.info(f"LOCKED BREAKOUT {row['symbol']} blocked: spread {spread_pct:.1f}%")
+                return None
+        if last_bar and is_rejection_bar(last_bar):
+            logger.info(f"LOCKED BREAKOUT {row['symbol']} blocked: rejection bar")
+            return None
+        return "BREAKOUT"
+
+    # SETUP 7: LOCKED-LEVEL PULLBACK
+    # Price inside the opening range (above ORL, below ORH), near EMA.
+    # RSI ceiling raised to 65 — green SPY days naturally push RSI above Pine's 55 max.
+    if (locked_orl > 0
+            and locked_orl <= price <= locked_orh
+            and 0 <= ema_dev <= PULLBACK_EMA_MAX
+            and PULLBACK_RSI_MIN <= rsi <= LOCKED_PULLBACK_RSI_MAX):
         if change_from_open >= 25.0:
             pm_cutoff = now.replace(hour=11, minute=30, second=0, microsecond=0)
             if now >= pm_cutoff:
-                logger.info(
-                    f"PULLBACK {row['symbol']} blocked: extended run "
-                    f"{change_from_open:.1f}% from open after 11:30 CT"
-                )
                 return None
         return "PULLBACK"
-
-    # SETUP 4: EMA20_PULLBACK
-    # Price has pulled back to EMA20 after a significant run. Above rising VWAP.
-    # RSI cooled. Bounce bar confirms buyers at EMA20. Pine has no flag for this.
-    # Based on CODX/ONDS/PONY pattern: multiple clean entries per day.
-    pb_start = now.replace(hour=EMA20_PB_START_H, minute=EMA20_PB_START_M,
-                            second=0, microsecond=0)
-    pb_end   = now.replace(hour=EMA20_PB_END_H,   minute=EMA20_PB_END_M,
-                            second=0, microsecond=0)
-    in_window = pb_start <= now <= pb_end
-
-    if (in_window
-            and EMA20_PB_EMA_MIN <= ema_dev <= EMA20_PB_EMA_MAX
-            and vwap is not None and price > vwap          # price above rising VWAP
-            and EMA20_PB_RSI_MIN <= rsi <= EMA20_PB_RSI_MAX
-            and rvol >= EMA20_PB_MIN_RVOL
-            and change_from_open >= EMA20_PB_MIN_RUN       # confirmed run from open
-            and (orh <= 0 or price >= orh * EMA20_PB_ORH_MULT)  # well above ORH
-            and (last_bar is None or is_bounce_bar(last_bar))):  # bounce bar preferred
-        return "EMA20_PULLBACK"
 
     return None
 
@@ -614,28 +683,47 @@ def main():
         except Exception:
             pass
 
+    # ── Load locked ORH/ORL from level lock file ────────────────────────────
+    # Pine's live ORH updates as price makes new highs. The locked levels
+    # represent the true opening range high/low from the first ORB_MINUTES bars.
+    # Reject stale data from a prior session using the "_date" field.
+    locked_levels: dict[str, dict] = {}
+    if LEVELS_FILE.exists():
+        try:
+            raw_levels = json.loads(LEVELS_FILE.read_text())
+            today_str  = now_ct.strftime("%Y-%m-%d")
+            file_date  = raw_levels.get("_date", today_str)  # default: assume today if missing
+            if file_date == today_str:
+                locked_levels = {k: v for k, v in raw_levels.items() if k != "_date"}
+            else:
+                logger.warning(f"DETECTOR: tri-city-levels.json is from {file_date}, ignoring stale data")
+        except Exception:
+            pass
+
     # ── Identify VWAP fetch candidates ─────────────────────────────────────
     # 1. Pine-signaled rows (existing logic)
     # 2. EMA20_PULLBACK basic candidates: time window + EMA/RSI/RVOL pre-filter
     #    (Pine won't flag these — we detect them independently)
-    pb_start = now_ct.replace(hour=EMA20_PB_START_H, minute=EMA20_PB_START_M,
-                               second=0, microsecond=0)
-    pb_end   = now_ct.replace(hour=EMA20_PB_END_H,   minute=EMA20_PB_END_M,
-                               second=0, microsecond=0)
-    in_pb_window = pb_start <= now_ct <= pb_end
-
+    # 3. Locked-level candidates: symbols with locked ORH that may have live setups
     fetch_syms: set[str] = set(
         r["symbol"] for r in rows if r["signal"] not in ("---", "")
     )
-    if in_pb_window:
-        for r in rows:
-            if (EMA20_PB_EMA_MIN <= r["ema_dev"] <= EMA20_PB_EMA_MAX
-                    and EMA20_PB_RSI_MIN <= r["rsi"] <= EMA20_PB_RSI_MAX
-                    and r["rvol"] >= EMA20_PB_MIN_RVOL):
-                fetch_syms.add(r["symbol"])
+    # EMA20_PULLBACK candidates — no time window, check all rows
+    for r in rows:
+        if (EMA20_PB_EMA_MIN <= r["ema_dev"] <= EMA20_PB_EMA_MAX
+                and EMA20_PB_RSI_MIN <= r["rsi"] <= EMA20_PB_RSI_MAX
+                and r["rvol"] >= EMA20_PB_MIN_RVOL):
+            fetch_syms.add(r["symbol"])
+    # Fetch VWAP for any symbol with a locked level — used by locked-level detection
+    for r in rows:
+        if r["symbol"] in locked_levels and r["signal"] in ("---", ""):
+            fetch_syms.add(r["symbol"])
 
     vwap_map: dict[str, dict | None] = {}
     for sym in fetch_syms:
+        if sym in SKIP_VWAP_SYMBOLS:
+            vwap_map[sym] = None  # skip silently — SPAC/unit tickers not in yfinance
+            continue
         vwap_map[sym] = fetch_vwap_data(sym, now_ct)
 
     # ── Detect signals ──────────────────────────────────────────────────────
@@ -646,7 +734,12 @@ def main():
         vwap_data = vwap_map.get(sym)   # dict | None
         vwap      = vwap_data["vwap"] if vwap_data else None
 
-        setup = detect_setup(row, now_ct, vwap_data=vwap_data)
+        lvl = locked_levels.get(sym, {})
+        setup = detect_setup(
+            row, now_ct, vwap_data=vwap_data,
+            locked_orh=lvl.get("orh", 0.0),
+            locked_orl=lvl.get("orl", 0.0),
+        )
         if setup is None:
             continue
 

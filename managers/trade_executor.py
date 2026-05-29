@@ -173,18 +173,30 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
             return False
 
         def place_trailing_stop_after_fill(
-            entry_order_id: str, qty: int, trail_pct: float, label: str
+            t1_order_id: str, t2_order_id: str | None,
+            qty: int, trail_pct: float, label: str
         ) -> str | None:
             """
             Alpaca native trailing stop for T3 (Papp Ch 11, Table 11.3).
-            Must be placed AFTER entry fill — Alpaca rejects SELL while BUY is still open
-            (error 40310000: cannot open short sell while long buy order is open).
-            Polls entry order fill before submitting, falls back to bracket on timeout.
+            Must be placed AFTER ALL entry fills — Alpaca rejects SELL while any BUY
+            is still open (error 40310000). Waits for BOTH T1 and T2 brackets to fill
+            so that Alpaca's available-qty accounting includes all purchased shares.
+            Falls back to bracket on timeout.
             """
-            filled = _wait_for_fill(entry_order_id)
-            if not filled:
-                logger.warning(f"  {label}: entry not filled in time — skipping trailing stop")
+            filled_t1 = _wait_for_fill(t1_order_id)
+            if not filled_t1:
+                logger.warning(f"  {label}: T1 entry not filled in time — skipping trailing stop")
                 return None
+            # Also wait for T2 bracket entry to fill so its shares are available.
+            # Without this, Alpaca sees the T2 BUY still open and counts those shares
+            # as unavailable, leaving 0 qty for the T3 trailing SELL.
+            if t2_order_id:
+                filled_t2 = _wait_for_fill(t2_order_id)
+                if not filled_t2:
+                    logger.warning(
+                        f"  {label}: T2 entry not filled in time — skipping trailing stop"
+                    )
+                    return None
             req = TrailingStopOrderRequest(
                 symbol=ticker,
                 qty=qty,
@@ -200,16 +212,19 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
         # T1 bracket (50%)
         order_id = place_bracket(t1_shares, target_1, "T1")
 
-        # T2 bracket (25%)
-        place_bracket(t2_shares, target_2, "T2")
+        # T2 bracket (25%) — capture order_id so T3 can wait for its fill
+        t2_order_id = place_bracket(t2_shares, target_2, "T2")
 
-        # T3 (25%) — Alpaca native trailing stop placed AFTER entry fills (Papp Ch 11)
-        # Polls T1 order until filled (≤30s), then submits trailing stop.
-        # Falls back to bracket if fill times out or trailing stop API fails.
+        # T3 (25%) — Alpaca native trailing stop placed AFTER T1 AND T2 fill (Papp Ch 11).
+        # Gap B fix: waiting only for T1 fill left T2's BUY still open, causing Alpaca to
+        # report 0 available qty for the T3 trailing SELL ("insufficient qty" error).
+        # Now waits for both T1 and T2 fills before submitting T3 trailing stop.
         t3_trail_pct = float(os.getenv("T3_TRAIL_PCT", "3"))
         try:
             if order_id:
-                t3_oid = place_trailing_stop_after_fill(order_id, t3_shares, t3_trail_pct, "T3")
+                t3_oid = place_trailing_stop_after_fill(
+                    order_id, t2_order_id, t3_shares, t3_trail_pct, "T3"
+                )
                 if t3_oid is None:
                     # Fill timed out — use bracket as fallback
                     place_bracket(t3_shares, target_3, "T3-fallback")

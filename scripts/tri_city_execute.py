@@ -16,9 +16,8 @@ Guards (in order):
      → correlation warning    — advisory: flags ≥0.75 correlation with open positions
   3. max_positions             — no more than MAX_POSITIONS open at once (default: 3)
   4. daily_loss_limit          — circuit breaker if down MAX_DAILY_LOSS (default: -$300)
-  5. time_window               — no new entries after NO_ENTRY_AFTER (default: 1:00 PM CT)
-  6. market_regime             — block LONGs if SPY down > SPY_BEAR_THRESHOLD (default: -1.5%)
-  7. rvol                      — require RVol >= MIN_RVOL vs 20-day avg (default: 1.5x)
+  5. market_regime             — block LONGs if SPY down > SPY_BEAR_THRESHOLD (default: -1.5%)
+  6. rvol                      — require RVol >= MIN_RVOL vs 20-day avg (default: 1.5x)
 
 Position sizing layers (applied in order, each can only reduce shares):
   base    — equity × RISK_PCT% / risk_per_share
@@ -90,9 +89,6 @@ MIN_RVOL           = float(os.getenv("MIN_RVOL",           "1.5"))
 PM_MIN_RVOL        = float(os.getenv("PM_MIN_RVOL",        "2.0"))   # tighter floor after noon
 PM_START_HOUR      = int(os.getenv("PM_START_HOUR",        "12"))    # noon CT
 SPY_BEAR_THRESHOLD = float(os.getenv("SPY_BEAR_THRESHOLD", "-1.5"))
-_no_entry_hour     = int(os.getenv("NO_ENTRY_HOUR",        "13"))
-_no_entry_minute   = int(os.getenv("NO_ENTRY_MINUTE",      "0"))
-NO_ENTRY_AFTER     = (_no_entry_hour, _no_entry_minute)
 
 LUNCH_NO_ENTRY       = os.getenv("LUNCH_NO_ENTRY", "false").lower() == "true"
 _lunch_start_hour    = int(os.getenv("LUNCH_START_HOUR",   "11"))
@@ -132,7 +128,14 @@ ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_PAPER      = os.getenv("ALPACA_PAPER", "true").lower() == "true"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_LOG_DIR = Path.home() / "tri-city-inator" / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.FileHandler(_LOG_DIR / "tri-city-execute.log")],
+    force=True,  # override any handlers set by imported modules
+)
 logger = logging.getLogger(__name__)
 
 
@@ -253,18 +256,6 @@ def check_lunch_window(now: datetime) -> bool:
         return True
     return False
 
-
-# ── Guard 5: time window ───────────────────────────────────────────────────────
-
-def check_time_window(now: datetime) -> bool:
-    cutoff = now.replace(
-        hour=NO_ENTRY_AFTER[0], minute=NO_ENTRY_AFTER[1],
-        second=0, microsecond=0
-    )
-    if now >= cutoff:
-        logger.info(f"Past entry cutoff {NO_ENTRY_AFTER[0]:02d}:{NO_ENTRY_AFTER[1]:02d} CT.")
-        return True
-    return False
 
 
 # ── Guard 6: SPY market regime ─────────────────────────────────────────────────
@@ -781,7 +772,7 @@ def main():
     parser.add_argument("--signal",   required=True,
                         help='Signal text from scanner, e.g. "BREAKOUT"')
     parser.add_argument("--setup",    required=True,
-                        choices=["BREAKOUT", "CONTINUATION", "PULLBACK"])
+                        choices=["BREAKOUT", "CONTINUATION", "PULLBACK", "EMA20_PULLBACK"])
     parser.add_argument("--cup",         action="store_true",
                         help="Cup pattern detected (high-conviction flag from scanner)")
     parser.add_argument("--htf",         action="store_true",
@@ -801,6 +792,8 @@ def main():
                         help="Print signal without placing orders")
     parser.add_argument("--override-cutoff", action="store_true",
                         help="Allow entry past the time cutoff (user-confirmed late trade)")
+    parser.add_argument("--force",       action="store_true",
+                        help="Bypass RVOL floor, already-executed, and PM guards (user override)")
     parser.add_argument("--quiet",       action="store_true",
                         help="Suppress routine guard-failure output; only print POST_CUTOFF_SIGNAL "
                              "and execution results (reduces Claude context bloat on each 3-min cycle)")
@@ -841,7 +834,7 @@ def main():
         print("=" * 64)
 
     # ── Guard 1: already executed ──────────────────────────────────────────────
-    if already_executed_today(symbol, args.setup):
+    if already_executed_today(symbol, args.setup) and not getattr(args, "force", False):
         if not args.quiet:
             print(f"SKIP: {args.setup} already executed for {symbol} today.")
         sys.exit(0)
@@ -854,8 +847,9 @@ def main():
 
     # ── Correlation warning (advisory — does not block) ────────────────────────
     corr_warnings = check_correlation_warning(symbol)
-    for w in corr_warnings:
-        print(w)  # always print regardless of --quiet; user must see sector risk
+    if not args.quiet:
+        for w in corr_warnings:
+            print(w)
 
     # ── Guard 3: max positions ─────────────────────────────────────────────────
     if check_max_positions():
@@ -876,35 +870,7 @@ def main():
                   f"{LUNCH_END[0]:02d}:{LUNCH_END[1]:02d} CT — no new entries.")
         sys.exit(0)
 
-    # ── Guard 5: time window ───────────────────────────────────────────────────
-    if not args.dry_run and not getattr(args, "override_cutoff", False) and check_time_window(now):
-        # Emit POST_CUTOFF_SIGNAL so Claude cron can alert the user (always printed, even in quiet mode)
-        if args.quiet:
-            # Print minimal header for POST_CUTOFF_SIGNAL so Claude can parse it
-            print(f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup} + CUP" if args.cup else
-                  f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup}")
-        else:
-            print("=" * 64)
-            print(f"TRI-CITY EXECUTE — {now.strftime('%Y-%m-%d %H:%M CT')}")
-            print(f"Symbol: {symbol} | Setup: {args.setup}{cup_tag} | Price: ${args.price:.2f}")
-            print(f"ORH: ${args.orh:.2f} | ORL: ${args.orl:.2f} | "
-                  f"RSI: {args.rsi:.1f} | EMA Dev%: {args.ema_dev:+.2f}%")
-            print("=" * 64)
-        signal_preview = calculate_signal(symbol, args.price, args.orh, args.setup, args.ema_dev,
-                                          bb_squeeze=getattr(args, "bb_squeeze", False),
-                                          vwap=getattr(args, "vwap", None))
-        risk_per_share = round(args.price - signal_preview["stop_loss"], 2)
-        print(
-            f"POST_CUTOFF_SIGNAL | {symbol} | {args.setup} | "
-            f"price={args.price} | orh={args.orh} | orl={args.orl} | "
-            f"rsi={args.rsi} | ema_dev={args.ema_dev} | cup={args.cup} | "
-            f"signal={args.signal} | stop={signal_preview['stop_loss']} | "
-            f"risk_per_share={risk_per_share} | shares={signal_preview['position_size']} | "
-            f"cutoff={NO_ENTRY_AFTER[0]:02d}:{NO_ENTRY_AFTER[1]:02d}CT"
-        )
-        sys.exit(0)
-
-    # ── Guard 6: market regime ─────────────────────────────────────────────────
+    # ── Guard 5: market regime ──────────────────────────────────────────────────
     spy_regime, spy_change = get_spy_regime()
     spy_str = f"{spy_change:+.2f}%" if spy_change is not None else "N/A"
     if not args.quiet:
@@ -913,7 +879,7 @@ def main():
         print(f"SKIP: SPY bearish ({spy_str}) — blocking LONG entries.")
         sys.exit(0)
 
-    # ── Guard 7: relative volume (setup-specific + afternoon floor) ──────────
+    # ── Guard 6: relative volume (setup-specific + afternoon floor) ───────────
     # If --rvol passed from scanner table, use it directly (avoids yfinance
     # premarket-inflation bug early in session). Fall back to internal calc only
     # when scanner value is unavailable.
@@ -932,12 +898,12 @@ def main():
     pm_note      = ", afternoon" if is_afternoon else ""
     if not args.quiet:
         print(f"RVol: {rvol_str} ({args.setup} min {rvol_floor:.2f}x{pm_note})")
-    if rvol is not None and rvol < rvol_floor and not args.dry_run:
+    if rvol is not None and rvol < rvol_floor and not args.dry_run and not getattr(args, "force", False):
         if not args.quiet:
             print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
         sys.exit(0)
 
-    # ── Guard 8: 5-min ORB BREAKOUT extension guards ──────────────────────────
+    # ── Guard 7: 5-min ORB BREAKOUT extension guards ──────────────────────────
     # Short ORB windows can lock ORH during the first 5-min spike — price and RSI
     # may already be extended before the signal fires.  Block entries that are
     # chasing a parabolic move; the real setup will re-base and try again.
@@ -1010,7 +976,8 @@ def main():
         return
 
     # ── Execute ────────────────────────────────────────────────────────────────
-    print("\nPlacing 50-25-25 bracket orders via Alpaca...")
+    if not args.quiet:
+        print("\nPlacing 50-25-25 bracket orders via Alpaca...")
     result = execute_tri_city_trade("tri_city", signal)
 
     if result.success:
@@ -1022,14 +989,18 @@ def main():
                       scanner_signal=args.signal, orh=args.orh, orl=args.orl,
                       candle_type=candle_type,
                       actual_fill_price=result.avg_fill_price)
-        print(f"\n✅ ORDERS PLACED")
-        print(f"   Order ID: {result.order_id}")
-        print(f"   Shares:   {result.shares_filled}")
-        print(f"   Signal:   ${args.price:.2f}")
-        print(f"   Fill:     ${result.avg_fill_price:.2f}  (slippage {slippage:+.4f})")
-        print(f"   Logged:   {LOG_FILE}")
+        if args.quiet:
+            cup_flag = " CUP" if args.cup else ""
+            print(f"✅ {symbol} {args.setup}{cup_flag} {result.shares_filled}sh @${result.avg_fill_price:.2f} stop=${signal['stop']:.2f} (slippage {slippage:+.2f})")
+        else:
+            print(f"\n✅ ORDERS PLACED")
+            print(f"   Order ID: {result.order_id}")
+            print(f"   Shares:   {result.shares_filled}")
+            print(f"   Signal:   ${args.price:.2f}")
+            print(f"   Fill:     ${result.avg_fill_price:.2f}  (slippage {slippage:+.4f})")
+            print(f"   Logged:   {LOG_FILE}")
     else:
-        print(f"\n❌ EXECUTION FAILED: {result.error}")
+        print(f"❌ {symbol} EXECUTION FAILED: {result.error}")
         log_execution(symbol, args.setup, signal, result,
                       rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
                       cup=args.cup, bb_squeeze=getattr(args, "bb_squeeze", False),

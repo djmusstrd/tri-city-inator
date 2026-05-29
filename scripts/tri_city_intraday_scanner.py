@@ -92,6 +92,13 @@ def fetch_intraday_movers() -> list[dict]:
             ticker = raw_ticker.split(":")[-1] if ":" in raw_ticker else raw_ticker
             if not ticker:
                 continue
+            # Skip SPAC unit tickers (e.g. QETAU, ASPCU) — yfinance cannot fetch
+            # price data for these and they generate noisy errors every scan cycle.
+            # SPAC units typically end in "U" and have a $ prefix in some feeds.
+            if ticker.startswith("$") or (len(ticker) > 4 and ticker.endswith("U")
+                                           and ticker[:-1].isalpha()):
+                logger.debug(f"Skipping likely SPAC unit ticker: {ticker}")
+                continue
 
             def safe(col, default=0.0):
                 v = row.get(col)

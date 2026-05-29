@@ -5,12 +5,21 @@ Run with: streamlit run ~/tri-city-inator/scripts/dashboard.py
 
 import json
 import math
+import os
 from pathlib import Path
 from datetime import datetime, date
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+try:
+    from dotenv import load_dotenv
+    _env = Path(__file__).parent.parent / ".env"
+    if _env.exists():
+        load_dotenv(_env)
+except ImportError:
+    pass
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent.parent
@@ -237,14 +246,164 @@ def _base_layout(fig, title: str, height: int = 320, **kwargs):
 # ═══════════════════════════════════════════════════════════════════════════════
 page = st.sidebar.radio(
     "Navigation",
-    ["Overview", "Trade Log", "Signal Analysis", "Risk & Sizing", "Candidates"],
+    ["Positions", "Overview", "Trade Log", "Signal Analysis", "Risk & Sizing", "Candidates"],
     label_visibility="collapsed",
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
+# PAGE 0 — POSITIONS (live open trades)
+# ──────────────────────────────────────────────────────────────────────────────
+if page == "Positions":
+    st.title("Open Positions")
+
+    api_key    = os.getenv("ALPACA_API_KEY")
+    secret_key = os.getenv("ALPACA_SECRET_KEY")
+    paper      = os.getenv("ALPACA_PAPER", "true").lower() == "true"
+
+    col_refresh, _ = st.columns([1, 5])
+    with col_refresh:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+
+    if not api_key or not secret_key:
+        st.error("Alpaca API keys not found in .env")
+        st.stop()
+
+    try:
+        from alpaca.trading.client import TradingClient
+        client = TradingClient(api_key, secret_key, paper=paper)
+        account = client.get_account()
+        positions = client.get_all_positions()
+    except Exception as e:
+        st.error(f"Alpaca connection failed: {e}")
+        st.stop()
+
+    # Account summary strip
+    equity     = float(account.equity)
+    last_eq    = float(account.last_equity)
+    day_pnl    = equity - last_eq
+    buying_pwr = float(account.buying_power)
+
+    ac1, ac2, ac3, ac4 = st.columns(4)
+    ac1.metric("Equity",       f"${equity:,.2f}")
+    ac2.metric("Day P&L",      f"${'−' if day_pnl < 0 else ''}{abs(day_pnl):,.2f}",
+               delta=f"{day_pnl / last_eq * 100:+.2f}%" if last_eq else None)
+    ac3.metric("Buying Power", f"${buying_pwr:,.2f}")
+    ac4.metric("Positions",    len(positions))
+
+    st.divider()
+
+    if not positions:
+        st.info("No open positions.")
+        st.stop()
+
+    # Load executions log to get stop/target levels
+    exec_map: dict[str, dict] = {}
+    if EXECUTIONS_PATH.exists():
+        try:
+            exec_log = json.loads(EXECUTIONS_PATH.read_text()) or []
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            for e in reversed(exec_log):
+                sym = e.get("symbol", "")
+                if sym and sym not in exec_map and e.get("date") == today_str:
+                    exec_map[sym] = e
+        except Exception:
+            pass
+
+    rows = []
+    for pos in positions:
+        sym        = pos.symbol
+        qty        = float(pos.qty)
+        entry      = float(pos.avg_entry_price)
+        curr       = float(pos.current_price)
+        unreal_pnl = float(pos.unrealized_pl)
+        unreal_pct = float(pos.unrealized_plpc) * 100
+
+        ex = exec_map.get(sym, {})
+        stop   = ex.get("stop_loss")
+        t1     = ex.get("target_1")
+        t2     = ex.get("target_2")
+        t3     = ex.get("target_3")
+        setup  = ex.get("setup", "—")
+
+        # Risk to stop
+        risk_to_stop = round((curr - stop) / entry * 100, 2) if stop else None
+
+        rows.append({
+            "Symbol":    sym,
+            "Setup":     setup,
+            "Shares":    int(qty),
+            "Entry $":   f"${entry:.2f}",
+            "Current $": f"${curr:.2f}",
+            "P&L $":     f"${'−' if unreal_pnl < 0 else ''}{abs(unreal_pnl):,.2f}",
+            "P&L %":     f"{unreal_pct:+.2f}%",
+            "Stop $":    f"${stop:.2f}" if stop else "—",
+            "T1 $":      f"${t1:.2f}"  if t1   else "—",
+            "T2 $":      f"${t2:.2f}"  if t2   else "—",
+            "T3 $":      f"${t3:.2f}"  if t3   else "—",
+            "_pnl":      unreal_pnl,
+            "_sym":      sym,
+        })
+
+    pos_df = pd.DataFrame(rows)
+
+    # Total unrealized P&L banner
+    total_unreal = sum(r["_pnl"] for r in rows)
+    banner_color = "#26a69a" if total_unreal >= 0 else "#ef5350"
+    st.markdown(
+        f'<div style="background:{banner_color}22;border-left:4px solid {banner_color};'
+        f'padding:10px 16px;border-radius:6px;margin-bottom:12px;">'
+        f'<b>Total Unrealized P&L: '
+        f'{"−" if total_unreal < 0 else ""}${abs(total_unreal):,.2f}</b></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Display table (hide helper columns)
+    display_cols = ["Symbol", "Setup", "Shares", "Entry $", "Current $",
+                    "P&L $", "P&L %", "Stop $", "T1 $", "T2 $", "T3 $"]
+    st.dataframe(
+        pos_df[display_cols],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+
+    # Per-position detail cards
+    st.subheader("Position Detail")
+    for r in rows:
+        sym  = r["_sym"]
+        pnl  = r["_pnl"]
+        ex   = exec_map.get(sym, {})
+        card_color = "#26a69a" if pnl >= 0 else "#ef5350"
+
+        with st.expander(f"{sym}  ·  {r['Setup']}  ·  {r['P&L $']}  ({r['P&L %']})", expanded=True):
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                st.markdown("**Levels**")
+                st.write(f"Entry:  {r['Entry $']}")
+                st.write(f"Current: {r['Current $']}")
+                st.write(f"Stop:   {r['Stop $']}")
+            with d2:
+                st.markdown("**Targets**")
+                st.write(f"T1 (+{os.getenv('T1_PCT','10')}%): {r['T1 $']}")
+                st.write(f"T2 (+{os.getenv('T2_PCT','20')}%): {r['T2 $']}")
+                st.write(f"T3 (+{os.getenv('T3_PCT','30')}%): {r['T3 $']}")
+            with d3:
+                st.markdown("**Risk**")
+                risk_d = ex.get("risk_dollars")
+                rps    = ex.get("risk_per_share")
+                st.write(f"Shares:     {r['Shares']}")
+                st.write(f"Risk $:     ${risk_d:.2f}" if risk_d else "Risk $:  —")
+                st.write(f"Risk/share: ${rps:.2f}" if rps else "Risk/share: —")
+                st.write(f"RSI:        {ex.get('rsi', '—')}")
+                st.write(f"EMA Dev:    {ex.get('ema_dev', '—')}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # PAGE 1 — OVERVIEW
 # ──────────────────────────────────────────────────────────────────────────────
-if page == "Overview":
+elif page == "Overview":
     st.title("Overview")
 
     fdf = apply_filters(merged if not merged.empty else jdf)
