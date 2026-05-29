@@ -48,7 +48,17 @@ When a session starts:
 Read `~/tri-city-inator/shared/tri-city-candidates.json`. If the `"date"` field matches today AND `~/tri-city-inator/shared/tri-city-levels.json` exists with at least one non-zero ORH value, this session was already initialized today. Skip the 7:30 AM, 8:00 AM, 8:15 AM, and level-lock crons (they already ran). Register only the 9:30 AM and 11:30 AM symbol-push crons that haven't fired yet. Check if the poller is already running: read `shared/tri-city-poller.pid` and verify the PID is alive (`kill -0 PID`). If the poller is not running, launch it via `bash ~/tri-city-inator/scripts/start_poller.sh`. Announce: "Resuming session — candidates and levels already loaded from earlier today."
 
 **Step 0.5 — Connect TradingView via CDP**
-Call `tv_launch(kill_existing=true)`. This restarts TradingView with Chrome DevTools Protocol enabled on port 9222 so all MCP tools can connect. (The `tricity` alias uses `open -a TradingView` which does NOT enable CDP — this step fixes that automatically.) After launch succeeds, call `layout_switch("TRI CITY INATOR III")` to ensure the correct layout is active. Wait ~5 seconds for the layout to load before proceeding.
+Call `tv_launch(kill_existing=true)`. This restarts TradingView with Chrome DevTools Protocol enabled on port 9222 so all MCP tools can connect. (The `tricity` alias uses `open -a TradingView` which does NOT enable CDP — this step fixes that automatically.)
+
+After tv_launch succeeds, wait for TV to finish loading before calling layout_switch — run this Bash loop (up to 30s):
+```bash
+for i in $(seq 1 6); do
+  sleep 5
+  READY=$(curl -s http://localhost:9222/json/list 2>/dev/null | python3 -c "import json,sys; t=json.load(sys.stdin); print('yes' if any('tradingview.com/chart' in x.get('url','') for x in t) else 'no')" 2>/dev/null)
+  [ "$READY" = "yes" ] && break
+done
+```
+Once the chart page appears in CDP (or after 30s whichever comes first), call `layout_switch("TRI CITY INATOR III")`. If layout_switch fails or times out, continue anyway — the user can switch manually. Do NOT retry layout_switch more than once. Proceeding without the correct layout is better than blocking session startup.
 
 **Step 1 — Read ORB_MINUTES from .env**
 Read the file `~/tri-city-inator/.env`. Look for a line like `ORB_MINUTES=15`.
