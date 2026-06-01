@@ -75,7 +75,8 @@ from managers.trade_executor import execute_tri_city_trade, get_open_positions
 CT       = ZoneInfo("America/Chicago")
 LOG_FILE = WORKSPACE / "logs" / "tri-city-executions.json"
 
-STOP_OFFSET      = 0.13   # 13 cents below ORH (all setup types)
+STOP_OFFSET      = 0.13   # minimum floor: 13 cents below ORH
+STOP_OFFSET_PCT  = float(os.getenv("STOP_OFFSET_PCT", "0.8"))    # 0.8% of ORH price (scales with stock price)
 VWAP_STOP_OFFSET = float(os.getenv("VWAP_STOP_OFFSET", "0.05"))  # 5 cents below VWAP (Aziz)
 
 # ── ORB timing ────────────────────────────────────────────────────────────────
@@ -596,7 +597,8 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
     """
     # Stop
     if setup in ("BREAKOUT", "CONTINUATION"):
-        stop = round(orh - STOP_OFFSET, 2)
+        offset = max(round(orh * STOP_OFFSET_PCT / 100, 2), STOP_OFFSET)
+        stop = round(orh - offset, 2)
     elif setup == "PULLBACK":
         # Fix C: use EMA20 as stop anchor (tighter, meaningful support level)
         # ema_dev = (price - ema20) / ema20 * 100  →  ema20 = price / (1 + ema_dev/100)
@@ -1064,8 +1066,8 @@ def main():
     print(f"  Stop:   ${signal['stop_loss']:.2f}  "
           f"(${signal['entry_price'] - signal['stop_loss']:.2f}/share)")
     _t1_pct_display = round((signal['target_1'] / args.price - 1) * 100, 1)
-    print(f"  T1:     ${signal['target_1']:.2f}  (+{_t1_pct_display:.1f}%) — sell 50%  [T1 yield: ${t1_yield:.0f}]")
-    print(f"  T2:     ${signal['target_2']:.2f}  (+{T2_PCT:.0f}%) — sell 25%")
+    print(f"  T1:     ${signal['target_1']:.2f}  (+{_t1_pct_display:.1f}%) — sell 40%  [T1 yield: ${t1_yield:.0f}]")
+    print(f"  T2:     ${signal['target_2']:.2f}  (+{T2_PCT:.0f}%) — sell 35%")
     print(f"  T3:     ${signal['target_3']:.2f}  (+{T3_PCT:.0f}%) — trail 25%")
     print(f"  Size:   {signal['position_size']} shares")
     print(f"  Risk:   ${risk_dollars:.2f}")

@@ -55,11 +55,11 @@ class ExecutionResult:
 
 def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResult:
     """
-    Execute a Tri-City trade with 50-25-25 OCO structure.
+    Execute a Tri-City trade with 40-35-25 OCO structure.
 
     Places a single market BUY for the full position, then three OCO SELL orders:
-      T1 OCO: 50% of shares — limit at target_1 (+T1%), stop at stop_loss
-      T2 OCO: 25% of shares — limit at target_2 (+T2%), stop at stop_loss
+      T1 OCO: 40% of shares — limit at target_1 (+T1%), stop at stop_loss
+      T2 OCO: 35% of shares — limit at target_2 (+T2%), stop at stop_loss
       T3:     25% of shares — trailing stop at T3_TRAIL_PCT%; OCO fallback on failure
 
     Each OCO guarantees stop protection from the moment of entry. When the limit
@@ -100,9 +100,12 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
             error=f"Invalid params: ticker={ticker}, size={position_size}, entry={entry_price}"
         )
 
-    # ── Share split: 50 / 25 / 25 ─────────────────────────────────────────────
-    t1_shares = max(1, position_size // 2)
-    t2_shares = max(1, (position_size - t1_shares) // 2)
+    # ── Share split: 40 / 35 / 25 ─────────────────────────────────────────────
+    # T1 at +5%: bank 40% early (matches actual winner excursion of +3-5%)
+    # T2 at +12%: 35% for the runners that extend
+    # T3 trail: 25% free ride with trailing stop
+    t1_shares = max(1, int(position_size * 0.40))
+    t2_shares = max(1, int(position_size * 0.35))
     t3_shares = max(1, position_size - t1_shares - t2_shares)
 
     client = _get_client()
