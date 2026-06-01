@@ -108,11 +108,28 @@ PULLBACK_MIN_RVOL      = float(os.getenv("PULLBACK_MIN_RVOL",       "1.5"))
 EMA20_PB_MIN_RVOL      = float(os.getenv("EMA20_PB_MIN_RVOL",       "0.8"))  # lower — mid-morning vol distributes
 EARNINGS_GAP_RVOL_FLOOR = float(os.getenv("EARNINGS_GAP_RVOL_FLOOR", "0.4"))  # large-cap earnings gaps valid at 0.4x
 
-# BREAKOUT extension guardrails — blocks parabolic chasing without filtering legitimate setups
-# EMA Dev ceiling raised 8% → 12%: 15-min ORB breakouts naturally carry 8–12% dev at entry
-# RSI cap kept at 82: anything above is genuinely overbought on a breakout bar
-BREAKOUT_MAX_EMA_DEV  = float(os.getenv("BREAKOUT_MAX_EMA_DEV",  "12.0"))  # skip if price >12% above EMA20
-BREAKOUT_MAX_RSI      = float(os.getenv("BREAKOUT_MAX_RSI",      "82.0"))  # skip if RSI overbought
+# BREAKOUT extension guardrails
+# Parabolic check: ORB range % (orh-orl)/orl — wide opening candle = gap exhausted at open
+# EMA Dev was wrong metric (always high on gap stocks regardless of intraday behavior)
+PARABOLIC_ORB_RANGE_PCT = float(os.getenv("PARABOLIC_ORB_RANGE_PCT", "8.0"))  # skip if ORB range > 8%
+BREAKOUT_MAX_RSI        = float(os.getenv("BREAKOUT_MAX_RSI",        "82.0"))  # skip if RSI overbought
+
+# Time-bucketed position slots: 3 morning + 2 afternoon (replaces single MAX_POSITIONS pool)
+MORNING_SLOTS          = int(os.getenv("MORNING_SLOTS",          "3"))   # 9:35–10:15 CT
+AFTERNOON_SLOTS        = int(os.getenv("AFTERNOON_SLOTS",        "2"))   # 10:15 CT onward
+FADE_SLOTS             = int(os.getenv("FADE_SLOTS",             "1"))   # dedicated FADE pool (does NOT consume long slots)
+MORNING_CUTOFF_HOUR   = int(os.getenv("MORNING_CUTOFF_HOUR",    "10"))
+MORNING_CUTOFF_MINUTE = int(os.getenv("MORNING_CUTOFF_MINUTE",  "15"))
+# Parabolic ORB check only applies within 90 min of ORB close
+# After this cutoff the opening candle is stale — intraday breakouts are not ORB plays
+PARABOLIC_WINDOW_HOUR   = int(os.getenv("PARABOLIC_WINDOW_HOUR",   "10"))  # 10:00 CT
+PARABOLIC_WINDOW_MINUTE = int(os.getenv("PARABOLIC_WINDOW_MINUTE",  "0"))
+
+# FADE signal parameters (gap-and-crap short play)
+GAP_FADE_MIN_PCT  = float(os.getenv("GAP_FADE_MIN_PCT",  "12.0"))  # min gap% to qualify
+FADE_ORB_MIN_PCT  = float(os.getenv("FADE_ORB_MIN_PCT",   "8.0"))  # min ORB range% (parabolic ORB)
+FADE_T1_PCT       = float(os.getenv("FADE_T1_PCT",        "5.0"))  # short-side target: -5%
+FADE_STOP_BUFFER  = float(os.getenv("FADE_STOP_BUFFER",   "0.5"))  # stop above ORH by 0.5%
 
 # RVOL-based position size boost (#2)
 RVOL_SIZE_BOOST_MAX    = float(os.getenv("RVOL_SIZE_BOOST_MAX",    "1.25"))  # max multiplier
@@ -195,14 +212,96 @@ def already_in_position(symbol: str) -> bool:
     return False
 
 
-# ── Guard 3: max positions ─────────────────────────────────────────────────────
+# ── Guard 3: time-bucketed position slots ─────────────────────────────────────
+# Morning window (9:35–10:15 CT): up to MORNING_SLOTS positions
+# Afternoon window (10:15 CT+):   up to AFTERNOON_SLOTS positions
+# Hard cap: MAX_POSITIONS total at any time
 
-def check_max_positions() -> bool:
+def _morning_window(now: "datetime") -> bool:
+    """True if current time is before the morning cutoff (10:15 CT by default)."""
+    return now.hour < MORNING_CUTOFF_HOUR or (
+        now.hour == MORNING_CUTOFF_HOUR and now.minute < MORNING_CUTOFF_MINUTE
+    )
+
+
+def _count_bucket_positions(is_morning_entry: bool) -> int:
+    """
+    Count open positions that were entered in the given time bucket today.
+    Cross-references executions log (entry time) with current Alpaca positions.
+    """
+    today = datetime.now(CT).strftime("%Y-%m-%d")
+    cutoff_str = f"{MORNING_CUTOFF_HOUR:02d}:{MORNING_CUTOFF_MINUTE:02d}"
+    try:
+        execs = load_log()
+        entered_syms: set[str] = set()
+        for e in execs:
+            if e.get("date") != today or not e.get("success"):
+                continue
+            t = e.get("time", "99:99 CT").split(" ")[0]  # "HH:MM"
+            entry_is_morning = t < cutoff_str
+            if entry_is_morning == is_morning_entry:
+                entered_syms.add(e["symbol"])
+        open_syms = {p["ticker"] for p in get_open_positions()}
+        return len(entered_syms & open_syms)
+    except Exception:
+        return 0
+
+
+def check_max_positions(setup: str = "") -> bool:
+    """
+    Enforces both the hard cap (MAX_POSITIONS) and time-bucket limits.
+    FADE trades use a dedicated FADE_SLOTS pool and do NOT consume long slots.
+    Returns True (block entry) if any limit is reached.
+    """
     positions = get_open_positions()
-    if len(positions) >= MAX_POSITIONS:
-        logger.info(f"Max positions: {len(positions)}/{MAX_POSITIONS} open.")
+    total = len(positions)
+    now   = datetime.now(CT)
+
+    if total >= MAX_POSITIONS:
+        logger.info(f"Max positions: {total}/{MAX_POSITIONS} open.")
         return True
+
+    # FADE has its own dedicated slot pool
+    if setup == "FADE":
+        fade_open = _count_bucket_positions_by_setup("FADE")
+        if fade_open >= FADE_SLOTS:
+            logger.info(f"Fade slots full: {fade_open}/{FADE_SLOTS} open.")
+            return True
+        return False  # FADE does not consume morning/afternoon long slots
+
+    if _morning_window(now):
+        morning_open = _count_bucket_positions(is_morning_entry=True)
+        if morning_open >= MORNING_SLOTS:
+            logger.info(
+                f"Morning slots full: {morning_open}/{MORNING_SLOTS} "
+                f"(before {MORNING_CUTOFF_HOUR:02d}:{MORNING_CUTOFF_MINUTE:02d} CT)."
+            )
+            return True
+    else:
+        afternoon_open = _count_bucket_positions(is_morning_entry=False)
+        if afternoon_open >= AFTERNOON_SLOTS:
+            logger.info(
+                f"Afternoon slots full: {afternoon_open}/{AFTERNOON_SLOTS} "
+                f"(after {MORNING_CUTOFF_HOUR:02d}:{MORNING_CUTOFF_MINUTE:02d} CT)."
+            )
+            return True
+
     return False
+
+
+def _count_bucket_positions_by_setup(setup: str) -> int:
+    """Count today's open positions with a specific setup type."""
+    today = datetime.now(CT).strftime("%Y-%m-%d")
+    try:
+        execs = load_log()
+        entered_syms: set[str] = set()
+        for e in execs:
+            if e.get("date") == today and e.get("success") and e.get("setup") == setup:
+                entered_syms.add(e["symbol"])
+        open_syms = {p["ticker"] for p in get_open_positions()}
+        return len(entered_syms & open_syms)
+    except Exception:
+        return 0
 
 
 # ── Guard 4: daily loss limit ──────────────────────────────────────────────────
@@ -916,10 +1015,11 @@ def main():
         for w in corr_warnings:
             print(w)
 
-    # ── Guard 3: max positions ─────────────────────────────────────────────────
-    if check_max_positions():
+    # ── Guard 3: max positions (time-bucketed; FADE uses own slot pool) ───────
+    if check_max_positions(setup=args.setup):
+        bucket = "fade" if args.setup == "FADE" else ("morning" if _morning_window(now) else "afternoon")
         if not args.quiet:
-            print(f"SKIP: Max positions ({MAX_POSITIONS}) already open.")
+            print(f"SKIP: {bucket.capitalize()} slots full.")
         sys.exit(0)
 
     # ── Guard 4: daily loss limit ──────────────────────────────────────────────
@@ -974,23 +1074,109 @@ def main():
             print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
         sys.exit(0)
 
-    # ── Guard 7: 5-min ORB BREAKOUT extension guards ──────────────────────────
-    # Short ORB windows can lock ORH during the first 5-min spike — price and RSI
-    # may already be extended before the signal fires.  Block entries that are
-    # chasing a parabolic move; the real setup will re-base and try again.
-    if args.setup == "BREAKOUT" and not args.dry_run:
-        if args.ema_dev > BREAKOUT_MAX_EMA_DEV:
-            print(
-                f"SKIP: BREAKOUT EMA Dev% {args.ema_dev:+.2f}% exceeds "
-                f"{BREAKOUT_MAX_EMA_DEV:.1f}% ceiling — too extended above EMA20."
-            )
-            sys.exit(0)
+    # ── Guard 7: parabolic ORB check + RSI overbought ─────────────────────────
+    # EMA Dev was the wrong metric — gap stocks always show high EMA dev relative
+    # to a lagged EMA20 regardless of how clean the intraday move is.
+    # ORB range % measures whether the OPENING CANDLE ITSELF was explosive:
+    #   (orh - orl) / orl × 100 > PARABOLIC_ORB_RANGE_PCT → gap exhausted at open
+    # IMPORTANT: Only applies within the first 90 min (before PARABOLIC_WINDOW CT).
+    # After 90 min the ORB is stale — intraday breakouts are fresh setups, not ORB plays.
+    # Example: TSSI 9:36 CT — ORB range 12.9% → blocked (early, parabolic)
+    #          UMAC 12:04 CT — ORB range 10.6% → allowed (4 hrs later, new breakout)
+    if args.setup in ("BREAKOUT", "CONTINUATION") and not args.dry_run:
+        parabolic_window = now.replace(
+            hour=PARABOLIC_WINDOW_HOUR, minute=PARABOLIC_WINDOW_MINUTE,
+            second=0, microsecond=0
+        )
+        within_parabolic_window = now < parabolic_window
+        if within_parabolic_window and args.orl > 0:
+            orb_range_pct = (args.orh - args.orl) / args.orl * 100
+            if orb_range_pct > PARABOLIC_ORB_RANGE_PCT:
+                print(
+                    f"SKIP: ORB range {orb_range_pct:.1f}% > {PARABOLIC_ORB_RANGE_PCT:.1f}% ceiling "
+                    f"({now.strftime('%H:%M CT')} — within 90-min parabolic window). "
+                    f"Gap exhausted at open. Consider FADE signal instead."
+                )
+                sys.exit(0)
         if args.rsi >= BREAKOUT_MAX_RSI:
             print(
-                f"SKIP: BREAKOUT RSI {args.rsi:.1f} at or above {BREAKOUT_MAX_RSI:.0f} "
+                f"SKIP: RSI {args.rsi:.1f} at or above {BREAKOUT_MAX_RSI:.0f} "
                 f"cap — overbought, skip and wait for re-base."
             )
             sys.exit(0)
+
+    # ── FADE: gap-and-crap short ───────────────────────────────────────────────
+    # FADE is a short-side scalp on exhaustion gaps. The ORB was parabolic, the stock
+    # has failed to hold above ORH, and the move is reversing within the first 90 min.
+    # Entry: short at current price. Stop: above ORH + FADE_STOP_BUFFER%.
+    # Target: -FADE_T1_PCT% from entry. 100% exit at T1 (no T2/T3).
+    if args.setup == "FADE":
+        if args.orl > 0:
+            orb_range_pct = (args.orh - args.orl) / args.orl * 100
+            if orb_range_pct < FADE_ORB_MIN_PCT:
+                print(f"SKIP: FADE requires ORB range >= {FADE_ORB_MIN_PCT:.1f}% (got {orb_range_pct:.1f}%).")
+                sys.exit(0)
+        gap_pct_fade = args.gap if args.gap is not None else 0.0
+        if gap_pct_fade < GAP_FADE_MIN_PCT:
+            print(f"SKIP: FADE requires gap >= {GAP_FADE_MIN_PCT:.1f}% (got {gap_pct_fade:.1f}%).")
+            sys.exit(0)
+        fade_entry  = args.price
+        fade_stop   = round(args.orh * (1 + FADE_STOP_BUFFER / 100), 2)
+        fade_t1     = round(fade_entry * (1 - FADE_T1_PCT / 100), 2)
+        fade_risk   = round(fade_stop - fade_entry, 2)
+        if fade_risk <= 0:
+            print(f"SKIP: FADE stop ${fade_stop} is below entry ${fade_entry} — price already above ORH, not a fade.")
+            sys.exit(0)
+        try:
+            equity = float(get_account_equity())
+        except Exception:
+            equity = FIXED_RISK / (RISK_PCT / 100)
+        fade_shares = max(1, int((equity * RISK_PCT / 100) / fade_risk))
+        print("=" * 64)
+        print(f"TRI-CITY FADE (SHORT) — {now.strftime('%Y-%m-%d %H:%M CT')}")
+        print(f"Symbol: {symbol} | Gap: {gap_pct_fade:.1f}% | ORB range: {orb_range_pct:.1f}%")
+        print(f"Entry (short): ${fade_entry:.2f}  |  Stop: ${fade_stop:.2f}  |  T1: ${fade_t1:.2f} (-{FADE_T1_PCT:.0f}%)")
+        print(f"Shares: {fade_shares}  |  Risk: ${round(fade_shares * fade_risk, 2):.2f}")
+        print("=" * 64)
+        if args.dry_run:
+            print("\n[DRY RUN] — no order placed.")
+            return
+        try:
+            from alpaca.trading.client import TradingClient
+            from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+            from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+            client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+            # Short entry (market)
+            entry_req = MarketOrderRequest(
+                symbol=symbol, qty=fade_shares, side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+            )
+            entry_order = client.submit_order(entry_req)
+            # OCO: cover at T1 (limit buy) + stop above ORH (stop buy)
+            cover_req = LimitOrderRequest(
+                symbol=symbol, qty=fade_shares, side=OrderSide.BUY,
+                type="limit", time_in_force=TimeInForce.GTC,
+                order_class=OrderClass.OCO,
+                take_profit={"limit_price": str(fade_t1)},
+                stop_loss={"stop_price": str(fade_stop)},
+            )
+            cover_order = client.submit_order(cover_req)
+            print(f"\n✅ FADE ORDERS PLACED")
+            print(f"   Short entry: {entry_order.id}")
+            print(f"   Cover OCO:   {cover_order.id}")
+            log_execution(symbol, "FADE", {
+                "entry_price": fade_entry, "stop_loss": fade_stop,
+                "target_1": fade_t1, "target_2": fade_t1, "target_3": fade_t1,
+                "position_size": fade_shares,
+            }, type("R", (), {"success": True, "order_id": str(entry_order.id),
+                              "avg_fill_price": fade_entry, "shares_filled": fade_shares})(),
+                rvol=rvol, spy_regime=spy_regime, spy_change=spy_change,
+                cup=False, bb_squeeze=False, rsi=args.rsi, ema_dev=args.ema_dev,
+                scanner_signal="FADE", orh=args.orh, orl=args.orl, candle_type="FADE")
+        except Exception as e:
+            print(f"❌ FADE execution failed: {e}")
+            sys.exit(1)
+        return
 
     # ── Guard 8: SMA50 entry filter (Stage 2 — Minervini/Raschke) ────────────────
     # Block BREAKOUT/CONTINUATION entries when price is below the SMA50.

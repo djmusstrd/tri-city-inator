@@ -93,6 +93,15 @@ BREAKOUT_RSI_MIN  = 50
 RVOL_SPIKE_THRESH     = 0.50   # ≥50% increase triggers alert
 RVOL_SPIKE_MIN        = 2.0    # must be ≥2.0x after spike
 
+# ── FADE (gap-and-crap short) thresholds ─────────────────────────────────────
+# Fires when a large-gap stock has a parabolic ORB, fails to hold ORH after the
+# opening range closes, and is reversing within the first 90 minutes.
+FADE_GAP_MIN_PCT     = float(__import__("os").getenv("GAP_FADE_MIN_PCT",  "12.0"))  # min gap%
+FADE_ORB_RANGE_MIN   = float(__import__("os").getenv("FADE_ORB_MIN_PCT",   "8.0"))  # min ORB range%
+FADE_RSI_MIN         = 60    # overbought on open
+FADE_WINDOW_END_HOUR = 10    # stop detecting FADE after 10:00 CT (fade window closes)
+FADE_WINDOW_END_MIN  = 0
+
 # VWAP settings (Aziz methodology)
 VWAP_PROXIMITY_PCT    = 0.003  # 0.3% — price within this % of VWAP = "near VWAP"
 VWAP_STOP_OFFSET      = 0.05   # 5 cents below VWAP for VWAP-reclaim stops
@@ -587,6 +596,37 @@ def detect_setup(row: dict, now: datetime | None = None,
             logger.info(f"LOCKED BREAKOUT {row['symbol']} blocked: rejection bar")
             return None
         return "BREAKOUT"
+
+    # SETUP 8: FADE — gap-and-crap short
+    # Fires when a large-gap stock opened with a parabolic ORB, exhausted at the open,
+    # and is now trading BELOW the locked ORH (failed breakout = distribution signal).
+    # Only valid within the first 90 min of session (fade window closes at 10:00 CT).
+    # Conditions:
+    #   1. sig == "---" (no Pine signal — stock is not breaking out)
+    #   2. locked_orh > 0 and price < locked_orh (below locked ORH — failed breakout)
+    #   3. Gap >= FADE_GAP_MIN_PCT (large gap provides the fade fuel)
+    #   4. ORB range >= FADE_ORB_RANGE_MIN (parabolic opening candle)
+    #   5. RSI >= FADE_RSI_MIN (still overbought — sellers not fully in control yet)
+    #   6. Time is before FADE_WINDOW_END (10:00 CT — fade pattern is a morning trade)
+    fade_end = now.replace(hour=FADE_WINDOW_END_HOUR, minute=FADE_WINDOW_END_MIN,
+                           second=0, microsecond=0)
+    if (sig in ("---", "")
+            and locked_orh > 0
+            and price < locked_orh
+            and now < fade_end):
+        gap = candidate_gap.get(row["symbol"], 0.0)
+        if locked_orl > 0:
+            orb_range = (locked_orh - locked_orl) / locked_orl * 100
+        else:
+            orb_range = 0.0
+        if (gap >= FADE_GAP_MIN_PCT
+                and orb_range >= FADE_ORB_RANGE_MIN
+                and rsi >= FADE_RSI_MIN):
+            logger.info(
+                f"FADE {row['symbol']}: gap {gap:.1f}%, ORB range {orb_range:.1f}%, "
+                f"price ${price:.2f} < locked ORH ${locked_orh:.2f}, RSI {rsi:.1f}"
+            )
+            return "FADE"
 
     # SETUP 7: LOCKED-LEVEL PULLBACK
     # Price inside the opening range (above ORL, below ORH), near EMA.
