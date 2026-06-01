@@ -757,6 +757,146 @@ def check_eod(positions: list, now: datetime) -> list[str]:
     return actions
 
 
+# ── Advisory: EMA20 reclaim failure ───────────────────────────────────────────
+# Tracks consecutive cycles where price is below EMA20 AND below VWAP.
+# After 2+ cycles → advisory message so trader can decide to exit early.
+# Does NOT auto-close — that remains a manual decision.
+_ema20_below_cycles: dict[str, int] = {}
+
+
+def check_ema20_reclaim_advisory(positions: list, today: str) -> list[str]:
+    """
+    Advisory exit signal: position is below EMA20 AND VWAP for 2+ consecutive cycles.
+
+    DELL lesson (2026-06-01): entry at $461, EMA20 at $457.59. Within minutes price
+    fell below EMA20 and never reclaimed. Manual exit at ~$452 saved ~$150 vs -5% stop.
+    The rule: lose EMA20 + lose VWAP = setup invalidated. Don't wait for the full stop.
+    """
+    advisories = []
+    entries = load_executions()
+
+    for pos in positions:
+        ticker     = pos["ticker"]
+        curr_price = pos["current_price"]
+
+        entry = next(
+            (e for e in reversed(entries)
+             if e.get("symbol") == ticker and e.get("date") == today and e.get("success")),
+            None,
+        )
+        if not entry:
+            continue
+        # Only advisory after entry; skip if already at breakeven (T1 has been banked)
+        if entry.get("breakeven_set") or entry.get("t2_stop_set"):
+            _ema20_below_cycles.pop(ticker, None)
+            continue
+
+        ema20, vwap = get_intraday_ema_vwap(ticker)
+        if ema20 is None:
+            continue
+
+        ema_dev_pct = (curr_price - ema20) / ema20 * 100 if ema20 > 0 else 0
+
+        below_ema20 = ema_dev_pct < -0.5   # more than 0.5% below EMA20
+        below_vwap  = vwap is not None and curr_price < vwap
+
+        if below_ema20 and below_vwap:
+            _ema20_below_cycles[ticker] = _ema20_below_cycles.get(ticker, 0) + 1
+            count = _ema20_below_cycles[ticker]
+            if count >= 2:
+                msg = (
+                    f"EMA20_EXIT_ADVISORY: {ticker} @ ${curr_price:.2f} — "
+                    f"below EMA20 ${ema20:.2f} ({ema_dev_pct:+.1f}%) + below VWAP "
+                    f"${vwap:.2f} for {count} cycles — consider early exit"
+                )
+                logger.warning(msg)
+                advisories.append(msg)
+        else:
+            _ema20_below_cycles.pop(ticker, None)
+
+    return advisories
+
+
+# ── Advisory: EMA8 bearish crossover ─────────────────────────────────────────
+# EMA8 crosses below EMA20 = Ross Cameron's primary momentum exit signal.
+# Fires 1-2 bars earlier than the EMA20 breach alone.
+
+
+def _calc_ema(prices: list[float], period: int) -> float | None:
+    """Exponential moving average from a list of closes. Returns None if insufficient data."""
+    if len(prices) < period:
+        return None
+    k = 2.0 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for p in prices[period:]:
+        ema = p * k + ema * (1 - k)
+    return round(ema, 4)
+
+
+def check_ema8_advisory(positions: list) -> list[str]:
+    """
+    Advisory: EMA8 has crossed below EMA20 — bearish momentum shift.
+
+    Ross Cameron: EMA8 breach is the primary exit signal for gap-and-go plays.
+    Fires 1-2 bars earlier than EMA20 breach, giving a better exit price.
+    Condition: price < EMA8 AND EMA8 < EMA20 (bearish alignment).
+    """
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        return []
+
+    advisories = []
+
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import timedelta
+
+        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+
+        for pos in positions:
+            ticker     = pos["ticker"]
+            curr_price = pos["current_price"]
+
+            try:
+                now = datetime.now(CT)
+                req = StockBarsRequest(
+                    symbol_or_symbols=ticker,
+                    timeframe=TimeFrame.Minute,
+                    start=now - timedelta(minutes=60),
+                    end=now,
+                    feed="iex",
+                )
+                bars = client.get_stock_bars(req)
+                df   = bars.df
+                if df.empty or len(df) < 20:
+                    continue
+
+                closes = list(df["close"])
+                ema8   = _calc_ema(closes, 8)
+                ema20  = _calc_ema(closes, 20)
+
+                if ema8 is None or ema20 is None:
+                    continue
+
+                if curr_price < ema8 and ema8 < ema20:
+                    msg = (
+                        f"EMA8_EXIT_ADVISORY: {ticker} @ ${curr_price:.2f} — "
+                        f"EMA8 ${ema8:.2f} crossed below EMA20 ${ema20:.2f} "
+                        f"(bearish momentum shift — Ross Cameron exit signal)"
+                    )
+                    logger.warning(msg)
+                    advisories.append(msg)
+
+            except Exception as e:
+                logger.debug(f"check_ema8_advisory {ticker}: {e}")
+
+    except Exception as e:
+        logger.debug(f"check_ema8_advisory init: {e}")
+
+    return advisories
+
+
 # ── Status display ─────────────────────────────────────────────────────────────
 
 def print_status(positions: list, today: str):
@@ -974,6 +1114,8 @@ def main():
         positions = get_open_positions()
         all_actions += check_trailing(positions, today)
         positions = get_open_positions()
+        all_actions += check_ema20_reclaim_advisory(positions, today)
+        all_actions += check_ema8_advisory(positions)
 
     all_actions += check_eod(positions, now)
 

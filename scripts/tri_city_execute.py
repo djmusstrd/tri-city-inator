@@ -693,6 +693,7 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
         "entry_price":   price,
         "position_size": position_size,
         "stop_loss":     stop,
+        "stop":          stop,
         "target_1":      target_1,
         "target_2":      target_2,
         "target_3":      target_3,
@@ -952,6 +953,28 @@ def main():
             )
             sys.exit(0)
 
+    # ── Guard 8: SMA50 entry filter (Stage 2 — Minervini/Raschke) ────────────────
+    # Block BREAKOUT/CONTINUATION entries when price is below the SMA50.
+    # Stage 2 uptrends (price > SMA50 > SMA100) have the highest follow-through.
+    # Controlled by SMA50_FILTER=true in .env — defaults to false (non-breaking).
+    SMA50_FILTER = os.getenv("SMA50_FILTER", "false").lower() == "true"
+    if SMA50_FILTER and args.setup in ("BREAKOUT", "CONTINUATION") and not args.dry_run:
+        try:
+            _cands_path = WORKSPACE / "shared" / "tri-city-candidates.json"
+            if _cands_path.exists():
+                _cands = json.loads(_cands_path.read_text()).get("candidates", [])
+                _sma50 = next((c.get("sma50") for c in _cands if c.get("symbol") == symbol), None)
+                if _sma50 and _sma50 > 0 and args.price < _sma50:
+                    if not args.quiet:
+                        print(
+                            f"SKIP: SMA50 filter — {symbol} ${args.price:.2f} < SMA50 ${_sma50:.2f} "
+                            f"(Stage 2 guard — price must be above 50-day MA)."
+                        )
+                    logger.info(f"Guard 8 SMA50: {symbol} ${args.price:.2f} < SMA50 ${_sma50:.2f} — skip")
+                    sys.exit(0)
+        except Exception as _g8e:
+            logger.debug(f"Guard 8 SMA50 lookup: {_g8e}")
+
     # ── Candle type (Finding 6) — auto-detect if not passed ───────────────────
     candle_type = (args.candle_type or "").upper() or get_candle_type(symbol)
     candle_note = ""
@@ -970,6 +993,19 @@ def main():
                                     cup=args.cup, htf=getattr(args, "htf", False),
                                     bb_squeeze=getattr(args, "bb_squeeze", False),
                                     vwap=getattr(args, "vwap", None))
+
+    # Fix 4: tighter T1 for large-cap earnings gap plays.
+    # Large-caps gapping 15%+ on earnings consolidate the gap rather than extending it.
+    # DELL today: +31.8% gap, T1 at +7% = $493 — never came close. At 3.5% → $477, achievable.
+    EARNINGS_T1_PCT_VAL = float(os.getenv("EARNINGS_T1_PCT", str(T1_PCT)))
+    if getattr(args, "earnings", False) and gap_pct >= 15.0 and EARNINGS_T1_PCT_VAL < T1_PCT:
+        original_t1 = signal["target_1"]
+        signal["target_1"] = round(args.price * (1 + EARNINGS_T1_PCT_VAL / 100), 2)
+        logger.info(
+            f"EARNINGS_T1_PCT: T1 {original_t1:.2f} → {signal['target_1']:.2f} "
+            f"({T1_PCT:.1f}% → {EARNINGS_T1_PCT_VAL:.1f}%, earnings gap {gap_pct:.1f}%)"
+        )
+
     risk_dollars = round(
         signal["position_size"] * (signal["entry_price"] - signal["stop_loss"]), 2
     )
@@ -990,7 +1026,8 @@ def main():
     print(f"  Entry:  ${signal['entry_price']:.2f}")
     print(f"  Stop:   ${signal['stop_loss']:.2f}  "
           f"(${signal['entry_price'] - signal['stop_loss']:.2f}/share)")
-    print(f"  T1:     ${signal['target_1']:.2f}  (+{T1_PCT:.0f}%) — sell 50%  [T1 yield: ${t1_yield:.0f}]")
+    _t1_pct_display = round((signal['target_1'] / args.price - 1) * 100, 1)
+    print(f"  T1:     ${signal['target_1']:.2f}  (+{_t1_pct_display:.1f}%) — sell 50%  [T1 yield: ${t1_yield:.0f}]")
     print(f"  T2:     ${signal['target_2']:.2f}  (+{T2_PCT:.0f}%) — sell 25%")
     print(f"  T3:     ${signal['target_3']:.2f}  (+{T3_PCT:.0f}%) — trail 25%")
     print(f"  Size:   {signal['position_size']} shares")

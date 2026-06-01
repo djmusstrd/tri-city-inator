@@ -55,23 +55,28 @@ class ExecutionResult:
 
 def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResult:
     """
-    Execute a Tri-City trade with 50-25-25 bracket structure.
+    Execute a Tri-City trade with 50-25-25 OCO structure.
 
-    Places three separate bracket orders:
-      T1 bracket: 50% of shares — stop at stop_loss, take_profit at target_1 (+10%)
-      T2 bracket: 25% of shares — stop at stop_loss, take_profit at target_2 (+20%)
-      T3 bracket: 25% of shares — stop at stop_loss, take_profit at target_3 (+30%)
+    Places a single market BUY for the full position, then three OCO SELL orders:
+      T1 OCO: 50% of shares — limit at target_1 (+T1%), stop at stop_loss
+      T2 OCO: 25% of shares — limit at target_2 (+T2%), stop at stop_loss
+      T3:     25% of shares — trailing stop at T3_TRAIL_PCT%; OCO fallback on failure
 
-    Position manager trails T3 after T2 is hit.
+    Each OCO guarantees stop protection from the moment of entry. When the limit
+    leg fills (price hits take-profit), the stop leg is automatically cancelled.
+    When the stop leg hits, the limit leg is automatically cancelled.
+
+    Replaces prior BRACKET BUY approach where T3 trailing stop consistently failed
+    with "insufficient qty" due to T1+T2 bracket accounting locking all shares.
 
     signal_data keys:
         ticker         str    symbol e.g. "NVDA"
         entry_price    float  expected fill (for display)
         position_size  int    total number of shares
         stop_loss      float  stop price for all lots
-        target_1       float  +10% take-profit (T1)
-        target_2       float  +20% take-profit (T2)
-        target_3       float  +30% take-profit (T3)
+        target_1       float  +T1% take-profit (T1)
+        target_2       float  +T2% take-profit (T2)
+        target_3       float  +T3% take-profit (T3)
         direction      str    "BULLISH" (default)
     """
     ticker        = signal_data.get("ticker", "UNKNOWN")
@@ -113,50 +118,21 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
         )
 
     try:
+        import time as _time
         from alpaca.trading.requests import (
-            MarketOrderRequest, TrailingStopOrderRequest,
+            MarketOrderRequest, LimitOrderRequest, TrailingStopOrderRequest,
             StopLossRequest, TakeProfitRequest
         )
-        from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+        from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
 
-        side = OrderSide.BUY if direction == "BULLISH" else OrderSide.SELL
-
-        def place_bracket(qty: int, take_profit: float, label: str,
-                          tif: TimeInForce = TimeInForce.GTC) -> str | None:
-            kwargs = dict(
-                symbol=ticker,
-                qty=qty,
-                side=side,
-                # GTC so stop/target bracket legs persist past market close (Papp Ch 11)
-                # Falls back to DAY automatically for HTB assets (Alpaca error 42210000)
-                time_in_force=tif,
-                order_class=OrderClass.BRACKET,
-            )
-            if stop_loss > 0:
-                kwargs["stop_loss"] = StopLossRequest(stop_price=round(stop_loss, 2))
-            if take_profit > 0:
-                kwargs["take_profit"] = TakeProfitRequest(limit_price=round(take_profit, 2))
-            try:
-                order = client.submit_order(MarketOrderRequest(**kwargs))
-            except Exception as e:
-                # 42210000 = HTB asset — only DAY orders allowed, GTC rejected
-                if "42210000" in str(e) and tif == TimeInForce.GTC:
-                    logger.warning(
-                        f"HTB asset detected — GTC rejected (42210000), retrying {label} with DAY"
-                    )
-                    return place_bracket(qty, take_profit, label, tif=TimeInForce.DAY)
-                raise
-            oid = str(order.id)
-            logger.info(f"  ✅ {label} bracket ({tif.value}): {oid} ({qty} shares @ T {take_profit:.2f})")
-            return oid
+        buy_side  = OrderSide.BUY  if direction == "BULLISH" else OrderSide.SELL
+        sell_side = OrderSide.SELL if direction == "BULLISH" else OrderSide.BUY
 
         def _wait_for_fill(order_id: str, timeout: float = 30.0, poll: float = 1.0) -> bool:
-            """Poll until order is filled or timeout. Returns True if filled."""
-            import time as _t
-            from alpaca.trading.enums import OrderStatus
+            """Poll until order is filled or terminal status. Returns True if filled."""
             elapsed = 0.0
             while elapsed < timeout:
-                _t.sleep(poll)
+                _time.sleep(poll)
                 elapsed += poll
                 try:
                     o = client.get_order_by_id(order_id)
@@ -172,83 +148,97 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
             logger.warning(f"  Fill poll timed out for {order_id} after {timeout}s")
             return False
 
-        def place_trailing_stop_after_fill(
-            t1_order_id: str, t2_order_id: str | None,
-            qty: int, trail_pct: float, label: str
-        ) -> str | None:
-            """
-            Alpaca native trailing stop for T3 (Papp Ch 11, Table 11.3).
-            Must be placed AFTER ALL entry fills — Alpaca rejects SELL while any BUY
-            is still open (error 40310000). Waits for BOTH T1 and T2 brackets to fill
-            so that Alpaca's available-qty accounting includes all purchased shares.
-            Falls back to bracket on timeout.
-            """
-            filled_t1 = _wait_for_fill(t1_order_id)
-            if not filled_t1:
-                logger.warning(f"  {label}: T1 entry not filled in time — skipping trailing stop")
-                return None
-            # Also wait for T2 bracket entry to fill so its shares are available.
-            # Without this, Alpaca sees the T2 BUY still open and counts those shares
-            # as unavailable, leaving 0 qty for the T3 trailing SELL.
-            if t2_order_id:
-                filled_t2 = _wait_for_fill(t2_order_id)
-                if not filled_t2:
-                    logger.warning(
-                        f"  {label}: T2 entry not filled in time — skipping trailing stop"
-                    )
-                    return None
-            req = TrailingStopOrderRequest(
+        # ── Step 1: Single market BUY for full position ───────────────────────
+        # Buying all shares in one order avoids the "insufficient qty" issue that
+        # plagued the prior 3-bracket approach (T3 trailing SELL saw 0 available
+        # shares because T1+T2 bracket BUYs had locked all qty in their child orders).
+        tif = TimeInForce.GTC
+        try:
+            entry_req = MarketOrderRequest(
                 symbol=ticker,
-                qty=qty,
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                trail_percent=trail_pct,
+                qty=position_size,
+                side=buy_side,
+                time_in_force=tif,
             )
-            order = client.submit_order(req)
-            oid = str(order.id)
-            logger.info(f"  ✅ {label} trailing stop: {oid} ({qty} shares @ -{trail_pct:.1f}% trail)")
-            return oid
+            entry_order = client.submit_order(entry_req)
+        except Exception as e:
+            if "42210000" in str(e):
+                # HTB asset — only DAY orders allowed
+                logger.warning("HTB asset (42210000) — retrying entry with DAY TIF")
+                entry_req = MarketOrderRequest(
+                    symbol=ticker, qty=position_size,
+                    side=buy_side, time_in_force=TimeInForce.DAY,
+                )
+                entry_order = client.submit_order(entry_req)
+            else:
+                raise
 
-        # T1 bracket (50%)
-        order_id = place_bracket(t1_shares, target_1, "T1")
+        entry_order_id = str(entry_order.id)
+        logger.info(f"  ✅ Entry: {entry_order_id} ({position_size} shares market BUY)")
 
-        # T2 bracket (25%) — capture order_id so T3 can wait for its fill
-        t2_order_id = place_bracket(t2_shares, target_2, "T2")
+        # ── Step 2: Wait for entry fill ───────────────────────────────────────
+        _wait_for_fill(entry_order_id)
 
-        # T3 (25%) — Alpaca native trailing stop placed AFTER T1 AND T2 fill (Papp Ch 11).
-        # Gap B fix: waiting only for T1 fill left T2's BUY still open, causing Alpaca to
-        # report 0 available qty for the T3 trailing SELL ("insufficient qty" error).
-        # Now waits for both T1 and T2 fills before submitting T3 trailing stop.
+        actual_fill = entry_price
+        try:
+            filled_order = client.get_order_by_id(entry_order_id)
+            if filled_order.filled_avg_price:
+                actual_fill = float(filled_order.filled_avg_price)
+        except Exception:
+            pass
+
+        # ── Step 3: OCO SELL orders — take-profit + stop paired per tranche ───
+        # Each OCO has two linked sell legs: limit at take-profit, stop at stop_loss.
+        # Whichever fires first automatically cancels the other.
+        # This ensures stop protection from entry on every tranche simultaneously.
+        def place_oco_sell(qty: int, take_profit: float, label: str) -> str | None:
+            try:
+                req = LimitOrderRequest(
+                    symbol=ticker,
+                    qty=qty,
+                    side=sell_side,
+                    limit_price=round(take_profit, 2),
+                    time_in_force=TimeInForce.GTC,
+                    order_class=OrderClass.OCO,
+                    take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                    stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                )
+                order = client.submit_order(req)
+                oid = str(order.id)
+                logger.info(
+                    f"  ✅ {label} OCO: {oid} "
+                    f"({qty}sh, TP=${take_profit:.2f}, stop=${stop_loss:.2f})"
+                )
+                return oid
+            except Exception as e:
+                logger.error(f"  ❌ {label} OCO failed: {e}")
+                return None
+
+        place_oco_sell(t1_shares, target_1, "T1")
+        place_oco_sell(t2_shares, target_2, "T2")
+
+        # ── Step 4: T3 trailing stop (best effort); OCO fallback ─────────────
         t3_trail_pct = float(os.getenv("T3_TRAIL_PCT", "3"))
         try:
-            if order_id:
-                t3_oid = place_trailing_stop_after_fill(
-                    order_id, t2_order_id, t3_shares, t3_trail_pct, "T3"
-                )
-                if t3_oid is None:
-                    # Fill timed out — use bracket as fallback
-                    place_bracket(t3_shares, target_3, "T3-fallback")
-            else:
-                place_bracket(t3_shares, target_3, "T3-fallback")
+            t3_req = TrailingStopOrderRequest(
+                symbol=ticker,
+                qty=t3_shares,
+                side=sell_side,
+                time_in_force=TimeInForce.GTC,
+                trail_percent=t3_trail_pct,
+            )
+            t3_order = client.submit_order(t3_req)
+            logger.info(
+                f"  ✅ T3 trailing: {t3_order.id} "
+                f"({t3_shares}sh @ -{t3_trail_pct:.1f}% trail)"
+            )
         except Exception as trail_err:
-            # Any other trailing stop failure → bracket fallback
-            logger.warning(f"T3 trailing stop failed ({trail_err}) — falling back to bracket")
-            place_bracket(t3_shares, target_3, "T3-fallback")
-
-        # Fetch actual fill price from T1 order (already filled by the time T3 trailing
-        # stop placement completes — _wait_for_fill confirmed it above)
-        actual_fill = entry_price
-        if order_id:
-            try:
-                filled_order = client.get_order_by_id(order_id)
-                if filled_order.filled_avg_price:
-                    actual_fill = float(filled_order.filled_avg_price)
-            except Exception:
-                pass
+            logger.warning(f"T3 trailing stop failed ({trail_err}) — falling back to OCO")
+            place_oco_sell(t3_shares, target_3, "T3-fallback")
 
         return ExecutionResult(
             success=True,
-            order_id=order_id,
+            order_id=entry_order_id,
             shares_filled=position_size,
             avg_fill_price=actual_fill
         )
