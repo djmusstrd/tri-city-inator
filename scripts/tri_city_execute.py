@@ -105,6 +105,7 @@ BREAKOUT_MIN_RVOL      = float(os.getenv("BREAKOUT_MIN_RVOL",      "2.0"))
 CONTINUATION_MIN_RVOL  = float(os.getenv("CONTINUATION_MIN_RVOL",  "1.75"))
 PULLBACK_MIN_RVOL      = float(os.getenv("PULLBACK_MIN_RVOL",       "1.5"))
 EMA20_PB_MIN_RVOL      = float(os.getenv("EMA20_PB_MIN_RVOL",       "0.8"))  # lower — mid-morning vol distributes
+EARNINGS_GAP_RVOL_FLOOR = float(os.getenv("EARNINGS_GAP_RVOL_FLOOR", "0.4"))  # large-cap earnings gaps valid at 0.4x
 
 # BREAKOUT extension guardrails — blocks parabolic chasing without filtering legitimate setups
 # EMA Dev ceiling raised 8% → 12%: 15-min ORB breakouts naturally carry 8–12% dev at entry
@@ -788,6 +789,10 @@ def main():
     parser.add_argument("--candle_type", default=None,
                         help="Override candle type (HAMMER/NEUTRAL/BEARISH/DOJI). "
                              "Auto-detected from last 1-min bar if not provided.")
+    parser.add_argument("--gap",          default=None, type=float,
+                        help="Gap-up percent from premarket scanner (used for earnings gap RVOL bypass)")
+    parser.add_argument("--earnings",     action="store_true",
+                        help="Earnings catalyst flag — allows lower RVOL floor (EARNINGS_GAP_RVOL_FLOOR)")
     parser.add_argument("--dry-run",     action="store_true",
                         help="Print signal without placing orders")
     parser.add_argument("--override-cutoff", action="store_true",
@@ -816,6 +821,26 @@ def main():
                 f"Levels not locked yet — skipping {args.setup} on {symbol}."
             )
             sys.exit(0)
+
+    # Guard 0b: PULLBACK signals blocked before 9:00 AM CT — price discovery window
+    # Ross Cameron / all momentum systems: first 30 min after open = highest failure rate for pullbacks
+    # BREAKOUT and CONTINUATION unrestricted (tighter ORH confirmation guards)
+    if args.setup in ("PULLBACK",) and not args.dry_run:
+        pre_market_cutoff = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now < pre_market_cutoff:
+            print(
+                f"PRE_9AM: {now.strftime('%H:%M CT')} — PULLBACK entries blocked before 9:00 AM CT. "
+                f"Price discovery still active — skipping {symbol}."
+            )
+            sys.exit(0)
+
+    # Guard 0c: MIN_RSI_PULLBACK — set to 999 in .env to disable PULLBACK entries entirely
+    # Pullback signal avg: -0.12R over 37 trades. Set to 999 until edge is confirmed.
+    MIN_RSI_PULLBACK = float(os.getenv("MIN_RSI_PULLBACK", "0"))
+    if args.setup == "PULLBACK" and args.rsi < MIN_RSI_PULLBACK and not args.dry_run:
+        if not args.quiet:
+            print(f"SKIP: PULLBACK disabled (MIN_RSI_PULLBACK={MIN_RSI_PULLBACK:.0f}, RSI={args.rsi:.1f}).")
+        sys.exit(0)
 
     # Finding 2: PULLBACK only valid when price is at or above EMA (EMA Dev% >= 0).
     # Bulkowski: entries below EMA (-0.5% to 0%) have lower follow-through.
@@ -895,9 +920,15 @@ def main():
     }
     base_floor   = _setup_rvol_floor.get(args.setup, MIN_RVOL)
     rvol_floor   = max(base_floor, PM_MIN_RVOL) if is_afternoon else base_floor
+    # Earnings gap bypass: large-cap gapping >10% on earnings catalyst valid at much lower RVOL
+    # DELL 0.6x × 10M+ daily shares = millions of shares in hours — flat RVOL floor misses these
+    gap_pct = args.gap if args.gap is not None else 0.0
+    if getattr(args, "earnings", False) and gap_pct >= 10.0:
+        rvol_floor = min(rvol_floor, EARNINGS_GAP_RVOL_FLOOR)
     pm_note      = ", afternoon" if is_afternoon else ""
+    earnings_note = f", earnings gap bypass ({EARNINGS_GAP_RVOL_FLOOR:.1f}x)" if (getattr(args, "earnings", False) and gap_pct >= 10.0) else ""
     if not args.quiet:
-        print(f"RVol: {rvol_str} ({args.setup} min {rvol_floor:.2f}x{pm_note})")
+        print(f"RVol: {rvol_str} ({args.setup} min {rvol_floor:.2f}x{pm_note}{earnings_note})")
     if rvol is not None and rvol < rvol_floor and not args.dry_run and not getattr(args, "force", False):
         if not args.quiet:
             print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")

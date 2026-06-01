@@ -65,7 +65,8 @@ W_RSI          = 0.05  # RSI in optimal entry range (50–70 full, 40–80 half)
 W_PARK_VOL     = 0.02  # Parkinson vol trending (Ch 05 — Algo Trading Cookbook)
 W_BB_SQUEEZE   = 0.02  # BB squeeze bonus (Ch 06 — Investing for Programmers)
 # Positive weights sum: 0.30+0.30+0.10+0.07+0.08+0.06+0.05+0.02+0.02 = 1.00
-W_52WK_PENALTY = 0.08  # subtracted when price within 5% of 52-week high (resistance)
+W_52WK_MOMENTUM = 0.08  # added when price within 5% of 52-week high + gap >10% (momentum, not resistance)
+# Research: Levy 1967, Jegadeesh & Titman 1993 — 52wk highs outperform; Minervini SEPA, O'Neill CANSLIM confirm
 
 PARK_VOL_WINDOW  = int(os.getenv("PARK_VOL_WINDOW",  "14"))   # rolling window for Parkinson vol
 PARK_VOL_LOOKBACK = int(os.getenv("PARK_VOL_LOOKBACK", "60")) # days of history for baseline
@@ -404,12 +405,14 @@ def score_candidate(s: dict) -> dict:
                  else W_RSI * 0.5 if 40 <= rsi <= 80
                  else 0.0)
 
-    # 52-week high penalty: within 5% of high = resistance zone, reduces score
-    penalty = W_52WK_PENALTY if s.get("near_52wk_high") else 0.0
+    # 52-week high: near high + large gap = momentum (Minervini SEPA, O'Neill CANSLIM, Darvas)
+    # bonus when gap >10% (institutional catalyst at highs), neutral when gap <10%
+    gap_pct = s.get("gap_pct", 0.0)
+    momentum_bonus = W_52WK_MOMENTUM if (s.get("near_52wk_high") and gap_pct >= 10.0) else 0.0
 
     total = round(
         gap_score + rvol_score + stage_score + sma_score + cat_score +
-        park_score + bb_score + float_score + rsi_score - penalty,
+        park_score + bb_score + float_score + rsi_score + momentum_bonus,
         4
     )
     return {
@@ -423,7 +426,7 @@ def score_candidate(s: dict) -> dict:
         "sc_bb":        round(bb_score,    4),
         "sc_float":     round(float_score, 4),
         "sc_rsi":       round(rsi_score,   4),
-        "sc_penalty":   round(-penalty,    4),
+        "sc_penalty":   round(momentum_bonus, 4),  # positive = momentum bonus (was resistance penalty)
     }
 
 

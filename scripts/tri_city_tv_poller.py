@@ -368,9 +368,10 @@ def run_cycle() -> None:
         )
         if elapsed >= INTRADAY_SCAN_INTERVAL_S:
             logger.info("Running intraday scanner (30-min refresh)...")
+            scan_source = "intraday_1130" if cycle_now.hour >= 11 and cycle_now.minute >= 30 else "intraday_930"
             scan_rc = subprocess.run(
                 ["python", "-W", "ignore",
-                 str(SCRIPTS / "tri_city_intraday_scanner.py"), "--source", "intraday"],
+                 str(SCRIPTS / "tri_city_intraday_scanner.py"), "--source", scan_source],
                 capture_output=True,
             ).returncode
             if scan_rc == 0:

@@ -57,8 +57,9 @@ from zoneinfo import ZoneInfo
 
 WORKSPACE    = Path.home() / "tri-city-inator"
 SHARED       = WORKSPACE / "shared"
-TABLE_FILE   = SHARED / "tri-city-table.json"
-FLAGS_FILE   = SHARED / "tri-city-flags.json"
+TABLE_FILE      = SHARED / "tri-city-table.json"
+FLAGS_FILE      = SHARED / "tri-city-flags.json"
+CANDIDATES_FILE = SHARED / "tri-city-candidates.json"
 RVOL_FILE    = SHARED / "tri-city-rvol-state.json"
 VWAP_FILE    = SHARED / "tri-city-vwap-state.json"
 SIG_FILE     = SHARED / "tri-city-signals.json"
@@ -658,12 +659,26 @@ def main():
     htf_set        : set[str] = set()
     resistance_set : set[str] = set()
     bb_squeeze_set : set[str] = set()
+    earnings_set   : set[str] = set()
     if FLAGS_FILE.exists():
         try:
             flags          = json.loads(FLAGS_FILE.read_text())
             htf_set        = set(flags.get("htf", []))
             resistance_set = set(flags.get("resistance", []))
             bb_squeeze_set = set(flags.get("bb_squeeze", []))
+            earnings_set   = set(flags.get("earnings_soon", []))
+        except Exception:
+            pass
+
+    # ── Load gap_pct from candidates (for earnings gap RVOL bypass in execute) ─
+    candidate_gap: dict[str, float] = {}
+    if CANDIDATES_FILE.exists():
+        try:
+            cdata = json.loads(CANDIDATES_FILE.read_text())
+            for c in cdata.get("candidates", []):
+                sym_c = c.get("symbol", "")
+                if sym_c:
+                    candidate_gap[sym_c] = float(c.get("gap_pct", 0.0))
         except Exception:
             pass
 
@@ -770,6 +785,8 @@ def main():
             "htf":                sym in htf_set,
             "resistance":         sym in resistance_set,
             "bb_squeeze":         sym in bb_squeeze_set,
+            "earnings":           sym in earnings_set,
+            "gap_pct":            candidate_gap.get(sym, 0.0),
             "vwap":               vwap,
             "vwap_above":         vwap_above,
             "vwap_reclaim":       vwap_reclaim,

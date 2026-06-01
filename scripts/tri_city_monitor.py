@@ -164,8 +164,11 @@ def build_execute_cmd(sig: dict) -> list[str]:
     if sig.get("cup"):        cmd.append("--cup")
     if sig.get("htf"):        cmd.append("--htf")
     if sig.get("bb_squeeze"): cmd.append("--bb_squeeze")
+    if sig.get("earnings"):   cmd.append("--earnings")
     if sig.get("vwap") is not None:
         cmd += ["--vwap", str(sig["vwap"])]
+    if sig.get("gap_pct") is not None:
+        cmd += ["--gap", str(sig["gap_pct"])]
     return cmd
 
 
