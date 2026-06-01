@@ -958,7 +958,7 @@ def main():
     parser.add_argument("--signal",   required=True,
                         help='Signal text from scanner, e.g. "BREAKOUT"')
     parser.add_argument("--setup",    required=True,
-                        choices=["BREAKOUT", "CONTINUATION", "PULLBACK", "EMA20_PULLBACK"])
+                        choices=["BREAKOUT", "CONTINUATION", "PULLBACK", "EMA20_PULLBACK", "FADE"])
     parser.add_argument("--cup",         action="store_true",
                         help="Cup pattern detected (high-conviction flag from scanner)")
     parser.add_argument("--htf",         action="store_true",
@@ -1140,6 +1140,17 @@ def main():
     # After 90 min the ORB is stale — intraday breakouts are fresh setups, not ORB plays.
     # Example: TSSI 9:36 CT — ORB range 12.9% → blocked (early, parabolic)
     #          UMAC 12:04 CT — ORB range 10.6% → allowed (4 hrs later, new breakout)
+    if args.setup in ("BREAKOUT", "CONTINUATION"):
+        # T1-already-passed guard applies even in dry-run — if price is already at/above
+        # T1 the setup is invalid regardless of whether we're simulating.
+        current_t1 = round(args.orh * (1 + T1_PCT / 100), 2)
+        if args.price >= current_t1:
+            print(
+                f"SKIP: Price ${args.price:.2f} already at or beyond T1 ${current_t1:.2f} "
+                f"({T1_PCT:.0f}% above ORH ${args.orh:.2f}) — no upside left in the setup."
+            )
+            sys.exit(0)
+
     if args.setup in ("BREAKOUT", "CONTINUATION") and not args.dry_run:
         parabolic_window = now.replace(
             hour=PARABOLIC_WINDOW_HOUR, minute=PARABOLIC_WINDOW_MINUTE,
@@ -1155,17 +1166,6 @@ def main():
                     f"Gap exhausted at open. Consider FADE signal instead."
                 )
                 sys.exit(0)
-        # T1-already-passed guard: if current price is already at or beyond T1, there
-        # is no trade left — we'd be entering after the target has been reached.
-        # Triggered by CRWG 6/1: parabolic stock consolidated 9% above ORH, re-broke
-        # after the 90-min window; sim entered at $54.80 with T1=$52.50 (below entry).
-        current_t1 = round(args.orh * (1 + T1_PCT / 100), 2)
-        if args.price >= current_t1:
-            print(
-                f"SKIP: Price ${args.price:.2f} already at or beyond T1 ${current_t1:.2f} "
-                f"({T1_PCT:.0f}% above ORH ${args.orh:.2f}) — no upside left in the setup."
-            )
-            sys.exit(0)
         if args.rsi >= BREAKOUT_MAX_RSI:
             print(
                 f"SKIP: RSI {args.rsi:.1f} at or above {BREAKOUT_MAX_RSI:.0f} "
