@@ -87,8 +87,9 @@ MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",        "3"))
 MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS",     "-300"))
 DOLLAR_T1_TRIGGER  = float(os.getenv("DOLLAR_T1_TRIGGER",  "300"))   # min $ at T1 bank — must match position_manager
 MIN_RVOL           = float(os.getenv("MIN_RVOL",           "1.5"))
-PM_MIN_RVOL        = float(os.getenv("PM_MIN_RVOL",        "2.0"))   # tighter floor after noon
-PM_START_HOUR      = int(os.getenv("PM_START_HOUR",        "12"))    # noon CT
+PM_MIN_RVOL        = float(os.getenv("PM_MIN_RVOL",        "3.5"))   # tighter floor after 11:30 AM CT
+PM_START_HOUR      = int(os.getenv("PM_START_HOUR",        "11"))    # 11:30 AM CT
+PM_START_MINUTE    = int(os.getenv("PM_START_MINUTE",      "30"))    # 11:30 AM CT
 SPY_BEAR_THRESHOLD = float(os.getenv("SPY_BEAR_THRESHOLD", "-1.5"))
 
 LUNCH_NO_ENTRY       = os.getenv("LUNCH_NO_ENTRY", "false").lower() == "true"
@@ -101,9 +102,8 @@ LUNCH_END            = (_lunch_end_hour,   _lunch_end_minute)
 RVOL_LOOKBACK      = int(os.getenv("RVOL_LOOKBACK",        "20"))
 
 # Setup-specific RVOL minimums (#4) — BREAKOUT needs most conviction
-# BREAKOUT_MIN_RVOL restored to 2.0x — original floor that produced winning trades; 2.5x was too restrictive
-BREAKOUT_MIN_RVOL      = float(os.getenv("BREAKOUT_MIN_RVOL",      "2.0"))
-CONTINUATION_MIN_RVOL  = float(os.getenv("CONTINUATION_MIN_RVOL",  "1.75"))
+BREAKOUT_MIN_RVOL      = float(os.getenv("BREAKOUT_MIN_RVOL",      "3.0"))
+CONTINUATION_MIN_RVOL  = float(os.getenv("CONTINUATION_MIN_RVOL",  "2.5"))
 PULLBACK_MIN_RVOL      = float(os.getenv("PULLBACK_MIN_RVOL",       "1.5"))
 EMA20_PB_MIN_RVOL      = float(os.getenv("EMA20_PB_MIN_RVOL",       "0.8"))  # lower — mid-morning vol distributes
 EARNINGS_GAP_RVOL_FLOOR = float(os.getenv("EARNINGS_GAP_RVOL_FLOOR", "0.4"))  # large-cap earnings gaps valid at 0.4x
@@ -950,7 +950,7 @@ def main():
     # when scanner value is unavailable.
     rvol = args.rvol if args.rvol is not None else get_rvol(symbol)
     rvol_str = f"{rvol:.2f}x" if rvol is not None else "N/A"
-    is_afternoon = now.hour >= PM_START_HOUR
+    is_afternoon = now.hour > PM_START_HOUR or (now.hour == PM_START_HOUR and now.minute >= PM_START_MINUTE)
     # #4: each setup has its own minimum; afternoon tightens the floor further
     _setup_rvol_floor = {
         "BREAKOUT":       BREAKOUT_MIN_RVOL,

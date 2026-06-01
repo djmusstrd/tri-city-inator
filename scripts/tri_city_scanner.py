@@ -7,10 +7,17 @@ TradingView Hotlists: Volume Gainers, Gap Gainers, Percent Change Gainers).
 No static watchlist — every morning is a clean, ranked list of today's movers.
 
 Scoring weights:
-  Gap %          35% — size of the overnight move
-  Relative Vol   35% — institutional conviction
-  Stage 2        20% — price above SMA50 (uptrend confirmed)
-  Catalyst       10% — gap >= 5% treated as catalyst-driven
+  Gap %          20% — size of the overnight move (reduced: journal shows gap size != outcome)
+  Relative Vol   40% — institutional conviction (#1 predictor: RVOL 3-5x = 71% win rate)
+  Stage 2        10% — price above SMA50 (uptrend confirmed)
+  Short Interest  8% — squeeze fuel: short % of float + days-to-cover
+  52wk Momentum   8% — near 52wk high + gap >5% (lowered from 10%)
+  SMA Slope       7% — SMA50 above SMA100 (rising trend)
+  Float           6% — low float amplifies gap moves
+  RSI             5% — ideal ORB entry zone 50-70
+  Catalyst        keyword-classified from news headline (Tier 1/2/negative)
+  Parkinson Vol   2% — trending vs mean-reverting regime
+  BB Squeeze      1% — compressed band (reduced: weak in isolation)
 
 Saves top 100 candidates to shared/tri-city-candidates.json.
 The monitor reads this file each scan cycle — no manual watchlist needed.
@@ -54,18 +61,18 @@ MIN_RVOL      = float(os.getenv("MIN_RVOL",     "1.5"))
 MIN_AVG_VOL   = float(os.getenv("MIN_AVG_VOL",  "500000"))
 PARABOLIC_VOL = 10.0
 
-# Scoring weights — sum to 1.0 (positive) minus W_52WK_PENALTY when applicable
-W_GAP          = 0.30  # gap % — size of overnight move
-W_RVOL         = 0.30  # relative volume — institutional conviction
-W_STAGE        = 0.10  # Weinstein Stage 2: price above SMA50
-W_SMA_SLOPE    = 0.07  # Weinstein: SMA50 above SMA100 (rising trend)
-W_CATALYST     = 0.08  # gap ≥5% treated as catalyst-driven
-W_FLOAT        = 0.06  # low float amplifies gap moves
-W_RSI          = 0.05  # RSI in optimal entry range (50–70 full, 40–80 half)
-W_PARK_VOL     = 0.02  # Parkinson vol trending (Ch 05 — Algo Trading Cookbook)
-W_BB_SQUEEZE   = 0.02  # BB squeeze bonus (Ch 06 — Investing for Programmers)
-# Positive weights sum: 0.30+0.30+0.10+0.07+0.08+0.06+0.05+0.02+0.02 = 1.00
-W_52WK_MOMENTUM = 0.08  # added when price within 5% of 52-week high + gap >10% (momentum, not resistance)
+# Scoring weights — positive components; catalyst is keyword-classified (variable)
+W_GAP              = 0.20  # reduced: beyond 5% gap, marginal value drops (journal: gap size ≠ outcome)
+W_RVOL             = 0.40  # increased: #1 predictor — RVOL 3-5x = 71% win rate vs 28% at <2x
+W_STAGE            = 0.10  # Weinstein Stage 2: price above SMA50
+W_SMA_SLOPE        = 0.07  # Weinstein: SMA50 above SMA100 (rising trend)
+W_FLOAT            = 0.06  # low float amplifies gap moves
+W_RSI              = 0.05  # RSI in optimal entry range (50–70 full, 40–80 half)
+W_PARK_VOL         = 0.02  # Parkinson vol trending (Ch 05 — Algo Trading Cookbook)
+W_BB_SQUEEZE       = 0.01  # reduced: weak signal in isolation; 1% reallocated to short interest
+W_SHORT_INTEREST   = 0.08  # new: short % of float + days-to-cover — squeeze fuel signal
+# Positive weights sum (excl. catalyst+momentum): 0.20+0.40+0.10+0.07+0.06+0.05+0.02+0.01+0.08 = 0.99
+W_52WK_MOMENTUM    = 0.08  # added when price within 5% of 52-week high + gap >5% (lowered from 10%)
 # Research: Levy 1967, Jegadeesh & Titman 1993 — 52wk highs outperform; Minervini SEPA, O'Neill CANSLIM confirm
 
 PARK_VOL_WINDOW  = int(os.getenv("PARK_VOL_WINDOW",  "14"))   # rolling window for Parkinson vol
@@ -331,6 +338,9 @@ def fetch_gappers() -> list[dict]:
             else:
                 float_cat = "large"
 
+            sector = str(row.get("Sector", "") or "").lower()
+            is_biotech = any(kw in sector for kw in ["biotech", "pharmaceutical", "health", "drug"])
+
             if ":" in raw_ticker:
                 tv_symbol = raw_ticker
             else:
@@ -369,6 +379,10 @@ def fetch_gappers() -> list[dict]:
                 "volume":          int(volume),
                 "avg_volume":      int(avg_vol),
                 "pm_volume":       int(pm_volume),
+                "is_biotech":      is_biotech,
+                "sector":          str(row.get("Sector", "") or ""),
+                "short_pct":       0.0,
+                "days_to_cover":   0.0,
             })
 
         return stocks
@@ -381,6 +395,47 @@ def fetch_gappers() -> list[dict]:
         return []
 
 
+# ── Catalyst keyword classifier ───────────────────────────────────────────────
+# Replaces binary "gap >= 5% = catalyst" with signal quality tiers.
+# Headlines are already fetched via yfinance — this parses them for conviction.
+
+_TIER1_KEYWORDS = [
+    "fda approved", "fda approval", "approval", "acquisition", "merger",
+    "acquired by", "buyout", "contract award", "awarded contract",
+    "agreement with", "partnership with", "license agreement",
+]
+_TIER2_KEYWORDS = [
+    "earnings beat", "beat estimate", "revenue beat", "beat expectations",
+    "guidance raised", "raises guidance", "analyst upgrade", "price target raised",
+    "new contract", "licensing deal", "strategic partnership",
+]
+_NEGATIVE_KEYWORDS = [
+    "complete response", "warning letter", "clinical hold", "fda hold",
+    "investigation", "delay", "restatement", "sec inquiry", "fraud",
+    "going concern", "default", "missed", "miss estimates",
+]
+
+def classify_catalyst(headline: str, gap_pct: float) -> float:
+    """
+    Returns a catalyst score based on news headline keyword parsing.
+    Tier 1 (M&A, FDA approval): 0.15
+    Tier 2 (earnings beat, upgrade): 0.08
+    Gap present, no strong keyword: 0.04
+    No gap, no keyword: 0.0
+    Negative catalyst (warning, hold): -0.05
+    """
+    if not headline:
+        return 0.04 if gap_pct >= 5.0 else 0.0
+    h = headline.lower()
+    if any(kw in h for kw in _NEGATIVE_KEYWORDS):
+        return -0.05
+    if any(kw in h for kw in _TIER1_KEYWORDS):
+        return 0.15
+    if any(kw in h for kw in _TIER2_KEYWORDS):
+        return 0.08
+    return 0.04 if gap_pct >= 5.0 else 0.0
+
+
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 def score_candidate(s: dict) -> dict:
@@ -390,9 +445,14 @@ def score_candidate(s: dict) -> dict:
     rvol_score  = raw_rvol * 0.5 if s["parabolic"] else raw_rvol
     stage_score = W_STAGE     if s["stage2"]            else 0.0
     sma_score   = W_SMA_SLOPE if s.get("sma_rising")    else 0.0
-    cat_score   = W_CATALYST  if s["catalyst"]          else 0.0
     park_score  = W_PARK_VOL  if s.get("park_trending") else 0.0
     bb_score    = W_BB_SQUEEZE if s.get("bb_squeeze")   else 0.0
+
+    # Catalyst: keyword-classified from news headline (Tier 1/2/3/negative)
+    cat_score = classify_catalyst(
+        s.get("news_headline", ""),
+        s.get("gap_pct", 0.0)
+    )
 
     # Float score: low float (<10M shares) amplifies gap moves
     float_score = (W_FLOAT if s.get("float_cat") == "low"
@@ -405,28 +465,39 @@ def score_candidate(s: dict) -> dict:
                  else W_RSI * 0.5 if 40 <= rsi <= 80
                  else 0.0)
 
-    # 52-week high: near high + large gap = momentum (Minervini SEPA, O'Neill CANSLIM, Darvas)
-    # bonus when gap >10% (institutional catalyst at highs), neutral when gap <10%
+    # Short interest: days-to-cover >= 3 + short % >= 20% = squeeze fuel (full credit)
+    # DTC >= 1 + short % >= 10% = moderate squeeze potential (half credit)
+    short_pct = s.get("short_pct", 0.0)
+    dtc       = s.get("days_to_cover", 0.0)
+    if dtc >= 3.0 and short_pct >= 20.0:
+        short_score = W_SHORT_INTEREST
+    elif dtc >= 1.0 and short_pct >= 10.0:
+        short_score = W_SHORT_INTEREST * 0.5
+    else:
+        short_score = 0.0
+
+    # 52-week high momentum: near high + gap >5% = momentum (lowered from 10%)
     gap_pct = s.get("gap_pct", 0.0)
-    momentum_bonus = W_52WK_MOMENTUM if (s.get("near_52wk_high") and gap_pct >= 10.0) else 0.0
+    momentum_bonus = W_52WK_MOMENTUM if (s.get("near_52wk_high") and gap_pct >= 5.0) else 0.0
 
     total = round(
         gap_score + rvol_score + stage_score + sma_score + cat_score +
-        park_score + bb_score + float_score + rsi_score + momentum_bonus,
+        park_score + bb_score + float_score + rsi_score + short_score + momentum_bonus,
         4
     )
     return {
         "score":        total,
-        "sc_gap":       round(gap_score,   4),
-        "sc_rvol":      round(rvol_score,  4),
-        "sc_stage":     round(stage_score, 4),
-        "sc_sma":       round(sma_score,   4),
-        "sc_catalyst":  round(cat_score,   4),
-        "sc_park":      round(park_score,  4),
-        "sc_bb":        round(bb_score,    4),
-        "sc_float":     round(float_score, 4),
-        "sc_rsi":       round(rsi_score,   4),
-        "sc_penalty":   round(momentum_bonus, 4),  # positive = momentum bonus (was resistance penalty)
+        "sc_gap":       round(gap_score,    4),
+        "sc_rvol":      round(rvol_score,   4),
+        "sc_stage":     round(stage_score,  4),
+        "sc_sma":       round(sma_score,    4),
+        "sc_catalyst":  round(cat_score,    4),
+        "sc_park":      round(park_score,   4),
+        "sc_bb":        round(bb_score,     4),
+        "sc_float":     round(float_score,  4),
+        "sc_rsi":       round(rsi_score,    4),
+        "sc_short":     round(short_score,  4),
+        "sc_penalty":   round(momentum_bonus, 4),
     }
 
 
@@ -476,6 +547,74 @@ def fetch_news(symbols: list[str]) -> dict[str, dict]:
         return result
     except Exception as e:
         logger.debug(f"fetch_news: {e}")
+        return {}
+
+
+def fetch_short_interest(symbols: list[str]) -> dict[str, dict]:
+    """
+    Fetches short interest % of float and days-to-cover (short ratio) for top candidates.
+    Uses yfinance Ticker.info — slower than fast_info but contains short data.
+    Only called for top 30 candidates to limit scan time.
+    Returns {symbol: {"short_pct": float, "days_to_cover": float}}.
+    """
+    if not symbols:
+        return {}
+    try:
+        import yfinance as yf
+        import random
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _fetch_one(sym: str) -> tuple:
+            try:
+                time.sleep(random.uniform(0.1, 0.3))
+                info = yf.Ticker(sym).info
+                short_pct = float(info.get("shortPercentOfFloat") or 0) * 100  # convert to %
+                dtc       = float(info.get("shortRatio") or 0)                 # days to cover
+                return sym, {"short_pct": round(short_pct, 1), "days_to_cover": round(dtc, 1)}
+            except Exception:
+                return sym, {"short_pct": 0.0, "days_to_cover": 0.0}
+
+        result = {}
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {pool.submit(_fetch_one, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                sym, data = future.result()
+                result[sym] = data
+        return result
+    except Exception as e:
+        logger.debug(f"fetch_short_interest: {e}")
+        return {}
+
+
+def fetch_sector_etf_momentum() -> dict[str, float]:
+    """
+    Fetches today's % change for key sector ETFs.
+    Returns {etf_symbol: day_pct_change}.
+    Used to flag whether a candidate's sector has institutional tailwind.
+    """
+    SECTOR_ETFS = ["XLK", "XBI", "XLY", "XLE", "XLF", "IWM", "QQQ", "ARKK", "XLV", "XLI"]
+    try:
+        import yfinance as yf
+        tickers = yf.download(SECTOR_ETFS, period="2d", interval="1d",
+                              progress=False, auto_adjust=True)
+        if tickers.empty:
+            return {}
+        if hasattr(tickers.columns, "levels"):
+            closes = tickers["Close"]
+        else:
+            closes = tickers[["Close"]].rename(columns={"Close": SECTOR_ETFS[0]})
+        result = {}
+        for etf in SECTOR_ETFS:
+            try:
+                series = closes[etf].dropna()
+                if len(series) >= 2:
+                    result[etf] = round((series.iloc[-1] / series.iloc[-2] - 1) * 100, 2)
+            except Exception:
+                continue
+        return result
+    except Exception as e:
+        logger.debug(f"fetch_sector_etf_momentum: {e}")
         return {}
 
 
@@ -556,6 +695,10 @@ def fetch_watchlist_candidates(seed_symbols: list[str]) -> list[dict]:
                     "news_headline":   "",
                     "news_url":        "",
                     "news_publisher":  "",
+                    "is_biotech":      False,
+                    "sector":          "",
+                    "short_pct":       0.0,
+                    "days_to_cover":   0.0,
                     "_source":         "watchlist",  # tag for visibility in output
                 })
             except Exception:
@@ -640,6 +783,29 @@ def main():
         s["news_publisher"] = nd.get("publisher", "")
     news_found = sum(1 for s in stocks if s.get("news_url"))
     print(f"  News: {news_found}/{len(stocks)} headlines found")
+
+    # Short interest: only fetch for top 30 pre-scored candidates (speed)
+    all_candidates = stocks
+    pre_scored = sorted(all_candidates, key=lambda x: score_candidate(x).get("score", 0), reverse=True)[:30]
+    top30_syms = [c["symbol"] for c in pre_scored]
+    print(f"  Fetching short interest for top {len(top30_syms)} candidates...")
+    short_data = fetch_short_interest(top30_syms)
+    for c in all_candidates:
+        si = short_data.get(c["symbol"], {})
+        c["short_pct"]     = si.get("short_pct", c.get("short_pct", 0.0))
+        c["days_to_cover"] = si.get("days_to_cover", c.get("days_to_cover", 0.0))
+
+    # Sector ETF momentum
+    print("  Fetching sector ETF momentum...")
+    etf_momentum = fetch_sector_etf_momentum()
+
+    # Price-tier label
+    for c in all_candidates:
+        p = c.get("price", 0)
+        if p < 10:       c["price_tier"] = "micro"
+        elif p < 50:     c["price_tier"] = "small"
+        elif p < 200:    c["price_tier"] = "mid"
+        else:            c["price_tier"] = "large"
 
     # Score and rank — returns dict with score + sc_* components
     for s in stocks:
@@ -726,14 +892,15 @@ def main():
     if not args.dry_run:
         CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "date":       now.strftime("%Y-%m-%d"),
-            "scanned_at": now.strftime("%H:%M CT"),
-            "total":      len(ranked),
-            "tv_symbols": tv_symbols,
-            "htf":        htf_list,
-            "resistance": resistance_warn,
-            "bb_squeeze": bb_squeeze_list,
-            "candidates": ranked,
+            "date":         now.strftime("%Y-%m-%d"),
+            "scanned_at":   now.strftime("%H:%M CT"),
+            "total":        len(ranked),
+            "tv_symbols":   tv_symbols,
+            "htf":          htf_list,
+            "resistance":   resistance_warn,
+            "bb_squeeze":   bb_squeeze_list,
+            "etf_momentum": etf_momentum,
+            "candidates":   ranked,
         }
         CANDIDATES.write_text(json.dumps(payload, indent=2))
         print(f"\n  Saved → {CANDIDATES}")
