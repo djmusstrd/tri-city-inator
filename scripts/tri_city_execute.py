@@ -83,7 +83,9 @@ VWAP_STOP_OFFSET = float(os.getenv("VWAP_STOP_OFFSET", "0.05"))  # 5 cents below
 ORB_MINUTES = int(os.getenv("ORB_MINUTES", "15"))   # opening range duration from .env
 
 # ── Guard parameters (all overridable via .env) ───────────────────────────────
-MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",        "3"))
+MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",        "5"))
+LAST_ENTRY_HOUR   = int(os.getenv("LAST_ENTRY_HOUR",      "13"))   # 1:30 PM CT = last valid new entry
+LAST_ENTRY_MINUTE = int(os.getenv("LAST_ENTRY_MINUTE",    "30"))
 MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS",     "-300"))
 DOLLAR_T1_TRIGGER  = float(os.getenv("DOLLAR_T1_TRIGGER",  "300"))   # min $ at T1 bank — must match position_manager
 MIN_RVOL           = float(os.getenv("MIN_RVOL",           "1.5"))
@@ -1028,7 +1030,17 @@ def main():
             print(f"SKIP: Daily loss limit (${MAX_DAILY_LOSS:.0f}) reached.")
         sys.exit(0)
 
-    # ── Guard 4b: lunch no-entry window ───────────────────────────────────────
+    # ── Guard 4b: late-entry cutoff — no new positions after 1:30 PM CT ─────────
+    # Trades entered after 1:30 PM CT have <90 min to reach T1 before the 2:45 PM
+    # EOD close sweep. SPCE 6/1 entered at 2:46 PM ET (1:46 PM CT) — this blocks that.
+    last_entry = now.replace(hour=LAST_ENTRY_HOUR, minute=LAST_ENTRY_MINUTE, second=0, microsecond=0)
+    if not args.dry_run and now >= last_entry:
+        if not args.quiet:
+            print(f"SKIP: Past last-entry cutoff {LAST_ENTRY_HOUR:02d}:{LAST_ENTRY_MINUTE:02d} CT — "
+                  f"no new positions this late.")
+        sys.exit(0)
+
+    # ── Guard 4c: lunch no-entry window (disabled by default, LUNCH_NO_ENTRY=false) ─
     if not args.dry_run and check_lunch_window(now):
         if not args.quiet:
             print(f"SKIP: Lunch window {LUNCH_START[0]:02d}:{LUNCH_START[1]:02d}–"
