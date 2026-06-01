@@ -72,8 +72,9 @@ except ImportError:
 
 from managers.trade_executor import execute_tri_city_trade, get_open_positions
 
-CT       = ZoneInfo("America/Chicago")
-LOG_FILE = WORKSPACE / "logs" / "tri-city-executions.json"
+CT           = ZoneInfo("America/Chicago")
+LOG_FILE     = WORKSPACE / "logs" / "tri-city-executions.json"
+MISSED_FILE  = WORKSPACE / "logs" / "tri-city-missed-slots.json"
 
 STOP_OFFSET      = 0.13   # minimum floor: 13 cents below ORH
 STOP_OFFSET_PCT  = float(os.getenv("STOP_OFFSET_PCT", "0.8"))    # 0.8% of ORH price (scales with stock price)
@@ -176,6 +177,49 @@ def load_log() -> list:
 def save_log(entries: list):
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOG_FILE.write_text(json.dumps(entries, indent=2, default=str))
+
+
+# ── Missed-slot log ────────────────────────────────────────────────────────────
+
+def log_missed_slot(symbol: str, setup: str, args, rvol, blocked_by: str) -> None:
+    """
+    Log a signal that was blocked by the slot cap so we can review post-session
+    what was missed and sharpen the edge over time.
+
+    Written to logs/tri-city-missed-slots.json — one entry per blocked signal.
+    Fields mirror the execution log so the same dashboard can display both.
+    """
+    try:
+        MISSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entries: list = []
+        if MISSED_FILE.exists():
+            try:
+                entries = json.loads(MISSED_FILE.read_text())
+            except Exception:
+                pass
+
+        now = datetime.now(CT)
+        entry = {
+            "date":       now.strftime("%Y-%m-%d"),
+            "time":       now.strftime("%H:%M:%S CT"),
+            "symbol":     symbol,
+            "setup":      setup,
+            "price":      getattr(args, "price", None),
+            "orh":        getattr(args, "orh",   None),
+            "orl":        getattr(args, "orl",   None),
+            "rsi":        getattr(args, "rsi",   None),
+            "ema_dev":    getattr(args, "ema_dev", None),
+            "rvol":       rvol,
+            "gap_pct":    getattr(args, "gap",   None),
+            "cup":        getattr(args, "cup",   False),
+            "signal":     getattr(args, "signal", setup),
+            "blocked_by": blocked_by,   # e.g. "morning_slots" | "afternoon_slots" | "fade_slots"
+        }
+        entries.append(entry)
+        MISSED_FILE.write_text(json.dumps(entries, indent=2, default=str))
+        logger.info(f"Missed slot logged: {symbol} {setup} @ ${entry['price']} — {blocked_by}")
+    except Exception as e:
+        logger.debug(f"log_missed_slot failed: {e}")
 
 
 # ── Guard 1 & 2: duplicate checks ─────────────────────────────────────────────
@@ -1020,6 +1064,7 @@ def main():
     # ── Guard 3: max positions (time-bucketed; FADE uses own slot pool) ───────
     if check_max_positions(setup=args.setup):
         bucket = "fade" if args.setup == "FADE" else ("morning" if _morning_window(now) else "afternoon")
+        log_missed_slot(symbol, args.setup, args, getattr(args, "rvol", None) or 0.0, blocked_by=f"{bucket}_slots")
         if not args.quiet:
             print(f"SKIP: {bucket.capitalize()} slots full.")
         sys.exit(0)
@@ -1110,6 +1155,17 @@ def main():
                     f"Gap exhausted at open. Consider FADE signal instead."
                 )
                 sys.exit(0)
+        # T1-already-passed guard: if current price is already at or beyond T1, there
+        # is no trade left — we'd be entering after the target has been reached.
+        # Triggered by CRWG 6/1: parabolic stock consolidated 9% above ORH, re-broke
+        # after the 90-min window; sim entered at $54.80 with T1=$52.50 (below entry).
+        current_t1 = round(args.orh * (1 + T1_PCT / 100), 2)
+        if args.price >= current_t1:
+            print(
+                f"SKIP: Price ${args.price:.2f} already at or beyond T1 ${current_t1:.2f} "
+                f"({T1_PCT:.0f}% above ORH ${args.orh:.2f}) — no upside left in the setup."
+            )
+            sys.exit(0)
         if args.rsi >= BREAKOUT_MAX_RSI:
             print(
                 f"SKIP: RSI {args.rsi:.1f} at or above {BREAKOUT_MAX_RSI:.0f} "
