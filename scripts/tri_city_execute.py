@@ -118,12 +118,13 @@ RVOL_SIZE_BOOST_MAX    = float(os.getenv("RVOL_SIZE_BOOST_MAX",    "1.25"))  # m
 RVOL_SIZE_BOOST_THRESH = float(os.getenv("RVOL_SIZE_BOOST_THRESH", "3.0"))   # RVOL level for max boost
 
 # ── Position sizing ───────────────────────────────────────────────────────────
-RISK_PCT      = float(os.getenv("RISK_PCT",    "2.0"))    # % of equity to risk
-STOP_PCT      = float(os.getenv("STOP_PCT",    "5.0"))    # fallback stop % if ORH not usable
-T1_PCT        = float(os.getenv("T1_PCT",      "10.0"))   # T1 take-profit %
-T2_PCT        = float(os.getenv("T2_PCT",      "20.0"))   # T2 take-profit %
-T3_PCT        = float(os.getenv("T3_PCT",      "30.0"))   # T3 take-profit % (trailed)
-FIXED_RISK    = float(os.getenv("FIXED_RISK",  "150"))    # fallback if equity unavailable
+RISK_PCT           = float(os.getenv("RISK_PCT",           "2.0"))   # % of equity to risk
+STOP_PCT           = float(os.getenv("STOP_PCT",           "5.0"))   # fallback stop % if ORH not usable
+T1_PCT             = float(os.getenv("T1_PCT",             "10.0"))  # T1 take-profit %
+T2_PCT             = float(os.getenv("T2_PCT",             "20.0"))  # T2 take-profit %
+T3_PCT             = float(os.getenv("T3_PCT",             "30.0"))  # T3 take-profit % (trailed)
+FIXED_RISK         = float(os.getenv("FIXED_RISK",         "150"))   # fallback if equity unavailable
+ADR_STOP_FLOOR_PCT = float(os.getenv("ADR_STOP_FLOOR_PCT", "0.25"))  # min stop = 25% of ADR(10)
 
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
@@ -403,6 +404,29 @@ def var_position_size(symbol: str, price: float, max_risk_dollars: float) -> int
         return None
 
 
+def get_adr(symbol: str, period: int = 10) -> float | None:
+    """
+    Average Daily Range: mean(high - low) over last N sessions.
+    Excludes gap contribution (pure intraday swing), making it better than ATR
+    for gap stocks where ATR is inflated by the gap itself.
+    Returns None on any failure — caller falls back to structural stop as-is.
+    """
+    try:
+        import yfinance as yf
+        df = yf.download(symbol, period=f"{period * 3}d", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < period:
+            return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        ranges = (df["high"] - df["low"]).dropna().tail(period)
+        return float(ranges.mean())
+    except Exception as e:
+        logger.debug(f"get_adr {symbol}: {e}")
+        return None
+
+
 # ── Correlation check (Ch 7 — sector concentration guard) ─────────────────────
 # Computes 20-day Pearson correlation between the incoming symbol and each open
 # position. Logs a warning if any pair is ≥ CORR_WARN_THRESHOLD — does NOT block
@@ -605,6 +629,19 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
     if risk_per_share < 0.05:
         logger.warning(f"Risk per share too small ({risk_per_share:.2f}) — skipping trade")
         raise ValueError(f"Risk per share {risk_per_share:.2f} too small to size position safely")
+
+    # ADR stop floor: prevent oversizing when structural stop is tighter than normal intraday noise.
+    # Uses avg(high-low, 10 days) — excludes gaps, so gap stocks don't inflate the floor.
+    if ADR_STOP_FLOOR_PCT > 0:
+        adr = get_adr(symbol)
+        if adr and adr > 0:
+            adr_floor = round(adr * ADR_STOP_FLOOR_PCT, 4)
+            if risk_per_share < adr_floor:
+                logger.info(
+                    f"ADR floor: risk/share ${risk_per_share:.3f} < {ADR_STOP_FLOOR_PCT:.0%}×ADR(10) "
+                    f"${adr_floor:.3f} — widening to floor (ADR=${adr:.3f})"
+                )
+                risk_per_share = adr_floor
 
     equity           = get_account_equity()
     max_risk_dollars = (equity * RISK_PCT / 100) if (equity and equity > 0) else FIXED_RISK
