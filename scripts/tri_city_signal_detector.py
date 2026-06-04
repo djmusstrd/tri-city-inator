@@ -57,6 +57,13 @@ from zoneinfo import ZoneInfo
 
 WORKSPACE    = Path.home() / "tri-city-inator"
 SHARED       = WORKSPACE / "shared"
+
+# Load .env so PULLBACK_ENABLED and other overrides are visible when run as subprocess
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(WORKSPACE / ".env")
+except ImportError:
+    pass
 TABLE_FILE      = SHARED / "tri-city-table.json"
 FLAGS_FILE      = SHARED / "tri-city-flags.json"
 CANDIDATES_FILE = SHARED / "tri-city-candidates.json"
@@ -74,6 +81,10 @@ for _noisy in ("yfinance", "peewee", "urllib3", "requests"):
     logging.getLogger(_noisy).setLevel(logging.CRITICAL)
 
 # ── Setup thresholds (mirror CLAUDE.md) ──────────────────────────────────────
+
+import os as _os
+# Master kill switch — mirrors PULLBACK_ENABLED in tri_city_execute.py
+PULLBACK_ENABLED = _os.getenv("PULLBACK_ENABLED", "true").lower() == "true"
 
 PULLBACK_EMA_MAX  = 1.2   # EMA Dev% upper bound for PULLBACK (raised from 0.8 — Pine already filters)
 CONT_EMA_MAX      = 1.5   # EMA Dev% upper bound for CONTINUATION (raised from 1.0)
@@ -537,7 +548,7 @@ def detect_setup(row: dict, now: datetime | None = None,
     if (sig == "PULLBACK"
             and 0 <= ema_dev <= PULLBACK_EMA_MAX
             and PULLBACK_RSI_MIN <= rsi <= PULLBACK_RSI_MAX):
-        return "PULLBACK"
+        return "PULLBACK" if PULLBACK_ENABLED else None
 
     # SETUP 4: EMA20_PULLBACK — price at EMA20 after a significant run, above VWAP
     # No time window — valid throughout the day wherever the pattern appears
@@ -547,6 +558,8 @@ def detect_setup(row: dict, now: datetime | None = None,
             and rvol >= EMA20_PB_MIN_RVOL
             and change_from_open >= EMA20_PB_MIN_RUN
             and (orh <= 0 or price >= orh * EMA20_PB_ORH_MULT)):
+        if not PULLBACK_ENABLED:
+            return None
         if last_bar and not is_bounce_bar(last_bar):
             logger.info(f"EMA20_PULLBACK {row['symbol']}: no bounce bar — entering anyway")
         return "EMA20_PULLBACK"
@@ -631,7 +644,8 @@ def detect_setup(row: dict, now: datetime | None = None,
     # SETUP 7: LOCKED-LEVEL PULLBACK
     # Price inside the opening range (above ORL, below ORH), near EMA.
     # RSI ceiling raised to 65 — green SPY days naturally push RSI above Pine's 55 max.
-    if (locked_orl > 0
+    if (PULLBACK_ENABLED
+            and locked_orl > 0
             and locked_orl <= price <= locked_orh
             and 0 <= ema_dev <= PULLBACK_EMA_MAX
             and PULLBACK_RSI_MIN <= rsi <= LOCKED_PULLBACK_RSI_MAX):
@@ -710,11 +724,18 @@ def main():
         except Exception:
             pass
 
-    # ── Load gap_pct from candidates (for earnings gap RVOL bypass in execute) ─
+    # ── Load candidates: approved symbols + gap_pct ────────────────────────────
+    # Only symbols in today's tv_symbols are eligible for signal execution.
+    # This prevents stale Pine slots from a prior session triggering trades.
     candidate_gap: dict[str, float] = {}
+    approved_symbols: set[str] = set()
     if CANDIDATES_FILE.exists():
         try:
             cdata = json.loads(CANDIDATES_FILE.read_text())
+            # tv_symbols is the authoritative list — strip exchange prefix
+            for tv_sym in cdata.get("tv_symbols", []):
+                bare = tv_sym.split(":")[-1]
+                approved_symbols.add(bare)
             for c in cdata.get("candidates", []):
                 sym_c = c.get("symbol", "")
                 if sym_c:
@@ -786,6 +807,12 @@ def main():
     new_vwap_state: dict[str, dict] = {}
     for row in rows:
         sym       = row["symbol"]
+
+        # Guard: skip symbols not in today's approved candidate list.
+        # Prevents stale Pine slots (leftover from prior sessions) from triggering trades.
+        if approved_symbols and sym not in approved_symbols:
+            logger.debug(f"DETECTOR: {sym} not in today's candidates — skipping")
+            continue
         vwap_data = vwap_map.get(sym)   # dict | None
         vwap      = vwap_data["vwap"] if vwap_data else None
 

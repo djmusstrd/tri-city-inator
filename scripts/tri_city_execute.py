@@ -138,6 +138,30 @@ FADE_STOP_BUFFER  = float(os.getenv("FADE_STOP_BUFFER",   "0.5"))  # stop above 
 RVOL_SIZE_BOOST_MAX    = float(os.getenv("RVOL_SIZE_BOOST_MAX",    "1.25"))  # max multiplier
 RVOL_SIZE_BOOST_THRESH = float(os.getenv("RVOL_SIZE_BOOST_THRESH", "3.0"))   # RVOL level for max boost
 
+# ATR-based stop calibration (Davey Ch. 9): stops scale with actual stock volatility
+# ATR_STOP_MULT × ATR(14) gives stop distance from ORH; overrides fixed % when larger
+# Kill switches: set to 0 in .env to disable ATR widening and fall back to fixed %
+ATR_STOP_MULT          = float(os.getenv("ATR_STOP_MULT",          "1.0"))   # stop = orh - max(ATR×this, fixed%)
+ATR_PULLBACK_STOP_MULT = float(os.getenv("ATR_PULLBACK_STOP_MULT", "0.75"))  # tighter anchor for PULLBACK
+ATR_T1_MULT            = float(os.getenv("ATR_T1_MULT",            "1.5"))   # T1 = max(entry + ATR×this, fixed T1)
+ATR_T2_MULT            = float(os.getenv("ATR_T2_MULT",            "3.0"))   # T2 = max(entry + ATR×this, fixed T2)
+
+# Master PULLBACK kill switch — set false to pause all PULLBACK entries
+PULLBACK_ENABLED = os.getenv("PULLBACK_ENABLED", "true").lower() == "true"
+
+# Pullback trending gate (Davey Ch. 7 via Parkinson vol): only take PULLBACK when
+# the stock is in a confirmed trending regime (park_trending=True in candidates.json)
+PULLBACK_TRENDING_REQUIRED = os.getenv("PULLBACK_TRENDING_REQUIRED", "true").lower() == "true"
+
+# PULLBACK ORB spread guard: tiny opening range = no meaningful level to pull back against
+PULLBACK_MIN_ORB_SPREAD_PCT = float(os.getenv("PULLBACK_MIN_ORB_SPREAD_PCT", "0.25"))  # % of price
+
+# ATR volatility circuit breaker (Davey Ch. 6): skip entries on extreme market shock days.
+# Compares SPY's 5-day ATR to its 20-day ATR baseline. Fires only at extreme multiples
+# (default 2.5x) so normal high-vol setup days are not filtered.
+VOLATILITY_CHECK_ENABLED = os.getenv("VOLATILITY_CHECK_ENABLED", "true").lower() == "true"
+VOLATILITY_ATR_CEILING   = float(os.getenv("VOLATILITY_ATR_CEILING", "2.5"))  # skip if SPY ATR5 > ATR20 × this
+
 # ── Position sizing ───────────────────────────────────────────────────────────
 RISK_PCT           = float(os.getenv("RISK_PCT",           "2.0"))   # % of equity to risk
 STOP_PCT           = float(os.getenv("STOP_PCT",           "5.0"))   # fallback stop % if ORH not usable
@@ -573,6 +597,68 @@ def get_adr(symbol: str, period: int = 10) -> float | None:
         return None
 
 
+def get_atr(symbol: str, period: int = 14) -> float | None:
+    """
+    Average True Range (ATR-period): mean(TR) over last N sessions.
+    True Range = max(High-Low, |High-PrevClose|, |Low-PrevClose|).
+    Unlike ADR, ATR includes overnight gaps — better for gap stocks.
+    Returns None on any failure — caller falls back to existing stop logic.
+    """
+    try:
+        import yfinance as yf
+        df = yf.download(symbol, period=f"{period * 3}d", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < period + 1:
+            return None
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        highs  = list(df["high"].values)
+        lows   = list(df["low"].values)
+        closes = list(df["close"].values)
+        tr_values = []
+        for i in range(1, len(highs)):
+            tr = max(
+                float(highs[i])  - float(lows[i]),
+                abs(float(highs[i])  - float(closes[i - 1])),
+                abs(float(lows[i])   - float(closes[i - 1])),
+            )
+            tr_values.append(tr)
+        if len(tr_values) < period:
+            return None
+        return round(sum(tr_values[-period:]) / period, 4)
+    except Exception as e:
+        logger.debug(f"get_atr {symbol}: {e}")
+        return None
+
+
+def check_atr_circuit_breaker() -> bool:
+    """
+    Returns True (block entry) if SPY is in an extreme volatility spike.
+    Compares SPY ATR(5) to ATR(20) baseline. Fires only at VOLATILITY_ATR_CEILING×
+    (default 2.5x) — normal high-vol gap days are NOT blocked.
+    Returns False (allow entry) on any data failure — fail open.
+    """
+    if not VOLATILITY_CHECK_ENABLED:
+        return False
+    try:
+        atr5  = get_atr("SPY", period=5)
+        atr20 = get_atr("SPY", period=20)
+        if atr5 is None or atr20 is None or atr20 <= 0:
+            return False
+        ratio = atr5 / atr20
+        if ratio > VOLATILITY_ATR_CEILING:
+            logger.warning(
+                f"ATR CIRCUIT BREAKER: SPY ATR(5)={atr5:.2f} / ATR(20)={atr20:.2f} "
+                f"= {ratio:.2f}x ≥ ceiling {VOLATILITY_ATR_CEILING:.1f}x"
+            )
+            return True
+        return False
+    except Exception as e:
+        logger.debug(f"check_atr_circuit_breaker: {e}")
+        return False
+
+
 # ── Correlation check (Ch 7 — sector concentration guard) ─────────────────────
 # Computes 20-day Pearson correlation between the incoming symbol and each open
 # position. Logs a warning if any pair is ≥ CORR_WARN_THRESHOLD — does NOT block
@@ -740,16 +826,44 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
 
     Position sizing: risk RISK_PCT% of account equity. Falls back to FIXED_RISK.
     """
+    # ATR(14): used to widen stops and calibrate targets to actual stock volatility.
+    # Falls back gracefully — if None, existing fixed-% logic is used unchanged.
+    atr = get_atr(symbol)
+
     # Stop
     if setup in ("BREAKOUT", "CONTINUATION"):
-        offset = max(round(orh * STOP_OFFSET_PCT / 100, 2), STOP_OFFSET)
+        pct_offset = max(round(orh * STOP_OFFSET_PCT / 100, 2), STOP_OFFSET)
+        if atr and atr > 0 and ATR_STOP_MULT > 0:
+            # Use the LARGER of ATR-based or fixed-% offset so volatile stocks get more room
+            atr_offset = round(atr * ATR_STOP_MULT, 2)
+            offset = max(pct_offset, atr_offset)
+            if atr_offset > pct_offset:
+                logger.info(
+                    f"ATR stop: ORH-{pct_offset:.2f} → ORH-{atr_offset:.2f} "
+                    f"(ATR={atr:.2f} × {ATR_STOP_MULT})"
+                )
+        else:
+            offset = pct_offset
         stop = round(orh - offset, 2)
     elif setup == "PULLBACK":
         # Fix C: use EMA20 as stop anchor (tighter, meaningful support level)
         # ema_dev = (price - ema20) / ema20 * 100  →  ema20 = price / (1 + ema_dev/100)
         if -99 < ema_dev < 100:
             ema20 = round(price / (1 + ema_dev / 100), 4)
-            stop  = round(ema20 - EMA_STOP_BUFFER, 2)
+            if atr and atr > 0 and ATR_PULLBACK_STOP_MULT > 0:
+                atr_buf  = round(atr * ATR_PULLBACK_STOP_MULT, 2)
+                old_stop = round(ema20 - EMA_STOP_BUFFER, 2)
+                new_stop = round(ema20 - atr_buf, 2)
+                if new_stop < old_stop:   # ATR is wider — use it
+                    logger.info(
+                        f"ATR PULLBACK stop: EMA20-{EMA_STOP_BUFFER:.2f} → EMA20-{atr_buf:.2f} "
+                        f"(ATR={atr:.2f} × {ATR_PULLBACK_STOP_MULT})"
+                    )
+                    stop = new_stop
+                else:
+                    stop = old_stop
+            else:
+                stop = round(ema20 - EMA_STOP_BUFFER, 2)
         else:
             stop  = round(price * (1 - STOP_PCT / 100), 2)
     else:
@@ -868,9 +982,26 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
             )
             position_size = max_by_bp
 
-    target_1 = round(price * (1 + T1_PCT / 100), 2)
-    target_2 = round(price * (1 + T2_PCT / 100), 2)
-    target_3 = round(price * (1 + T3_PCT / 100), 2)
+    # Targets: ATR-scaled targets applied to BREAKOUT/CONTINUATION only.
+    # PULLBACK targets stay fixed — the thesis is "back to ORH," not a multi-ATR move.
+    # For BREAKOUT/CONTINUATION: take the BETTER (higher) of ATR or fixed %.
+    fixed_t1 = round(price * (1 + T1_PCT / 100), 2)
+    fixed_t2 = round(price * (1 + T2_PCT / 100), 2)
+    target_3  = round(price * (1 + T3_PCT / 100), 2)
+
+    if setup in ("BREAKOUT", "CONTINUATION") and atr and atr > 0 and ATR_T1_MULT > 0:
+        atr_t1 = round(price + atr * ATR_T1_MULT, 2)
+        atr_t2 = round(price + atr * ATR_T2_MULT, 2)
+        target_1 = max(fixed_t1, atr_t1)
+        target_2 = max(fixed_t2, atr_t2)
+        if target_1 != fixed_t1 or target_2 != fixed_t2:
+            logger.info(
+                f"ATR targets: T1 {fixed_t1}→{target_1}, T2 {fixed_t2}→{target_2} "
+                f"(ATR={atr:.2f}, ×{ATR_T1_MULT}/{ATR_T2_MULT})"
+            )
+    else:
+        target_1 = fixed_t1
+        target_2 = fixed_t2
 
     return {
         "ticker":        symbol,
@@ -1007,15 +1138,17 @@ def main():
             )
             sys.exit(0)
 
-    # Guard 0b: PULLBACK signals blocked before 9:00 AM CT — price discovery window
-    # Ross Cameron / all momentum systems: first 30 min after open = highest failure rate for pullbacks
+    # Guard 0b: PULLBACK signals blocked during price discovery window
+    # Cutoff = 8:30 AM CT + ORB_MINUTES + 15 min (trend establishment buffer)
+    # 5-min ORB → 8:50 AM, 15-min ORB → 9:00 AM, 30-min ORB → 9:15 AM
     # BREAKOUT and CONTINUATION unrestricted (tighter ORH confirmation guards)
     if args.setup in ("PULLBACK",) and not args.dry_run:
-        pre_market_cutoff = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        if now < pre_market_cutoff:
+        pullback_cutoff = now.replace(hour=8, minute=30, second=0, microsecond=0) + timedelta(minutes=ORB_MINUTES + 15)
+        if now < pullback_cutoff:
             print(
-                f"PRE_9AM: {now.strftime('%H:%M CT')} — PULLBACK entries blocked before 9:00 AM CT. "
-                f"Price discovery still active — skipping {symbol}."
+                f"PRE_PULLBACK: {now.strftime('%H:%M CT')} — PULLBACK entries blocked until "
+                f"{pullback_cutoff.strftime('%H:%M CT')} ({ORB_MINUTES}-min ORB + 15 min buffer). "
+                f"Skipping {symbol}."
             )
             sys.exit(0)
 
@@ -1027,12 +1160,55 @@ def main():
             print(f"SKIP: PULLBACK disabled (MIN_RSI_PULLBACK={MIN_RSI_PULLBACK:.0f}, RSI={args.rsi:.1f}).")
         sys.exit(0)
 
+    # Guard 0c.5: PULLBACK master kill switch
+    if args.setup == "PULLBACK" and not PULLBACK_ENABLED:
+        if not args.quiet:
+            print(f"SKIP: PULLBACK disabled (PULLBACK_ENABLED=false in .env).")
+        sys.exit(0)
+
+    # Guard 0d: PULLBACK Parkinson trending gate (Davey Ch. 7).
+    # PULLBACK has a 9% win rate on mean-reverting stocks — these need to be filtered.
+    # Require park_trending=True (Parkinson vol trending flag from premarket scanner).
+    # Kill switch: PULLBACK_TRENDING_REQUIRED=false in .env to disable.
+    if args.setup == "PULLBACK" and PULLBACK_TRENDING_REQUIRED and not args.dry_run:
+        trending = None
+        try:
+            _cands_file = WORKSPACE / "shared" / "tri-city-candidates.json"
+            if _cands_file.exists():
+                _cdata = json.loads(_cands_file.read_text())
+                for _c in _cdata.get("candidates", []):
+                    if _c.get("symbol") == symbol:
+                        trending = _c.get("park_trending")
+                        break
+        except Exception:
+            pass
+        if trending is False:
+            if not args.quiet:
+                print(f"SKIP: PULLBACK on {symbol} blocked — park_trending=False "
+                      f"(mean-reverting regime, not trending). "
+                      f"Set PULLBACK_TRENDING_REQUIRED=false in .env to override.")
+            sys.exit(0)
+
     # Finding 2: PULLBACK only valid when price is at or above EMA (EMA Dev% >= 0).
     # Bulkowski: entries below EMA (-0.5% to 0%) have lower follow-through.
     if args.setup == "PULLBACK" and args.ema_dev < 0.0:
         print(f"SKIP: PULLBACK requires EMA Dev% >= 0.0% (got {args.ema_dev:+.2f}%). "
               f"Price is still below EMA — wait for reclaim.")
         sys.exit(0)
+
+    # Guard 0e: PULLBACK ORB spread filter — tiny opening range = no level to trade against.
+    # A sub-0.25% ORH/ORL spread means the stock barely moved in the ORB; there's no
+    # meaningful support/resistance to anchor the pullback setup.
+    if args.setup == "PULLBACK" and PULLBACK_MIN_ORB_SPREAD_PCT > 0 and args.orh > 0 and args.orl > 0:
+        _ref_price = args.price if args.price > 0 else args.orh
+        orb_spread_pct = (args.orh - args.orl) / _ref_price * 100
+        if orb_spread_pct < PULLBACK_MIN_ORB_SPREAD_PCT:
+            if not args.quiet:
+                print(f"SKIP: PULLBACK on {symbol} blocked — ORB spread "
+                      f"{orb_spread_pct:.2f}% < min {PULLBACK_MIN_ORB_SPREAD_PCT:.2f}%. "
+                      f"(ORH ${args.orh:.2f} / ORL ${args.orl:.2f} — range too tight). "
+                      f"Set PULLBACK_MIN_ORB_SPREAD_PCT=0 in .env to disable.")
+            sys.exit(0)
 
     cup_tag = " + CUP 🏆" if args.cup else ""
     if not args.quiet:
@@ -1099,6 +1275,16 @@ def main():
         print(f"SPY regime: {spy_regime} ({spy_str})")
     if spy_regime == "BEAR" and not args.dry_run:
         print(f"SKIP: SPY bearish ({spy_str}) — blocking LONG entries.")
+        sys.exit(0)
+
+    # ── Guard 5b: ATR volatility circuit breaker (Davey Ch. 6) ───────────────────
+    # Blocks all entries when SPY is experiencing an extreme volatility spike (2.5x+ normal).
+    # Normal high-vol gap days are NOT blocked — only market-shock events.
+    # Kill switch: VOLATILITY_CHECK_ENABLED=false in .env to disable.
+    if not args.dry_run and check_atr_circuit_breaker():
+        print(f"SKIP: ATR circuit breaker — SPY volatility spike detected "
+              f"(ATR(5) > {VOLATILITY_ATR_CEILING:.1f}x ATR(20) baseline). "
+              f"Set VOLATILITY_CHECK_ENABLED=false to override.")
         sys.exit(0)
 
     # ── Guard 6: relative volume (setup-specific + afternoon floor) ───────────

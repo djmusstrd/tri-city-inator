@@ -61,6 +61,14 @@ RVOL_LOOKBACK       = int(os.getenv("RVOL_LOOKBACK",         "20"))
 DOLLAR_T1_TRIGGER   = float(os.getenv("DOLLAR_T1_TRIGGER",   "300"))   # min $ unrealized to bank T1
 T1_MIN_MOVE_PCT     = float(os.getenv("T1_MIN_MOVE_PCT",      "2.0"))   # min % from entry before trigger
 BREAKEVEN_BUFFER    = float(os.getenv("BREAKEVEN_BUFFER",     "0.05"))  # stop = entry - $0.05
+IDLE_EXIT_HOURS     = float(os.getenv("IDLE_EXIT_HOURS",      "1.5"))   # close if flat after this many hours
+IDLE_MIN_MOVE_PCT   = float(os.getenv("IDLE_MIN_MOVE_PCT",    "2.0"))   # "flat" = unrealized < this %
+
+# ── Quick-lock stop promotion ──────────────────────────────────────────────────
+# Promotes stop to breakeven when trade is up $QUICK_LOCK_MIN_DOLLAR, before the
+# full free-ride $300 threshold. No share selling — purely stop protection.
+QUICK_LOCK_MIN_DOLLAR   = float(os.getenv("QUICK_LOCK_MIN_DOLLAR",   "100"))  # $ unrealized to trigger
+QUICK_LOCK_MIN_HOLD_MIN = float(os.getenv("QUICK_LOCK_MIN_HOLD_MIN",   "3"))  # min minutes open (avoid spread noise)
 EXEC_LOG            = WORKSPACE / "logs" / "tri-city-executions.json"
 
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
@@ -330,6 +338,90 @@ def check_failed_pullback(positions: list, today: str, now: datetime) -> list[st
                         actions.append(f"PULLBACK TIMEOUT CLOSE FAILED: {ticker} — check Alpaca")
             except Exception as e:
                 logger.warning(f"check_failed_pullback time parse {ticker}: {e}")
+
+    return actions
+
+
+# ── Action -0.5: Quick-lock stop promotion ────────────────────────────────────
+
+def check_quick_lock(positions: list, today: str, now: datetime) -> list[str]:
+    """
+    Promote stop to breakeven the moment a trade is up QUICK_LOCK_MIN_DOLLAR ($100).
+
+    Fires before check_free_ride so gains are protected even when the full $300
+    free-ride floor hasn't been reached. No shares are sold — purely stop movement.
+    Requires the trade to be open at least QUICK_LOCK_MIN_HOLD_MIN minutes to avoid
+    triggering on spread noise immediately after fill.
+    """
+    actions  = []
+    entries  = load_executions()
+    modified = False
+
+    for pos in positions:
+        ticker      = pos["ticker"]
+        curr_price  = pos["current_price"]
+        entry_price = pos["entry_price"]
+        shares      = pos["shares"]
+
+        entry = None
+        for e in reversed(entries):
+            if e.get("symbol") == ticker and e.get("date") == today and e.get("success"):
+                entry = e
+                break
+        if not entry:
+            continue
+
+        # Skip if already protected (quick-lock, breakeven, or T2 stop already set)
+        if entry.get("quick_lock_set") or entry.get("breakeven_set") or entry.get("t2_stop_set"):
+            continue
+
+        unrealized_pnl = (curr_price - entry_price) * shares
+        if unrealized_pnl < QUICK_LOCK_MIN_DOLLAR:
+            continue
+
+        # Enforce minimum hold time to avoid spread-noise false triggers
+        try:
+            time_part = entry.get("time", "").replace(" CT", "").split(" ")[0]
+            h, m, s   = [int(x) for x in time_part.split(":")]
+            entry_dt  = now.replace(hour=h, minute=m, second=s, microsecond=0)
+            mins_open = (now - entry_dt).total_seconds() / 60
+        except Exception:
+            mins_open = QUICK_LOCK_MIN_HOLD_MIN  # assume eligible if time parse fails
+
+        if mins_open < QUICK_LOCK_MIN_HOLD_MIN:
+            continue
+
+        be_stop = round(entry_price - BREAKEVEN_BUFFER, 4)
+        logger.info(
+            f"QUICK LOCK: {ticker} ${curr_price:.2f} — unrealized ${unrealized_pnl:.0f} "
+            f">= ${QUICK_LOCK_MIN_DOLLAR:.0f} at {mins_open:.1f}min — stop → ${be_stop:.2f}"
+        )
+
+        cancel_all_orders(ticker)
+        time.sleep(1.0)
+        be_set = set_stop_loss(
+            order_id=entry.get("order_id", ""),
+            ticker=ticker,
+            stop_price=be_stop,
+            shares=shares,
+            direction="BULLISH",
+        )
+
+        if be_set:
+            entry["quick_lock_set"]   = True
+            entry["quick_lock_price"] = curr_price
+            entry["quick_lock_pnl"]   = round(unrealized_pnl, 2)
+            modified = True
+            actions.append(
+                f"QUICK LOCK: {ticker} @ ${curr_price:.2f} — "
+                f"${unrealized_pnl:.0f} unrealized at {mins_open:.0f}min "
+                f"— stop promoted to ${be_stop:.2f} (was ${entry.get('stop_loss', '?')})"
+            )
+        else:
+            actions.append(f"QUICK LOCK FAILED: {ticker} — stop not updated, check Alpaca")
+
+    if modified:
+        save_executions(entries)
 
     return actions
 
@@ -614,6 +706,91 @@ def check_rvol_collapse(positions: list, today: str) -> list[str]:
     return actions
 
 
+# ── Action 2.5: Idle position timeout (Davey Ch. 8) ──────────────────────────
+# Exit dead-money BREAKOUT/CONTINUATION trades that haven't hit T1 after IDLE_EXIT_HOURS.
+# Logic: if position is flat (unrealized < IDLE_MIN_MOVE_PCT%) AND held > IDLE_EXIT_HOURS
+# AND T1 has not been banked → the setup failed to follow through → free up capital.
+# Skip if T1 already banked (winning trades are allowed to breathe and trail).
+
+def check_idle_timeout(positions: list, today: str, now: datetime) -> list[str]:
+    """
+    Close positions that are flat after IDLE_EXIT_HOURS with no T1 hit.
+    Only applies to BREAKOUT and CONTINUATION — PULLBACK has its own 25-min timeout.
+    """
+    actions = []
+    entries = load_executions()
+
+    for pos in positions:
+        ticker     = pos["ticker"]
+        curr_price = pos["current_price"]
+        entry_price = pos["entry_price"]
+
+        entry = None
+        for e in reversed(entries):
+            if e.get("symbol") == ticker and e.get("date") == today and e.get("success"):
+                entry = e
+                break
+
+        if not entry:
+            continue
+
+        # Only apply to BREAKOUT / CONTINUATION (PULLBACK has its own timeout)
+        setup = entry.get("setup", "")
+        if setup not in ("BREAKOUT", "CONTINUATION"):
+            continue
+
+        # Skip if T1 already banked — winner, let it run
+        if entry.get("breakeven_set"):
+            continue
+
+        # Parse entry time
+        try:
+            entry_time_str = entry.get("time", "")  # "HH:MM:SS CT"
+            entry_hms = entry_time_str.split(" ")[0]   # "HH:MM:SS"
+            h, m, s = [int(x) for x in entry_hms.split(":")]
+            entry_dt = now.replace(hour=h, minute=m, second=s, microsecond=0)
+        except Exception:
+            continue
+
+        hours_held = (now - entry_dt).total_seconds() / 3600.0
+        if hours_held < IDLE_EXIT_HOURS:
+            continue
+
+        # Check if position is flat (< IDLE_MIN_MOVE_PCT% unrealized gain)
+        unrealized_pct = ((curr_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        if unrealized_pct >= IDLE_MIN_MOVE_PCT:
+            continue  # Position is making progress — leave it alone
+
+        logger.info(
+            f"IDLE TIMEOUT: {ticker} {setup} held {hours_held:.1f}h, "
+            f"unrealized {unrealized_pct:+.2f}% < {IDLE_MIN_MOVE_PCT:.1f}% threshold"
+        )
+        cancel_all_orders(ticker)
+        success = close_position(ticker, reason=f"Idle timeout ({hours_held:.1f}h, {unrealized_pct:+.1f}%)")
+        if success:
+            actions.append(
+                f"IDLE TIMEOUT EXIT: {ticker} @ ${curr_price:.2f} "
+                f"({setup}, held {hours_held:.1f}h, {unrealized_pct:+.1f}% — no T1)"
+            )
+            try:
+                from managers.trade_journal import log_exit, fetch_exit_price
+                exit_price = fetch_exit_price(ticker) or curr_price
+                log_exit(
+                    symbol=ticker,
+                    setup=setup,
+                    date=today,
+                    exit_price=exit_price,
+                    exit_reason=f"Idle timeout ({hours_held:.1f}h, flat)",
+                    shares=entry.get("position_size", 0),
+                )
+            except Exception as _je:
+                logger.warning(f"journal.log_exit failed for {ticker}: {_je}")
+        else:
+            actions.append(f"IDLE TIMEOUT EXIT FAILED: {ticker} — check Alpaca")
+
+    return actions
+
+
 # ── Action 3: Trailing stop (T3 lot) ──────────────────────────────────────────
 
 def check_trailing(positions: list, today: str) -> list[str]:
@@ -833,18 +1010,24 @@ def _calc_ema(prices: list[float], period: int) -> float | None:
     return round(ema, 4)
 
 
-def check_ema8_advisory(positions: list) -> list[str]:
+def check_ema8_exit(positions: list, today: str) -> list[str]:
     """
-    Advisory: EMA8 has crossed below EMA20 — bearish momentum shift.
+    EMA8/EMA20 bearish cross handler — auto-exit for PULLBACK, advisory for others.
 
-    Ross Cameron: EMA8 breach is the primary exit signal for gap-and-go plays.
-    Fires 1-2 bars earlier than EMA20 breach, giving a better exit price.
-    Condition: price < EMA8 AND EMA8 < EMA20 (bearish alignment).
+    Ross Cameron: EMA8 breach is the primary exit signal for gap-and-go plays,
+    firing 1-2 bars earlier than EMA20 breach.
+    Condition: price < EMA8 AND EMA8 < EMA20 (full bearish alignment).
+
+    PULLBACK trades that haven't yet hit T1: auto-close immediately — the momentum
+    thesis is invalidated and PULLBACK has historically negative avg R in this system.
+    BREAKOUT / CONTINUATION: advisory only — these have wider targets and the cross
+    may be transient noise on a healthy trend.
     """
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return []
 
-    advisories = []
+    results = []
+    entries = load_executions()
 
     try:
         from alpaca.data.historical import StockHistoricalDataClient
@@ -857,6 +1040,12 @@ def check_ema8_advisory(positions: list) -> list[str]:
         for pos in positions:
             ticker     = pos["ticker"]
             curr_price = pos["current_price"]
+
+            entry = next(
+                (e for e in reversed(entries)
+                 if e.get("symbol") == ticker and e.get("date") == today and e.get("success")),
+                None,
+            )
 
             try:
                 now = datetime.now(CT)
@@ -879,22 +1068,57 @@ def check_ema8_advisory(positions: list) -> list[str]:
                 if ema8 is None or ema20 is None:
                     continue
 
-                if curr_price < ema8 and ema8 < ema20:
+                if not (curr_price < ema8 and ema8 < ema20):
+                    continue
+
+                setup = entry.get("setup", "") if entry else ""
+                already_protected = entry and (entry.get("breakeven_set") or entry.get("t2_stop_set"))
+
+                if setup == "PULLBACK" and not already_protected:
+                    # Auto-close — PULLBACK momentum is definitively lost
+                    logger.warning(
+                        f"EMA8 CROSS EXIT: {ticker} PULLBACK @ ${curr_price:.2f} — "
+                        f"EMA8 ${ema8:.2f} < EMA20 ${ema20:.2f} — auto-closing"
+                    )
+                    cancel_all_orders(ticker)
+                    success = close_position(ticker, reason="EMA8 cross exit — PULLBACK momentum lost")
+                    if success:
+                        results.append(
+                            f"EMA8 CROSS EXIT: {ticker} @ ${curr_price:.2f} — "
+                            f"EMA8 ${ema8:.2f} < EMA20 ${ema20:.2f} (PULLBACK closed)"
+                        )
+                        try:
+                            from managers.trade_journal import log_exit, fetch_exit_price
+                            exit_price = fetch_exit_price(ticker) or curr_price
+                            log_exit(
+                                symbol=ticker,
+                                setup=setup,
+                                date=today,
+                                exit_price=exit_price,
+                                exit_reason="EMA8 cross exit — PULLBACK momentum lost",
+                                shares=entry.get("position_size", 0) if entry else pos["shares"],
+                            )
+                        except Exception as _je:
+                            logger.warning(f"journal.log_exit EMA8 exit failed for {ticker}: {_je}")
+                    else:
+                        results.append(f"EMA8 CROSS EXIT FAILED: {ticker} — close manually")
+                else:
+                    # Advisory for BREAKOUT / CONTINUATION or already-protected positions
                     msg = (
                         f"EMA8_EXIT_ADVISORY: {ticker} @ ${curr_price:.2f} — "
                         f"EMA8 ${ema8:.2f} crossed below EMA20 ${ema20:.2f} "
                         f"(bearish momentum shift — Ross Cameron exit signal)"
                     )
                     logger.warning(msg)
-                    advisories.append(msg)
+                    results.append(msg)
 
             except Exception as e:
-                logger.debug(f"check_ema8_advisory {ticker}: {e}")
+                logger.debug(f"check_ema8_exit {ticker}: {e}")
 
     except Exception as e:
-        logger.debug(f"check_ema8_advisory init: {e}")
+        logger.debug(f"check_ema8_exit init: {e}")
 
-    return advisories
+    return results
 
 
 # ── Status display ─────────────────────────────────────────────────────────────
@@ -1106,16 +1330,20 @@ def main():
     if not args.eod:
         all_actions += check_failed_pullback(positions, today, now)
         positions = get_open_positions()
+        all_actions += check_quick_lock(positions, today, now)
+        positions = get_open_positions()
         all_actions += check_free_ride(positions, today)
         positions = get_open_positions()
         all_actions += check_targets(positions, today)
         positions = get_open_positions()
         all_actions += check_rvol_collapse(positions, today)
         positions = get_open_positions()
+        all_actions += check_idle_timeout(positions, today, now)
+        positions = get_open_positions()
         all_actions += check_trailing(positions, today)
         positions = get_open_positions()
         all_actions += check_ema20_reclaim_advisory(positions, today)
-        all_actions += check_ema8_advisory(positions)
+        all_actions += check_ema8_exit(positions, today)
 
     all_actions += check_eod(positions, now)
 

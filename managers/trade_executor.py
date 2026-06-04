@@ -190,6 +190,18 @@ def execute_tri_city_trade(agent_name: str, signal_data: dict) -> ExecutionResul
         except Exception:
             pass
 
+        # ── Fill-adjusted stop guard ───────────────────────────────────────────
+        # If fill price is significantly below signal price (negative slippage),
+        # the pre-calculated stop may end up ABOVE the actual fill — inverted stop.
+        # Recalculate to 5% below actual fill to ensure the stop is always valid.
+        if stop_loss >= actual_fill:
+            adjusted = round(actual_fill * 0.95, 2)
+            logger.warning(
+                f"Stop ${stop_loss:.2f} >= fill ${actual_fill:.2f} — "
+                f"adjusting to 5% below fill: ${adjusted:.2f}"
+            )
+            stop_loss = adjusted
+
         # ── Step 3: OCO SELL orders — take-profit + stop paired per tranche ───
         # Each OCO has two linked sell legs: limit at take-profit, stop at stop_loss.
         # Whichever fires first automatically cancels the other.

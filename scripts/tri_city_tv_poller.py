@@ -64,6 +64,16 @@ _last_intraday_scan: datetime | None = None
 
 LOGS.mkdir(parents=True, exist_ok=True)
 
+# Load .env so Telegram vars are available when running via nohup
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(WORKSPACE / ".env")
+except ImportError:
+    pass
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # ── Logging: file only (no StreamHandler — nohup stdout is also redirected to
 # the same log file, which would cause every line to appear twice) ─────────────
 logging.basicConfig(
@@ -240,8 +250,36 @@ def _esc(s: str) -> str:
     return s.replace('"', '\\"').replace("\\", "\\\\")
 
 
+# ── Telegram notifications ─────────────────────────────────────────────────────
+
+def send_telegram(msg: str) -> None:
+    """Send a message to the Tri-City Telegram bot. Silent on failure."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        import urllib.parse, urllib.request as _ur
+        url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}).encode()
+        _ur.urlopen(_ur.Request(url, data=data), timeout=5)
+    except Exception as _e:
+        logger.debug(f"Telegram send failed: {_e}")
+
+
 def notify_execution(e: dict) -> None:
-    notify("✅ TRI-CITY TRADE", e.get("raw", f"{e['symbol']} {e['setup']}"), sound="Glass")
+    raw = e.get("raw", f"{e['symbol']} {e['setup']}")
+    notify("✅ TRI-CITY TRADE", raw, sound="Glass")
+    sym   = e.get("symbol", "?")
+    stp   = e.get("setup", "?")
+    px    = e.get("entry_price", e.get("price", 0))
+    stop  = e.get("stop_loss", "?")
+    t1    = e.get("target_1", "?")
+    sh    = e.get("position_size", e.get("shares", "?"))
+    cup   = " 🏆" if e.get("cup") else ""
+    send_telegram(
+        f"✅ <b>ENTRY — {sym}</b>{cup}\n"
+        f"{stp} | {sh}sh @ ${px}\n"
+        f"Stop: ${stop}  T1: ${t1}"
+    )
 
 
 def notify_post_cutoff(e: dict) -> None:
@@ -258,15 +296,26 @@ def notify_post_cutoff(e: dict) -> None:
         f"Cup:{cup} | after {cut} — type 'yes {sym}' in Claude Code to approve"
     )
     notify(f"⚠️ POST-CUTOFF: {sym}", body, sound="Sosumi")
+    send_telegram(
+        f"⚠️ <b>POST-CUTOFF: {sym}</b>\n"
+        f"{stp} @${px} | {sh}sh | stop=${stop}\n"
+        f"Type <code>yes {sym}</code> in Claude Code to approve"
+    )
 
 
 def notify_rvol_spike(e: dict) -> None:
     body = f"{e['symbol']} RVOL {e['prev']:.1f}x → {e['now']:.1f}x"
     notify("📈 RVOL SPIKE", body)
+    send_telegram(f"📈 <b>RVOL SPIKE</b> — {e['symbol']}: {e['prev']:.1f}x → {e['now']:.1f}x")
 
 
 def notify_position_event(msg: str) -> None:
     notify("📊 POSITION EVENT", msg)
+    # Only send Telegram for exits and stop promotions — skip advisory-only messages
+    keywords = ("EXIT", "CLOSED", "QUICK LOCK", "FREE RIDE", "T1 HIT", "T2 HIT",
+                 "TRAIL EXIT", "PULLBACK FAIL", "PULLBACK TIMEOUT", "EMA8 CROSS EXIT")
+    if any(kw in msg.upper() for kw in keywords):
+        send_telegram(f"📊 <b>POSITION</b>\n{msg}")
 
 
 # ── Pending approvals (POST_CUTOFF) ───────────────────────────────────────────
@@ -422,6 +471,7 @@ def run_cycle() -> None:
     for err in errors:
         logger.error(f"EXEC_ERROR: {err}")
         notify("❌ EXECUTION ERROR", err, sound="Basso")
+        send_telegram(f"❌ <b>EXECUTION ERROR</b>\n{err}")
 
     total_actionable = len(executions) + len(post_cutoffs) + len(rvol_spikes) + len(position_events) + len(errors)
     logger.info(
@@ -431,6 +481,42 @@ def run_cycle() -> None:
     )
     if total_actionable == 0:
         logger.info("(silent — no actionable events)")
+
+
+# ── EOD Telegram summary ──────────────────────────────────────────────────────
+
+def _send_eod_telegram_summary() -> None:
+    """Send daily P&L summary to Telegram when the poller shuts down at 3:05 PM CT."""
+    try:
+        journal_path = WORKSPACE / "logs" / "tri-city-journal.json"
+        if not journal_path.exists():
+            return
+        journal = json.loads(journal_path.read_text())
+        today = date.today().isoformat()
+        trades = [t for t in journal if t.get("date") == today]
+        if not trades:
+            send_telegram("📋 <b>TRI-CITY EOD</b>\nNo trades today.")
+            return
+
+        total_pnl = sum(t.get("realized_pnl", 0) for t in trades)
+        wins   = [t for t in trades if t.get("outcome") in ("full_win", "partial_win")]
+        losses = [t for t in trades if t.get("outcome") == "loss"]
+        scratches = [t for t in trades if t.get("outcome") == "scratch"]
+        pnl_sign = "🟢" if total_pnl >= 0 else "🔴"
+
+        lines = [f"{pnl_sign} <b>TRI-CITY EOD — {today}</b>",
+                 f"Net P&amp;L: <b>${total_pnl:+.2f}</b> | {len(trades)} trades "
+                 f"({len(wins)}W / {len(scratches)}S / {len(losses)}L)"]
+        for t in trades:
+            pnl   = t.get("realized_pnl", 0)
+            sym   = t.get("symbol", "?")
+            stp   = t.get("setup", "?")
+            sign  = "✅" if pnl > 0 else ("⚪" if abs(pnl) < 50 else "🔴")
+            lines.append(f"  {sign} {sym} {stp}: ${pnl:+.2f}")
+
+        send_telegram("\n".join(lines))
+    except Exception as e:
+        logger.debug(f"EOD Telegram summary failed: {e}")
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -499,6 +585,7 @@ def main() -> None:
 
         if minutes_now > close_min:
             logger.info(f"Market closed ({now.strftime('%H:%M CT')}) — poller shutting down")
+            _send_eod_telegram_summary()
             PID_FILE.unlink(missing_ok=True)
             sys.exit(0)
 
