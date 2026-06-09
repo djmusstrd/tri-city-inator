@@ -221,6 +221,174 @@ def get_last_bar_close(symbol: str) -> float | None:
         return None
 
 
+# ── Supertrend indicator (mirrors tri_city_signal_detector.py) ───────────────
+
+def compute_supertrend(bars: list[dict], period: int = 10, mult: float = 3.0) -> dict | None:
+    """
+    Compute Supertrend from OHLC bars. Returns {"trend": 1|-1, "band": float} or None.
+    trend=1 bullish, trend=-1 bearish.
+    """
+    if len(bars) < period + 2:
+        return None
+    highs  = [b["high"]  for b in bars]
+    lows   = [b["low"]   for b in bars]
+    closes = [b["close"] for b in bars]
+    tr = [highs[0] - lows[0]]
+    for i in range(1, len(bars)):
+        tr.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i]  - closes[i - 1]),
+        ))
+    atrs: list[float] = []
+    for i in range(period - 1, len(tr)):
+        atrs.append(sum(tr[i - period + 1 : i + 1]) / period)
+    up_bands: list[float] = []
+    dn_bands: list[float] = []
+    trends:   list[int]   = []
+    for i, atr_val in enumerate(atrs):
+        bar_idx = i + period - 1
+        hl2 = (highs[bar_idx] + lows[bar_idx]) / 2.0
+        raw_up = hl2 - mult * atr_val
+        raw_dn = hl2 + mult * atr_val
+        if i == 0:
+            up_bands.append(raw_up); dn_bands.append(raw_dn); trends.append(1)
+            continue
+        prev_up = up_bands[-1]; prev_dn = dn_bands[-1]
+        prev_close = closes[bar_idx - 1]; curr_close = closes[bar_idx]
+        prev_trend = trends[-1]
+        up = max(raw_up, prev_up) if prev_close > prev_up else raw_up
+        dn = min(raw_dn, prev_dn) if prev_close < prev_dn else raw_dn
+        up_bands.append(up); dn_bands.append(dn)
+        if prev_trend == -1 and curr_close > prev_dn:
+            trend = 1
+        elif prev_trend == 1 and curr_close < prev_up:
+            trend = -1
+        else:
+            trend = prev_trend
+        trends.append(trend)
+    if len(trends) < 2:
+        return None
+    current_trend = trends[-1]
+    prev_trend    = trends[-2]
+    band = up_bands[-1] if current_trend == 1 else dn_bands[-1]
+    return {"trend": current_trend, "prev_trend": prev_trend, "band": round(band, 4)}
+
+
+def fetch_bars_for_supertrend(symbol: str) -> list[dict]:
+    """Fetch last 2 hours of 1-min bars from Alpaca for Supertrend computation."""
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        return []
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import timedelta
+
+        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        now = datetime.now(CT)
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Minute,
+            start=now - timedelta(hours=2),
+            end=now,
+            feed="iex",
+        )
+        df = client.get_stock_bars(req).df
+        if df.empty:
+            return []
+        return [
+            {"open": float(r["open"]), "high": float(r["high"]),
+             "low": float(r["low"]),  "close": float(r["close"])}
+            for _, r in df.iterrows()
+        ]
+    except Exception as e:
+        logger.warning(f"fetch_bars_for_supertrend {symbol}: {e}")
+        return []
+
+
+# ── Action -2: Supertrend bearish exit ───────────────────────────────────────
+
+def check_supertrend_exit(positions: list, today: str) -> list[str]:
+    """
+    Exit any open position when Supertrend flips bearish (trend: 1 → -1).
+
+    Applies to ALL setups, not just SUPERTREND_FLIP entries — the Supertrend
+    level acts as a trailing stop for any position. Uses the last 2 bars of
+    the computed Supertrend series to detect a fresh flip (not a persistent
+    bearish state that already existed before entry).
+
+    Only fires when the trend JUST flipped (prev=1, current=-1). A position
+    that entered while Supertrend was already bearish will not be exited until
+    trend flips bearish again after a bullish period.
+    """
+    actions  = []
+    entries  = load_executions()
+
+    for pos in positions:
+        ticker     = pos["ticker"]
+        curr_price = pos["current_price"]
+
+        entry = next(
+            (e for e in reversed(entries)
+             if e.get("symbol") == ticker and e.get("date") == today and e.get("success")),
+            None,
+        )
+        if not entry:
+            continue
+        # Skip if already protected at T2 stop — let T2 lock do its job
+        if entry.get("t2_stop_set"):
+            continue
+        # Skip if already flagged for ST exit this session
+        if entry.get("supertrend_exit"):
+            continue
+
+        bars = fetch_bars_for_supertrend(ticker)
+        if not bars:
+            continue
+
+        st = compute_supertrend(bars)
+        if st is None:
+            continue
+
+        # Only act on a fresh flip: previous bar bullish, current bar bearish
+        if st["trend"] == -1 and st.get("prev_trend") == 1:
+            logger.warning(
+                f"SUPERTREND EXIT: {ticker} trend flipped bearish — "
+                f"band={st['band']:.2f}, price={curr_price:.2f}"
+            )
+            cancel_all_orders(ticker)
+            success = close_position(ticker, reason="Supertrend bearish flip")
+            if success:
+                entry["supertrend_exit"] = True
+                try:
+                    from managers.trade_journal import log_exit, fetch_exit_price
+                    exit_price = fetch_exit_price(ticker) or curr_price
+                    log_exit(
+                        symbol=ticker,
+                        setup=entry.get("setup", "UNKNOWN"),
+                        date=today,
+                        exit_price=exit_price,
+                        exit_reason=f"Supertrend bearish flip (band={st['band']:.2f})",
+                        shares=entry.get("position_size", 0),
+                    )
+                except Exception as _je:
+                    logger.warning(f"journal.log_exit SUPERTREND EXIT {ticker}: {_je}")
+                actions.append(
+                    f"SUPERTREND EXIT: {ticker} @ ${curr_price:.2f} — "
+                    f"trend flipped bearish (band ${st['band']:.2f})"
+                )
+            else:
+                actions.append(f"SUPERTREND EXIT FAILED: {ticker} — check Alpaca manually")
+
+    if any("supertrend_exit" in (next((e for e in reversed(entries)
+            if e.get("symbol") == p["ticker"] and e.get("date") == today
+            and e.get("success")), {}) or {}) for p in positions):
+        save_executions(entries)
+
+    return actions
+
+
 # ── Action -1: Failed pullback exit (Fix A + Fix B) ───────────────────────────
 
 def check_failed_pullback(positions: list, today: str, now: datetime) -> list[str]:
@@ -1328,6 +1496,8 @@ def main():
     all_actions = []
 
     if not args.eod:
+        all_actions += check_supertrend_exit(positions, today)
+        positions = get_open_positions()
         all_actions += check_failed_pullback(positions, today, now)
         positions = get_open_positions()
         all_actions += check_quick_lock(positions, today, now)

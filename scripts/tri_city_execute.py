@@ -1089,7 +1089,8 @@ def main():
     parser.add_argument("--signal",   required=True,
                         help='Signal text from scanner, e.g. "BREAKOUT"')
     parser.add_argument("--setup",    required=True,
-                        choices=["BREAKOUT", "CONTINUATION", "PULLBACK", "EMA20_PULLBACK", "FADE"])
+                        choices=["BREAKOUT", "CONTINUATION", "PULLBACK", "EMA20_PULLBACK",
+                                 "FADE", "SUPERTREND_FLIP"])
     parser.add_argument("--cup",         action="store_true",
                         help="Cup pattern detected (high-conviction flag from scanner)")
     parser.add_argument("--htf",         action="store_true",
@@ -1273,9 +1274,11 @@ def main():
     spy_str = f"{spy_change:+.2f}%" if spy_change is not None else "N/A"
     if not args.quiet:
         print(f"SPY regime: {spy_regime} ({spy_str})")
-    if spy_regime == "BEAR" and not args.dry_run:
+    if spy_regime == "BEAR" and not args.dry_run and args.setup != "SUPERTREND_FLIP":
         print(f"SKIP: SPY bearish ({spy_str}) — blocking LONG entries.")
         sys.exit(0)
+    elif spy_regime == "BEAR" and args.setup == "SUPERTREND_FLIP":
+        print(f"WARN: SPY bearish ({spy_str}) — proceeding with SUPERTREND_FLIP (trend-follow override)")
 
     # ── Guard 5b: ATR volatility circuit breaker (Davey Ch. 6) ───────────────────
     # Blocks all entries when SPY is experiencing an extreme volatility spike (2.5x+ normal).
@@ -1296,10 +1299,11 @@ def main():
     is_afternoon = now.hour > PM_START_HOUR or (now.hour == PM_START_HOUR and now.minute >= PM_START_MINUTE)
     # #4: each setup has its own minimum; afternoon tightens the floor further
     _setup_rvol_floor = {
-        "BREAKOUT":       BREAKOUT_MIN_RVOL,
-        "CONTINUATION":   CONTINUATION_MIN_RVOL,
-        "PULLBACK":       PULLBACK_MIN_RVOL,
-        "EMA20_PULLBACK": EMA20_PB_MIN_RVOL,
+        "BREAKOUT":         BREAKOUT_MIN_RVOL,
+        "CONTINUATION":     CONTINUATION_MIN_RVOL,
+        "PULLBACK":         PULLBACK_MIN_RVOL,
+        "EMA20_PULLBACK":   EMA20_PB_MIN_RVOL,
+        "SUPERTREND_FLIP":  0.0,   # Supertrend signal — no RVOL floor
     }
     base_floor   = _setup_rvol_floor.get(args.setup, MIN_RVOL)
     rvol_floor   = max(base_floor, PM_MIN_RVOL) if is_afternoon else base_floor

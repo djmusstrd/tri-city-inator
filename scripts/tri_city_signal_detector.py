@@ -71,6 +71,7 @@ RVOL_FILE    = SHARED / "tri-city-rvol-state.json"
 VWAP_FILE    = SHARED / "tri-city-vwap-state.json"
 SIG_FILE     = SHARED / "tri-city-signals.json"
 LEVELS_FILE  = SHARED / "tri-city-levels.json"
+ST_STATE_FILE = SHARED / "tri-city-supertrend-state.json"
 
 CT = ZoneInfo("America/Chicago")
 
@@ -417,10 +418,15 @@ def fetch_vwap_data(symbol: str, now: datetime) -> dict | None:
         else:
             change_pct = 0.0
 
+        bars_list = [
+            {"open": float(o[i]), "high": float(h[i]), "low": float(l[i]), "close": float(c[i])}
+            for i in range(len(c))
+        ]
         return {
             "vwap":                round(vwap, 4),
             "last_bar":            last_bar,
             "change_from_open_pct": round(change_pct, 2),
+            "bars":                bars_list,
         }
     except Exception as e:
         logger.debug(f"fetch_vwap_data {symbol}: {e}")
@@ -463,6 +469,86 @@ def is_bounce_bar(bar: dict) -> bool:
         and lower_wick / bar_range > 0.20      # tested lower, rejected
         and body / bar_range > 0.25            # real body, not a doji
     )
+
+
+# ── Supertrend indicator ──────────────────────────────────────────────────────
+
+def compute_supertrend(bars: list[dict], period: int = 10, mult: float = 3.0) -> dict | None:
+    """
+    Compute Supertrend from OHLC bars (any timeframe).
+    Matches Pine Script v4 Supertrend logic: ATR(period) SMA, ratcheting bands.
+
+    Returns {"trend": 1|-1, "band": float} for the last bar, or None if
+    there are fewer than period+2 bars.
+
+    trend=1 = bullish (price above up-band); trend=-1 = bearish.
+    band = the active support (uptrend) or resistance (downtrend) level.
+    """
+    if len(bars) < period + 2:
+        return None
+
+    highs  = [b["high"]  for b in bars]
+    lows   = [b["low"]   for b in bars]
+    closes = [b["close"] for b in bars]
+
+    # True Range
+    tr = [highs[0] - lows[0]]
+    for i in range(1, len(bars)):
+        tr.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i]  - closes[i - 1]),
+        ))
+
+    # ATR = rolling SMA(TR, period)
+    atrs: list[float] = []
+    for i in range(period - 1, len(tr)):
+        atrs.append(sum(tr[i - period + 1 : i + 1]) / period)
+
+    up_bands: list[float] = []
+    dn_bands: list[float] = []
+    trends:   list[int]   = []
+
+    for i, atr_val in enumerate(atrs):
+        bar_idx = i + period - 1
+        hl2     = (highs[bar_idx] + lows[bar_idx]) / 2.0
+        raw_up  = hl2 - mult * atr_val
+        raw_dn  = hl2 + mult * atr_val
+
+        if i == 0:
+            up_bands.append(raw_up)
+            dn_bands.append(raw_dn)
+            trends.append(1)
+            continue
+
+        prev_up    = up_bands[-1]
+        prev_dn    = dn_bands[-1]
+        prev_close = closes[bar_idx - 1]
+        curr_close = closes[bar_idx]
+        prev_trend = trends[-1]
+
+        # Ratchet: support only rises; resistance only falls
+        up = max(raw_up, prev_up) if prev_close > prev_up else raw_up
+        dn = min(raw_dn, prev_dn) if prev_close < prev_dn else raw_dn
+
+        up_bands.append(up)
+        dn_bands.append(dn)
+
+        if prev_trend == -1 and curr_close > prev_dn:
+            trend = 1
+        elif prev_trend == 1 and curr_close < prev_up:
+            trend = -1
+        else:
+            trend = prev_trend
+
+        trends.append(trend)
+
+    if not trends:
+        return None
+
+    current_trend = trends[-1]
+    band = up_bands[-1] if current_trend == 1 else dn_bands[-1]
+    return {"trend": current_trend, "band": round(band, 4)}
 
 
 # ── Setup detection ───────────────────────────────────────────────────────────
@@ -729,6 +815,7 @@ def main():
     # This prevents stale Pine slots from a prior session triggering trades.
     candidate_gap: dict[str, float] = {}
     approved_symbols: set[str] = set()
+    all_candidate_syms: set[str] = set()   # full scan universe for Supertrend
     if CANDIDATES_FILE.exists():
         try:
             cdata = json.loads(CANDIDATES_FILE.read_text())
@@ -740,6 +827,7 @@ def main():
                 sym_c = c.get("symbol", "")
                 if sym_c:
                     candidate_gap[sym_c] = float(c.get("gap_pct", 0.0))
+                    all_candidate_syms.add(sym_c)
         except Exception:
             pass
 
@@ -781,6 +869,7 @@ def main():
     # 2. EMA20_PULLBACK basic candidates: time window + EMA/RSI/RVOL pre-filter
     #    (Pine won't flag these — we detect them independently)
     # 3. Locked-level candidates: symbols with locked ORH that may have live setups
+    # 4. All approved symbols — needed for Supertrend computation
     fetch_syms: set[str] = set(
         r["symbol"] for r in rows if r["signal"] not in ("---", "")
     )
@@ -794,6 +883,8 @@ def main():
     for r in rows:
         if r["symbol"] in locked_levels and r["signal"] in ("---", ""):
             fetch_syms.add(r["symbol"])
+    # Supertrend: fetch bars for all approved symbols in the scanner
+    fetch_syms |= approved_symbols & {r["symbol"] for r in rows}
 
     vwap_map: dict[str, dict | None] = {}
     for sym in fetch_syms:
@@ -802,9 +893,18 @@ def main():
             continue
         vwap_map[sym] = fetch_vwap_data(sym, now_ct)
 
+    # ── Load previous Supertrend state ─────────────────────────────────────
+    _prev_st_state: dict[str, dict] = {}
+    if ST_STATE_FILE.exists():
+        try:
+            _prev_st_state = json.loads(ST_STATE_FILE.read_text())
+        except Exception:
+            pass
+
     # ── Detect signals ──────────────────────────────────────────────────────
     signals: list[dict] = []
     new_vwap_state: dict[str, dict] = {}
+    _new_st_state:  dict[str, dict] = {}
     for row in rows:
         sym       = row["symbol"]
 
@@ -822,47 +922,156 @@ def main():
             locked_orh=lvl.get("orh", 0.0),
             locked_orl=lvl.get("orl", 0.0),
         )
-        if setup is None:
-            continue
+        if setup is not None:
+            # VWAP reclaim: prev cycle price was below VWAP, now above
+            prev = prev_vwap_state.get(sym, {})
+            prev_price = prev.get("price")
+            prev_vwap  = prev.get("vwap")
+            vwap_reclaim = (
+                vwap is not None and vwap > 0
+                and prev_price is not None and prev_vwap is not None
+                and prev_price < prev_vwap   # was below VWAP last cycle
+                and row["price"] >= vwap     # now at or above VWAP
+            )
 
-        # VWAP reclaim: prev cycle price was below VWAP, now above
-        prev = prev_vwap_state.get(sym, {})
-        prev_price = prev.get("price")
-        prev_vwap  = prev.get("vwap")
-        vwap_reclaim = (
-            vwap is not None and vwap > 0
-            and prev_price is not None and prev_vwap is not None
-            and prev_price < prev_vwap   # was below VWAP last cycle
-            and row["price"] >= vwap     # now at or above VWAP
-        )
+            vwap_above       = (vwap is not None and vwap > 0 and row["price"] >= vwap)
+            change_from_open = vwap_data.get("change_from_open_pct", 0.0) if vwap_data else 0.0
 
-        vwap_above       = (vwap is not None and vwap > 0 and row["price"] >= vwap)
-        change_from_open = vwap_data.get("change_from_open_pct", 0.0) if vwap_data else 0.0
+            signals.append({
+                "symbol":             sym,
+                "setup":              setup,
+                "price":              row["price"],
+                "orh":                row["orh"],
+                "orl":                row["orl"],
+                "rsi":                row["rsi"],
+                "ema_dev":            row["ema_dev"],
+                "rvol":               row["rvol"],
+                "cup":                row["cup"],
+                "htf":                sym in htf_set,
+                "resistance":         sym in resistance_set,
+                "bb_squeeze":         sym in bb_squeeze_set,
+                "earnings":           sym in earnings_set,
+                "gap_pct":            candidate_gap.get(sym, 0.0),
+                "vwap":               vwap,
+                "vwap_above":         vwap_above,
+                "vwap_reclaim":       vwap_reclaim,
+                "change_from_open":   change_from_open,
+            })
 
-        signals.append({
-            "symbol":             sym,
-            "setup":              setup,
-            "price":              row["price"],
-            "orh":                row["orh"],
-            "orl":                row["orl"],
-            "rsi":                row["rsi"],
-            "ema_dev":            row["ema_dev"],
-            "rvol":               row["rvol"],
-            "cup":                row["cup"],
-            "htf":                sym in htf_set,
-            "resistance":         sym in resistance_set,
-            "bb_squeeze":         sym in bb_squeeze_set,
-            "earnings":           sym in earnings_set,
-            "gap_pct":            candidate_gap.get(sym, 0.0),
-            "vwap":               vwap,
-            "vwap_above":         vwap_above,
-            "vwap_reclaim":       vwap_reclaim,
-            "change_from_open":   change_from_open,
-        })
+            # Track VWAP state for next cycle's reclaim detection
+            if vwap is not None:
+                new_vwap_state[sym] = {"price": row["price"], "vwap": vwap}
 
-        # Track VWAP state for next cycle's reclaim detection
-        if vwap is not None:
-            new_vwap_state[sym] = {"price": row["price"], "vwap": vwap}
+        # ── Supertrend flip detection (runs regardless of Pine signal) ───────
+        _st_bars = (vwap_data.get("bars") or []) if vwap_data else []
+        if _st_bars:
+            st = compute_supertrend(_st_bars)
+            if st is not None:
+                _new_st_state[sym] = {"trend": st["trend"], "band": st["band"]}
+                _prev_st_trend = _prev_st_state.get(sym, {}).get("trend")
+                logger.info(
+                    f"ST {sym}: trend={st['trend']} prev={_prev_st_trend} "
+                    f"band={st['band']:.2f} price={row['price']:.2f}"
+                )
+                # Flip bullish: previous state was bearish, now bullish
+                if st["trend"] == 1 and _prev_st_trend == -1:
+                    if not any(s["symbol"] == sym for s in signals):
+                        _vwap_above  = (vwap is not None and vwap > 0 and row["price"] >= vwap)
+                        _chg_open    = vwap_data.get("change_from_open_pct", 0.0) if vwap_data else 0.0
+                        signals.append({
+                            "symbol":           sym,
+                            "setup":            "SUPERTREND_FLIP",
+                            "price":            row["price"],
+                            "orh":              lvl.get("orh", row["orh"]),
+                            "orl":              lvl.get("orl", row["orl"]),
+                            "rsi":              row["rsi"],
+                            "ema_dev":          row["ema_dev"],
+                            "rvol":             row["rvol"],
+                            "cup":              row["cup"],
+                            "htf":              sym in htf_set,
+                            "resistance":       sym in resistance_set,
+                            "bb_squeeze":       sym in bb_squeeze_set,
+                            "earnings":         sym in earnings_set,
+                            "gap_pct":          candidate_gap.get(sym, 0.0),
+                            "vwap":             vwap,
+                            "vwap_above":       _vwap_above,
+                            "vwap_reclaim":     False,
+                            "change_from_open": _chg_open,
+                            "st_band":          st["band"],
+                        })
+
+    # ── Supertrend scan for daily candidates not in Pine table ─────────────
+    # The Pine scanner holds only the top-20 slots. All other candidates from
+    # the morning scan are checked here via a batch yfinance download.
+    _pine_syms = {r["symbol"] for r in rows}
+    _extra_syms = sorted(
+        (all_candidate_syms - _pine_syms - SKIP_VWAP_SYMBOLS)
+        & {sym for sym in all_candidate_syms}  # keep only real names
+    )
+    if _extra_syms:
+        try:
+            import yfinance as yf
+            import pandas as pd
+            _df_batch = yf.download(
+                _extra_syms, period="1d", interval="2m",
+                progress=False, auto_adjust=True, group_by="ticker"
+            )
+            for sym in _extra_syms:
+                try:
+                    if len(_extra_syms) == 1:
+                        df_sym = _df_batch
+                    else:
+                        lvl0 = _df_batch.columns.get_level_values(0)
+                        if sym not in lvl0:
+                            continue
+                        df_sym = _df_batch[sym]
+                    if df_sym is None or df_sym.empty:
+                        continue
+                    df_sym = df_sym.copy()
+                    df_sym.columns = [c.lower() for c in df_sym.columns]
+                    df_sym = df_sym.dropna(subset=["open", "high", "low", "close"])
+                    _bars = [
+                        {"open":  float(r["open"]),  "high": float(r["high"]),
+                         "low":   float(r["low"]),   "close": float(r["close"])}
+                        for _, r in df_sym.iterrows()
+                    ]
+                    st = compute_supertrend(_bars)
+                    if st is None:
+                        continue
+                    _new_st_state[sym] = {"trend": st["trend"], "band": st["band"]}
+                    _prev_st_trend = _prev_st_state.get(sym, {}).get("trend")
+                    logger.info(
+                        f"ST(extra) {sym}: trend={st['trend']} prev={_prev_st_trend} "
+                        f"band={st['band']:.2f}"
+                    )
+                    if st["trend"] == 1 and _prev_st_trend == -1:
+                        if not any(s["symbol"] == sym for s in signals):
+                            _lvl = locked_levels.get(sym, {})
+                            signals.append({
+                                "symbol":           sym,
+                                "setup":            "SUPERTREND_FLIP",
+                                "price":            _bars[-1]["close"],
+                                "orh":              _lvl.get("orh", 0.0),
+                                "orl":              _lvl.get("orl", 0.0),
+                                "rsi":              50.0,
+                                "ema_dev":          0.0,
+                                "rvol":             0.0,
+                                "cup":              False,
+                                "htf":              sym in htf_set,
+                                "resistance":       sym in resistance_set,
+                                "bb_squeeze":       sym in bb_squeeze_set,
+                                "earnings":         sym in earnings_set,
+                                "gap_pct":          candidate_gap.get(sym, 0.0),
+                                "vwap":             None,
+                                "vwap_above":       False,
+                                "vwap_reclaim":     False,
+                                "change_from_open": 0.0,
+                                "st_band":          st["band"],
+                            })
+                except Exception as _sym_err:
+                    logger.debug(f"ST extra {sym}: {_sym_err}")
+        except Exception as _batch_err:
+            logger.warning(f"ST extra batch download failed: {_batch_err}")
 
     # ── Detect RVOL spikes ──────────────────────────────────────────────────
     rvol_spikes = detect_rvol_spikes(rows, prev_rvol)
@@ -874,6 +1083,9 @@ def main():
         # Merge new VWAP state into existing (preserve other symbols)
         merged_vwap = {**prev_vwap_state, **new_vwap_state}
         VWAP_FILE.write_text(json.dumps(merged_vwap))
+        # Merge new Supertrend state (preserve symbols not in current scan)
+        merged_st = {**_prev_st_state, **_new_st_state}
+        ST_STATE_FILE.write_text(json.dumps(merged_st))
 
     # ── Write output ────────────────────────────────────────────────────────
     output = {
