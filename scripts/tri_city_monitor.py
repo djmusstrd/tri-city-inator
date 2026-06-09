@@ -179,7 +179,12 @@ def main() -> None:
     logger.info(f"── Cycle {now.strftime('%H:%M CT')} ─────────────────────────")
 
     if not table_is_fresh():
-        _write_summary(now, [], [], [], [])
+        # Table stale — skip signal detection but still run position management
+        rc, pm_out = run(["python", "-W", "ignore",
+                           str(SCRIPTS / "tri_city_position_manager.py")])
+        logger.info(f"PosMgr (no table): {pm_out[:200] or '(silent)'}")
+        pos_events = [ln.strip() for ln in pm_out.splitlines() if ln.strip()] if pm_out else []
+        _write_summary(now, [], [], pos_events, [])
         return
 
     # Step 1: signal detector

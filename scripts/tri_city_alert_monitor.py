@@ -23,13 +23,16 @@ Changing indicators: recreate the alert with the same contract JSON pasted in.
 No code changes needed.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-When a new alert fires:
-  1. Parse signal type from message (contract JSON > structured JSON > keyword > default)
-  2. Resolve symbol: per-symbol alerts use alert.symbol directly;
-     watchlist alerts scan all watchlist symbols via Alpaca to find which crossed ORH
-  3. Run entry guards (mirrors tri_city_execute.py)
-  4. If valid → call tri_city_execute.py --quiet
-  5. Send macOS + Telegram notification (executed or skipped w/ reason)
+Signal resolution (in priority order, no manual config required):
+  1. Contract JSON (tc_v key in message) → signal + optional direction field
+  2. Structured JSON (indicator/signal keys) → "buy"→BREAKOUT, "sell"→FADE
+  3. Plain text keywords → EMA20_PULLBACK / CONTINUATION / PULLBACK / BREAKOUT / FADE / BUY / SELL
+  4. alert_cond_id metadata → "buy"/"sell"/"bull"/"bear" in the condition name
+  5. Scanner table (tri-city-table.json) → live SIGNAL column for the resolved symbol
+  6. ALERT_SIGNAL_DEFAULT from .env (fallback of last resort)
+
+Direction (buy vs sell) is automatically detected at every layer. FADE signals
+execute a short-side trade; all other signals execute a long-side entry.
 
 Architecture mirrors tri_city_tv_poller.py exactly:
   - CDP connection to TradingView Desktop on port 9222
@@ -76,6 +79,7 @@ ALERT_CONFIG_FILE = SHARED / "tri-city-alert-config.json"
 LEVELS_FILE       = SHARED / "tri-city-levels.json"
 CANDIDATES_FILE   = SHARED / "tri-city-candidates.json"
 WATCHLIST_SEEDS   = SHARED / "tri-city-watchlist-seeds.json"
+TABLE_FILE        = SHARED / "tri-city-table.json"
 LOG_FILE_EXEC     = WORKSPACE / "logs" / "tri-city-executions.json"
 PID_FILE          = SHARED / "tri-city-alert-monitor.pid"
 
@@ -259,33 +263,53 @@ def save_alert_state(state: dict) -> None:
 
 # ── Alert message parser ───────────────────────────────────────────────────────
 # Indicator-agnostic: works with any alert source. Parsing chain:
-#   1. Contract JSON (tc_v key) → trust signal field directly
+#   1. Contract JSON (tc_v key) → trust signal + direction fields directly
 #   2. Structured JSON (indicator + signal keys) → map buy/sell → signal type
 #   3. Keyword scan in plain text → longest-match-first
-#   4. Returns (None, None) → caller uses ALERT_SIGNAL_DEFAULT
+#   4. alert_cond_id metadata → "buy"/"sell" in condition name → BREAKOUT/FADE
+#   5. Returns (None, None) → caller checks scanner table, then ALERT_SIGNAL_DEFAULT
 
 _VALID_SIGNALS = ("EMA20_PULLBACK", "CONTINUATION", "PULLBACK", "BREAKOUT", "FADE")
 _TEMPLATE_TICKERS = {"{{ticker}}", "{{TICKER}}", "", "none", "null"}
 
 
-def parse_alert_message_v2(msg: str | None) -> tuple[str | None, str | None]:
+def parse_alert_message_v2(
+    msg: str | None,
+    alert_cond_id: str | None = None,
+) -> tuple[str | None, str | None]:
     """
     Returns (signal, ticker_if_known).
 
     signal: BREAKOUT | CONTINUATION | PULLBACK | EMA20_PULLBACK | FADE | None
-    ticker_if_known: resolved ticker string if the message contained one, else None.
-      - None means caller must resolve the symbol via watchlist scan.
-      - Non-None means the message explicitly named the symbol (contract or structured JSON).
+      None means caller should check the scanner table then fall back to ALERT_SIGNAL_DEFAULT.
+
+    ticker_if_known: resolved ticker if the message contained one, else None.
+      None means caller must resolve via watchlist scan.
+
+    alert_cond_id: the TV alert condition ID string (e.g. "Buy_Signal", "sell_signal",
+      "plot_6"). Used as a last-resort buy/sell direction hint when the message gives
+      no useful signal info.
     """
     if not msg:
+        # Still try alert_cond_id even with no message
+        if alert_cond_id:
+            cond = alert_cond_id.lower()
+            if any(w in cond for w in ("sell", "short", "bear")):
+                return "FADE", None
+            if any(w in cond for w in ("buy", "long", "bull", "breakout")):
+                return "BREAKOUT", None
         return None, None
 
-    # 1. Contract JSON: tc_v key present → trust signal field completely
+    # 1. Contract JSON: tc_v key present → trust signal + direction fields completely
     try:
         data = json.loads(msg)
         if "tc_v" in data:
             raw_signal = str(data.get("signal", "")).upper().strip()
             signal = raw_signal if raw_signal in _VALID_SIGNALS else "BREAKOUT"
+            # Optional direction override: "sell"/"short" maps to FADE regardless of signal field
+            direction = str(data.get("direction", "")).lower()
+            if direction in ("sell", "short") and signal not in ("FADE",):
+                signal = "FADE"
             ticker_raw = str(data.get("ticker", "")).upper().strip()
             ticker = None if ticker_raw.lower() in _TEMPLATE_TICKERS else ticker_raw
             return signal, ticker
@@ -317,8 +341,49 @@ def parse_alert_message_v2(msg: str | None) -> tuple[str | None, str | None]:
     for sig in _VALID_SIGNALS:
         if sig in msg_upper:
             return sig, None
+    # Plain text buy/sell keywords
+    if any(w in msg_upper for w in ("SELL SIGNAL", "SELL", "SHORT", "BEARISH")):
+        return "FADE", None
+    if any(w in msg_upper for w in ("BUY SIGNAL", "BUY", "LONG", "BULLISH")):
+        return "BREAKOUT", None
+
+    # 4. alert_cond_id metadata: last resort before giving up
+    if alert_cond_id:
+        cond = alert_cond_id.lower()
+        if any(w in cond for w in ("sell", "short", "bear")):
+            return "FADE", None
+        if any(w in cond for w in ("buy", "long", "bull", "breakout")):
+            return "BREAKOUT", None
 
     return None, None
+
+
+def get_scanner_signal(symbol: str) -> str | None:
+    """
+    Look up a symbol's current SIGNAL in the live scanner table (tri-city-table.json).
+    Returns a valid signal string or None if symbol not found / table stale.
+
+    The scanner table is written by the TV poller every 3 minutes. If it's more
+    than 10 minutes old we treat it as stale and ignore it.
+    """
+    try:
+        if not TABLE_FILE.exists():
+            return None
+        age = datetime.now().timestamp() - TABLE_FILE.stat().st_mtime
+        if age > 600:  # 10 min stale threshold
+            return None
+        rows = json.loads(TABLE_FILE.read_text())
+        sym_upper = symbol.upper()
+        for row in rows:
+            parts = [p.strip() for p in row.split("|")]
+            # Row format: SYMBOL | PRICE | RSI | EMA DEV% | RVOL | ORH/ORL | CUP | SMA↑ | SIGNAL
+            if len(parts) >= 9 and parts[0].upper() == sym_upper:
+                sig = parts[8].upper().strip()
+                if sig in _VALID_SIGNALS:
+                    return sig
+    except Exception:
+        pass
+    return None
 
 
 # ── Market data helpers ────────────────────────────────────────────────────────
@@ -936,16 +1001,17 @@ def process_new_alert(alert: dict, levels: dict, execs_today: list[dict]) -> str
 
     Returns: "executed" | "skipped:<reason>" | "post_cutoff" | "no_candidates" | "error:<detail>"
     """
-    alert_id = str(alert.get("alert_id", ""))
-    raw_sym  = alert.get("symbol", "")
-    msg      = alert.get("message", "")
-    now      = datetime.now(CT)
+    alert_id    = str(alert.get("alert_id", ""))
+    raw_sym     = alert.get("symbol", "")
+    msg         = alert.get("message", "")
+    now         = datetime.now(CT)
+    # Extract alert_cond_id from nested condition metadata
+    cond_id     = alert.get("condition", {}).get("alert_cond_id", "") or ""
 
-    # Parse signal + any resolved ticker from message
-    signal, ticker_from_msg = parse_alert_message_v2(msg)
-    if signal is None:
-        signal = ALERT_SIGNAL_DEFAULT
-        logger.info(f"Alert {alert_id}: no signal in msg — using default {ALERT_SIGNAL_DEFAULT}")
+    # Step 1: parse signal from message + alert_cond_id metadata
+    signal, ticker_from_msg = parse_alert_message_v2(msg, alert_cond_id=cond_id)
+
+    # Signal is still unknown — will try scanner table after symbol is resolved (step 3)
 
     # Determine candidates
     if raw_sym.startswith("WATCHLIST:"):
@@ -968,13 +1034,26 @@ def process_new_alert(alert: dict, levels: dict, execs_today: list[dict]) -> str
             return "parse_error"
         candidates = [bare]
 
-    logger.info(f"Alert {alert_id}: {signal} signal, candidates={candidates}")
-
-    # Evaluate each candidate; stop at first successful execution
+    # Step 3: for each candidate, try scanner table signal lookup before defaulting
+    # This lets any indicator on the watchlist benefit from the scanner's live SIGNAL
+    # column without requiring manual message configuration.
     last_outcome = "no_candidates"
     for symbol in candidates:
         try:
-            outcome = _evaluate_and_execute(symbol, signal, alert_id, levels, execs_today, now)
+            # Resolve final signal for this symbol
+            resolved_signal = signal
+            if resolved_signal is None:
+                scanner_sig = get_scanner_signal(symbol)
+                if scanner_sig:
+                    resolved_signal = scanner_sig
+                    logger.info(f"Alert {alert_id} {symbol}: signal from scanner table → {resolved_signal}")
+                else:
+                    resolved_signal = ALERT_SIGNAL_DEFAULT
+                    logger.info(f"Alert {alert_id} {symbol}: no signal found — using default {ALERT_SIGNAL_DEFAULT}")
+
+            logger.info(f"Alert {alert_id}: {resolved_signal} signal, symbol={symbol}")
+
+            outcome = _evaluate_and_execute(symbol, resolved_signal, alert_id, levels, execs_today, now)
             last_outcome = outcome
             if outcome == "executed":
                 return "executed"

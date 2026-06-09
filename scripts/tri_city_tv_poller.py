@@ -164,23 +164,30 @@ def _drain_until_id(ws, target_id: int, max_msgs: int = 50) -> dict | None:
 _PINE_TABLE_JS = """
 (function() {
   var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-  var sources = chart.model().model().dataSources();
+  var panes = chart.model().panes();
   var results = [];
-  for (var si = 0; si < sources.length; si++) {
-    var s = sources[si];
-    if (!s.metaInfo) continue;
-    try {
-      var meta = s.metaInfo();
-      var name = meta.description || meta.shortDescription || '';
-      if (!name || name.indexOf('Inator') === -1) continue;
+  for (var pi = 0; pi < panes.length; pi++) {
+    var sources = panes[pi].dataSources();
+    for (var si = 0; si < sources.length; si++) {
+      var s = sources[si];
+      var isTarget = false;
+      try { if (s.id && s.id() === 'Kbzkkm') isTarget = true; } catch(e) {}
+      if (!isTarget && s.metaInfo) {
+        try {
+          var meta = s.metaInfo();
+          var name = meta.description || meta.shortDescription || '';
+          if (name.indexOf('Inator') !== -1) isTarget = true;
+        } catch(e) {}
+      }
+      if (!isTarget) continue;
       var g = s._graphics;
       if (!g || !g._primitivesCollection) continue;
       var pc = g._primitivesCollection;
       var items = [];
       try {
-        var outer = pc.dwgtablecells;       // Map
+        var outer = pc.dwgtablecells;
         if (outer) {
-          var inner = outer.get('tableCells'); // R object with _primitivesDataById
+          var inner = outer.get('tableCells');
           if (inner && inner._primitivesDataById && inner._primitivesDataById.size > 0) {
             inner._primitivesDataById.forEach(function(v, id) {
               items.push({id: String(id), raw: {tid: v.tid||0, row: v.row||0, col: v.col||0, t: v.t||''}});
@@ -188,8 +195,10 @@ _PINE_TABLE_JS = """
           }
         }
       } catch(e) {}
-      if (items.length > 0) results.push({name: name, count: items.length, items: items});
-    } catch(e) {}
+      var studyName = 'Tri-City Inator';
+      try { var m = s.metaInfo(); studyName = m.description || m.shortDescription || studyName; } catch(e) {}
+      if (items.length > 0) results.push({name: studyName, count: items.length, items: items});
+    }
   }
   return results;
 })()
@@ -387,13 +396,12 @@ def run_cycle() -> None:
     raw = cdp_evaluate(ws_url, _PINE_TABLE_JS)
     rows = process_pine_tables(raw) if raw else None
 
-    if not rows:
-        logger.warning("Pine table returned no rows — TradingView may be loading")
-        return
-
-    # (b) Write tri-city-table.json
-    TABLE_FILE.write_text(json.dumps(rows))
-    logger.info(f"Wrote table.json: {len(rows)} rows")
+    # (b) Write tri-city-table.json only when we have data; position management still runs regardless
+    if rows:
+        TABLE_FILE.write_text(json.dumps(rows))
+        logger.info(f"Wrote table.json: {len(rows)} rows")
+    else:
+        logger.warning("Pine table returned no rows — signal detection skipped; position management will still run")
 
     # (c) Run tri_city_monitor.py (detect + execute + manage + writes summary.json)
     rc = subprocess.run(
