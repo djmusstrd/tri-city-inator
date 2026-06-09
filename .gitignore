@@ -28,6 +28,7 @@ shared/
 logs/*.json
 logs/*.log
 logs/*.gz
+logs/reports/
 
 # Spreadsheets / exports
 *.numbers

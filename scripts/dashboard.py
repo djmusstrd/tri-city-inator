@@ -54,6 +54,37 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── Access gate (shared password; traffic is HTTPS via the Cloudflare tunnel) ──
+import hmac as _hmac
+def _require_password():
+    _pw = os.getenv("DASH_PASSWORD", "")
+    if not _pw:
+        return  # no password set → open (local use)
+    # Bookmarkable token: append ?k=<password> to the URL to auto-log-in.
+    # Save that link / "Add to Home Screen" on your phone and you never type again.
+    try:
+        _tok = st.query_params.get("k", "")
+    except Exception:
+        try:
+            _tok = st.experimental_get_query_params().get("k", [""])[0]
+        except Exception:
+            _tok = ""
+    if _tok and _hmac.compare_digest(_tok, _pw):
+        st.session_state["_auth_ok"] = True
+    if st.session_state.get("_auth_ok"):
+        return
+    def _verify():
+        if _hmac.compare_digest(st.session_state.get("_pw_input", ""), _pw):
+            st.session_state["_auth_ok"] = True
+            st.session_state.pop("_pw_input", None)
+        else:
+            st.session_state["_auth_ok"] = False
+    st.text_input("🔒 Password", type="password", key="_pw_input", on_change=_verify)
+    if st.session_state.get("_auth_ok") is False:
+        st.error("Incorrect password")
+    st.stop()
+_require_password()
+
 st.markdown(
     """
     <style>
