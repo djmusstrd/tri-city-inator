@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 
 WORKSPACE = Path.home() / "tri-city-inator"
 WATCHLIST_SEEDS = WORKSPACE / "shared" / "tri-city-watchlist-seeds.json"
+EVERGREEN_FILE  = WORKSPACE / "shared" / "tri-city-evergreen.json"
 sys.path.insert(0, str(WORKSPACE))
 
 try:
@@ -885,6 +886,58 @@ def main():
                 print(f"  SKIP {bare} — yfinance lookup failed")
     except ImportError:
         tv_symbols = candidate_tv  # fallback: no validation
+
+
+    # ── Evergreen symbol blending ─────────────────────────────────────────────
+    # If shared/tri-city-evergreen.json exists and is < 7 days old, blend top
+    # evergreen symbols that are also gapping today into the tv_symbols list.
+    # Slots: 14 scanner gap-ups + up to 6 evergreen names. Backward-compatible:
+    # if the file is missing or stale, existing logic is used unchanged.
+    try:
+        from datetime import date as _date
+        _ev_fresh = False
+        _ev_syms: list[str] = []
+        if EVERGREEN_FILE.exists():
+            _ev_data = json.loads(EVERGREEN_FILE.read_text())
+            _ev_gen  = _ev_data.get("generated", "")
+            if _ev_gen:
+                import datetime as _dt
+                _ev_age = (_dt.date.today() - _dt.date.fromisoformat(_ev_gen)).days
+                _ev_fresh = _ev_age <= 7
+            if _ev_fresh:
+                _ev_syms = [s["symbol"] for s in _ev_data.get("symbols", [])]
+
+        if _ev_fresh and _ev_syms:
+            # Symbols gapping today (bare tickers in ranked list)
+            _gapping_today = {s["symbol"] for s in ranked}
+            # TV-symbol lookup: bare ticker -> exchange-prefixed tv_symbol
+            _sym_to_tv = {
+                s["symbol"]: s.get("tv_symbol", f"NASDAQ:{s['symbol']}")
+                for s in ranked
+            }
+            # Top evergreen names that are ALSO gapping today (up to 6 slots)
+            _ev_gapping = [
+                sym for sym in _ev_syms
+                if sym in _gapping_today
+            ][:6]
+            # Build blended list: up to 14 from scanner + up to 6 evergreen
+            _scanner_only = [t for t in tv_symbols
+                             if t.split(":")[-1] not in {s.split(":")[-1] for s in [
+                                 _sym_to_tv.get(sym, f"NASDAQ:{sym}")
+                                 for sym in _ev_gapping
+                             ]}][:14]
+            _ev_tv_syms = [
+                _sym_to_tv.get(sym, f"NASDAQ:{sym}") for sym in _ev_gapping
+            ]
+            tv_symbols = _ev_tv_syms + _scanner_only
+            if _ev_gapping:
+                print(f"  Evergreen blend: {len(_ev_gapping)} proven names gapping today: "
+                      f"{_ev_gapping} + {len(_scanner_only)} scanner names")
+        elif EVERGREEN_FILE.exists() and not _ev_fresh:
+            print("  Evergreen file is stale (>7 days) — using scanner-only list.")
+    except Exception as _blend_err:
+        logger.debug(f"evergreen blend: {_blend_err}")
+    # ─────────────────────────────────────────────────────────────────────────
 
     print(f"\n  TV WATCHLIST (top 20, parabolic excluded, exchange-prefixed):")
     print(f"  {', '.join(tv_symbols)}")
