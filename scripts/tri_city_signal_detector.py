@@ -443,6 +443,102 @@ def fetch_vwap_data(symbol: str, now: datetime) -> dict | None:
         return None
 
 
+# ── Premarket / after-hours bars (CONSOL_BREAK base detection) ───────────────
+# fetch_vwap_data() above is regular-session-only (yfinance period="1d" without
+# prepost), so a base that formed premarket — or that spans yesterday's
+# after-hours into today's premarket on an earnings gapper — is invisible to
+# detect_consol_break(). This fetch fills that gap WITHOUT touching VWAP:
+# the bars returned here are only ever prepended to detect_consol_break's
+# input, never used for the VWAP/last_bar/change_from_open calc above.
+#
+# Premarket/AH bars are static once the regular session opens, so callers
+# should fetch once per symbol per day via the on-disk cache below
+# (tri-city-premarket-bars.json) rather than re-downloading every cycle.
+
+PREMARKET_BARS_FILE = SHARED / "tri-city-premarket-bars.json"
+
+
+def fetch_premarket_bars(symbol: str, now: datetime) -> list[dict]:
+    """
+    Fetch yesterday's after-hours (>=15:00 CT) + today's premarket (<8:30 CT)
+    2-min bars via yfinance prepost=True, combined in chronological order.
+
+    Returns [] on any failure or if no extended-hours data is available —
+    callers must never block on missing data.
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+
+        df = yf.download(symbol, period="2d", interval="2m", prepost=True,
+                          progress=False, auto_adjust=True)
+        if df.empty:
+            return []
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+
+        df.index = pd.to_datetime(df.index)
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        ct_index = df.index.tz_convert("America/Chicago")
+        ts = pd.Series(ct_index, index=df.index)
+
+        today_str = now.strftime("%Y-%m-%d")
+        yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        session_open = now.replace(hour=8, minute=30, second=0, microsecond=0)
+        ah_start = (now - timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+
+        is_yesterday_ah = (ts.dt.strftime("%Y-%m-%d") == yesterday_str) & (ts >= ah_start)
+        is_today_pm     = (ts.dt.strftime("%Y-%m-%d") == today_str) & (ts < session_open)
+        df_ext = df[(is_yesterday_ah | is_today_pm).values]
+        if df_ext.empty:
+            return []
+
+        return [
+            {"open": float(o), "high": float(h), "low": float(l), "close": float(c),
+             "volume": float(v)}
+            for o, h, l, c, v in zip(
+                df_ext["open"].astype(float), df_ext["high"].astype(float),
+                df_ext["low"].astype(float), df_ext["close"].astype(float),
+                df_ext["volume"].astype(float),
+            )
+        ]
+    except Exception as e:
+        logger.debug(f"fetch_premarket_bars {symbol}: {e}")
+        return []
+
+
+def get_premarket_bars_cached(symbols: set[str], now: datetime) -> dict[str, list[dict]]:
+    """
+    Load today's premarket/AH bars from tri-city-premarket-bars.json, fetching
+    and caching any symbols not yet present. Premarket bars don't change once
+    the regular session opens, so this avoids a heavy 2-day yfinance fetch
+    every 3-min poller cycle.
+    """
+    today_str = now.strftime("%Y-%m-%d")
+    cache: dict = {}
+    if PREMARKET_BARS_FILE.exists():
+        try:
+            cache = json.loads(PREMARKET_BARS_FILE.read_text())
+        except Exception:
+            cache = {}
+    if cache.get("_date") != today_str:
+        cache = {"_date": today_str}
+
+    missing = [sym for sym in symbols if sym not in cache]
+    for sym in missing:
+        cache[sym] = fetch_premarket_bars(sym, now)
+
+    if missing:
+        try:
+            PREMARKET_BARS_FILE.write_text(json.dumps(cache))
+        except Exception as e:
+            logger.debug(f"get_premarket_bars_cached: write failed: {e}")
+
+    return {sym: cache.get(sym, []) for sym in symbols}
+
+
 # ── Candlestick quality filters ───────────────────────────────────────────────
 
 def is_rejection_bar(bar: dict) -> bool:
@@ -519,11 +615,17 @@ def detect_consol_break(bars: list[dict], current_price: float, current_rvol: fl
     lows    = [b["low"] for b in bars]
     volumes = [b.get("volume", 0.0) for b in bars]
 
-    avg_volume = sum(volumes) / len(volumes)
+    # Average volume from regular-session bars only — premarket/AH bars often
+    # report volume == 0 from yfinance and would otherwise drag the average
+    # down, making regular-session bars look artificially "quiet".
+    nonzero_volumes = [v for v in volumes if v > 0]
+    avg_volume = sum(nonzero_volumes) / len(nonzero_volumes) if nonzero_volumes else 0.0
     if avg_volume <= 0:
         return None
 
-    # Count consecutive consolidating bars at the tail of the completed history
+    # Count consecutive consolidating bars at the tail of the completed history.
+    # A zero-volume bar (premarket/AH) always passes the volume check —
+    # tightness of range is the only signal available for those bars.
     consol_count = 0
     for i in range(len(bars) - 1, -1, -1):
         rng_pct = (highs[i] - lows[i]) / closes[i] * 100 if closes[i] > 0 else 100.0
@@ -641,7 +743,8 @@ def compute_supertrend(bars: list[dict], period: int = 10, mult: float = 3.0) ->
 def detect_setup(row: dict, now: datetime | None = None,
                   vwap_data: dict | None = None,
                   locked_orh: float = 0.0, locked_orl: float = 0.0,
-                  candidate_gap: dict | None = None) -> str | None:
+                  candidate_gap: dict | None = None,
+                  premarket_bars: list[dict] | None = None) -> str | None:
     """
     Apply setup rules in priority order.
     Returns "CONSOL_BREAK" | "BREAKOUT" | "CONTINUATION" | "PULLBACK" | "EMA20_PULLBACK" | None.
@@ -694,9 +797,12 @@ def detect_setup(row: dict, now: datetime | None = None,
     # Catches a move at the moment it breaks out of a tight, quiet multi-bar
     # base — before BREAKOUT/CONTINUATION confirm above ORH (which lag the
     # move by several %, the "VELO entered at $28.70 instead of $26.42" problem).
+    # premarket_bars (yesterday AH + today PM) are prepended so a base that
+    # formed before the regular session opened is still visible.
     # Requires price above VWAP and not already overbought (don't chase).
     if vwap_data and vwap_data.get("bars"):
-        consol = detect_consol_break(vwap_data["bars"], price, rvol)
+        combined_bars = (premarket_bars or []) + vwap_data["bars"]
+        consol = detect_consol_break(combined_bars, price, rvol)
         if (consol
                 and (vwap is None or vwap <= 0 or price > vwap)
                 and rsi < CONSOL_BREAK_RSI_MAX):
@@ -1001,6 +1107,9 @@ def main():
             continue
         vwap_map[sym] = fetch_vwap_data(sym, now_ct)
 
+    # Premarket/AH bars for CONSOL_BREAK base detection (cached once per day)
+    premarket_map = get_premarket_bars_cached(fetch_syms - SKIP_VWAP_SYMBOLS, now_ct)
+
     # ── Load previous Supertrend state ─────────────────────────────────────
     _prev_st_state: dict[str, dict] = {}
     if ST_STATE_FILE.exists():
@@ -1030,6 +1139,7 @@ def main():
             locked_orh=lvl.get("orh", 0.0),
             locked_orl=lvl.get("orl", 0.0),
             candidate_gap=candidate_gap,
+            premarket_bars=premarket_map.get(sym),
         )
         if setup is not None:
             # VWAP reclaim: prev cycle price was below VWAP, now above
