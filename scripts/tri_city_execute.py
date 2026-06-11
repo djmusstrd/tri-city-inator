@@ -109,6 +109,7 @@ BREAKOUT_MIN_RVOL      = float(os.getenv("BREAKOUT_MIN_RVOL",      "3.0"))
 CONTINUATION_MIN_RVOL  = float(os.getenv("CONTINUATION_MIN_RVOL",  "2.5"))
 PULLBACK_MIN_RVOL      = float(os.getenv("PULLBACK_MIN_RVOL",       "1.5"))
 EMA20_PB_MIN_RVOL      = float(os.getenv("EMA20_PB_MIN_RVOL",       "0.8"))  # lower — mid-morning vol distributes
+CONSOL_BREAK_MIN_RVOL  = float(os.getenv("CONSOL_BREAK_MIN_RVOL",   "1.0"))  # low — entry is BEFORE the volume surge
 EARNINGS_GAP_RVOL_FLOOR = float(os.getenv("EARNINGS_GAP_RVOL_FLOOR", "0.4"))  # large-cap earnings gaps valid at 0.4x
 
 # BREAKOUT extension guardrails
@@ -1090,7 +1091,7 @@ def main():
                         help='Signal text from scanner, e.g. "BREAKOUT"')
     parser.add_argument("--setup",    required=True,
                         choices=["BREAKOUT", "CONTINUATION", "PULLBACK", "EMA20_PULLBACK",
-                                 "FADE", "SUPERTREND_FLIP"])
+                                 "FADE", "SUPERTREND_FLIP", "CONSOL_BREAK"])
     parser.add_argument("--cup",         action="store_true",
                         help="Cup pattern detected (high-conviction flag from scanner)")
     parser.add_argument("--htf",         action="store_true",
@@ -1304,6 +1305,7 @@ def main():
         "PULLBACK":         PULLBACK_MIN_RVOL,
         "EMA20_PULLBACK":   EMA20_PB_MIN_RVOL,
         "SUPERTREND_FLIP":  0.0,   # Supertrend signal — no RVOL floor
+        "CONSOL_BREAK":     CONSOL_BREAK_MIN_RVOL,  # low — entry is BEFORE the volume surge
     }
     base_floor   = _setup_rvol_floor.get(args.setup, MIN_RVOL)
     rvol_floor   = max(base_floor, PM_MIN_RVOL) if is_afternoon else base_floor

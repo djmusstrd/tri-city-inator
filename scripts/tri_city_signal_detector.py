@@ -114,6 +114,15 @@ FADE_RSI_MIN         = 60    # overbought on open
 FADE_WINDOW_END_HOUR = 10    # stop detecting FADE after 10:00 CT (fade window closes)
 FADE_WINDOW_END_MIN  = 0
 
+# ── CONSOL_BREAK (consolidation/base breakout) thresholds ────────────────────
+# Catches a move at the moment it breaks out of a tight multi-bar base, before
+# BREAKOUT/CONTINUATION confirm above ORH (which lag the move by several %).
+CONSOL_BREAK_MIN_BARS      = int(__import__("os").getenv("CONSOL_BREAK_MIN_BARS", "3"))    # consecutive basing bars required
+CONSOL_BREAK_RANGE_PCT     = float(__import__("os").getenv("CONSOL_BREAK_RANGE_PCT", "3.0"))  # bar (high-low)/close < this % = "tight"
+CONSOL_BREAK_VOL_RATIO     = float(__import__("os").getenv("CONSOL_BREAK_VOL_RATIO", "1.2"))  # bar volume < avg*this = "quiet" (basing)
+CONSOL_BREAK_BREAKOUT_RVOL = float(__import__("os").getenv("CONSOL_BREAK_BREAKOUT_RVOL", "1.2"))  # breakout bar volume >= avg*this = "volume returning"
+CONSOL_BREAK_RSI_MAX       = float(__import__("os").getenv("CONSOL_BREAK_RSI_MAX", "75.0"))  # don't chase if already overbought
+
 # VWAP settings (Aziz methodology)
 VWAP_PROXIMITY_PCT    = 0.003  # 0.3% — price within this % of VWAP = "near VWAP"
 VWAP_STOP_OFFSET      = 0.05   # 5 cents below VWAP for VWAP-reclaim stops
@@ -419,7 +428,8 @@ def fetch_vwap_data(symbol: str, now: datetime) -> dict | None:
             change_pct = 0.0
 
         bars_list = [
-            {"open": float(o[i]), "high": float(h[i]), "low": float(l[i]), "close": float(c[i])}
+            {"open": float(o[i]), "high": float(h[i]), "low": float(l[i]), "close": float(c[i]),
+             "volume": float(v[i])}
             for i in range(len(c))
         ]
         return {
@@ -469,6 +479,81 @@ def is_bounce_bar(bar: dict) -> bool:
         and lower_wick / bar_range > 0.20      # tested lower, rejected
         and body / bar_range > 0.25            # real body, not a doji
     )
+
+
+# ── Consolidation breakout detection ──────────────────────────────────────────
+
+def detect_consol_break(bars: list[dict], current_price: float, current_rvol: float = 0.0) -> dict | None:
+    """
+    Detect a live breakout above a tight, quiet multi-bar consolidation range.
+
+    bars: list of {open, high, low, close, volume} dicts, oldest first
+          (as returned by fetch_vwap_data's "bars" key) — may include a
+          still-forming final bar with volume == 0, which is dropped.
+    current_price: live scanner price (may be ahead of the last completed bar).
+    current_rvol:  live scanner RVOL — used as the "volume returning" check
+                   since per-bar volume always lags the live price by one bar.
+
+    A completed bar is "consolidating" if its range is tight
+    (<CONSOL_BREAK_RANGE_PCT of close) and its volume is below
+    CONSOL_BREAK_VOL_RATIO x the session's average volume (quiet basing,
+    not a volume surge).
+
+    Fires when the most recent CONSOL_BREAK_MIN_BARS+ completed bars were all
+    consolidating AND current_price breaks above that base's high AND live
+    RVOL has returned (>=CONSOL_BREAK_BREAKOUT_RVOL x).
+
+    Returns {"range_high", "range_low", "bars_in_base"} on a fresh breakout,
+    else None.
+    """
+    # Drop a still-forming final bar (yfinance reports it with volume == 0)
+    bars = list(bars)
+    while bars and bars[-1].get("volume", 0.0) == 0:
+        bars = bars[:-1]
+
+    if len(bars) < CONSOL_BREAK_MIN_BARS + 1:
+        return None
+
+    closes  = [b["close"] for b in bars]
+    highs   = [b["high"] for b in bars]
+    lows    = [b["low"] for b in bars]
+    volumes = [b.get("volume", 0.0) for b in bars]
+
+    avg_volume = sum(volumes) / len(volumes)
+    if avg_volume <= 0:
+        return None
+
+    # Count consecutive consolidating bars at the tail of the completed history
+    consol_count = 0
+    for i in range(len(bars) - 1, -1, -1):
+        rng_pct = (highs[i] - lows[i]) / closes[i] * 100 if closes[i] > 0 else 100.0
+        is_consolidating = (
+            rng_pct < CONSOL_BREAK_RANGE_PCT
+            and volumes[i] < avg_volume * CONSOL_BREAK_VOL_RATIO
+        )
+        if is_consolidating:
+            consol_count += 1
+        else:
+            break
+
+    if consol_count < CONSOL_BREAK_MIN_BARS:
+        return None
+
+    base_highs = highs[-consol_count:]
+    base_lows  = lows[-consol_count:]
+    range_high = max(base_highs)
+    range_low  = min(base_lows)
+
+    volume_returning = current_rvol >= CONSOL_BREAK_BREAKOUT_RVOL
+
+    if current_price > range_high and volume_returning:
+        return {
+            "range_high":   range_high,
+            "range_low":    range_low,
+            "bars_in_base": consol_count,
+        }
+
+    return None
 
 
 # ── Supertrend indicator ──────────────────────────────────────────────────────
@@ -559,8 +644,12 @@ def detect_setup(row: dict, now: datetime | None = None,
                   candidate_gap: dict | None = None) -> str | None:
     """
     Apply setup rules in priority order.
-    Returns "BREAKOUT" | "CONTINUATION" | "PULLBACK" | "EMA20_PULLBACK" | None.
+    Returns "CONSOL_BREAK" | "BREAKOUT" | "CONTINUATION" | "PULLBACK" | "EMA20_PULLBACK" | None.
 
+    CONSOL_BREAK:    New signal. Price breaks above a tight multi-bar consolidation
+                     range with volume returning. Fires BEFORE Pine's BREAKOUT/
+                     CONTINUATION confirm above ORH — catches the move at its origin
+                     instead of chasing it after it has already extended.
     CONTINUATION:    requires MACD line > Signal line (Ch 10, Papp).
     BREAKOUT:        EMA ribbon expanding → RSI threshold lowered by 5 pts.
                      ORH/ORL spread > 8% of price → blocked (wide range = indecision).
@@ -572,6 +661,7 @@ def detect_setup(row: dict, now: datetime | None = None,
     VWAP filter (Aziz): BREAKOUT and CONTINUATION blocked when price < VWAP.
     PULLBACK is not blocked (a dip to VWAP is the Aziz entry zone).
     EMA20_PULLBACK requires price > VWAP (EMA20 > VWAP = bullish ribbon).
+    CONSOL_BREAK requires price > VWAP (don't chase a base-break below VWAP).
     All VWAP/bar checks are optional — never block when data unavailable.
     """
     sig      = row["signal"]
@@ -599,6 +689,23 @@ def detect_setup(row: dict, now: datetime | None = None,
 
     above_orh = orh > 0 and price > orh
     ribbon    = ema_ribbon_trend(row["symbol"], now)
+
+    # SETUP 0: CONSOL_BREAK — consolidation/base breakout (early entry)
+    # Catches a move at the moment it breaks out of a tight, quiet multi-bar
+    # base — before BREAKOUT/CONTINUATION confirm above ORH (which lag the
+    # move by several %, the "VELO entered at $28.70 instead of $26.42" problem).
+    # Requires price above VWAP and not already overbought (don't chase).
+    if vwap_data and vwap_data.get("bars"):
+        consol = detect_consol_break(vwap_data["bars"], price, rvol)
+        if (consol
+                and (vwap is None or vwap <= 0 or price > vwap)
+                and rsi < CONSOL_BREAK_RSI_MAX):
+            logger.info(
+                f"CONSOL_BREAK {row['symbol']}: base ${consol['range_low']:.2f}-"
+                f"${consol['range_high']:.2f} ({consol['bars_in_base']} bars), "
+                f"breaking ${consol['range_high']:.2f} at ${price:.2f}"
+            )
+            return "CONSOL_BREAK"
 
     # SETUP 1: BREAKOUT
     # EMA ribbon expanding → momentum confirmed → allow RSI as low as 45 (vs 50 default)
