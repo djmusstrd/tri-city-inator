@@ -555,7 +555,8 @@ def compute_supertrend(bars: list[dict], period: int = 10, mult: float = 3.0) ->
 
 def detect_setup(row: dict, now: datetime | None = None,
                   vwap_data: dict | None = None,
-                  locked_orh: float = 0.0, locked_orl: float = 0.0) -> str | None:
+                  locked_orh: float = 0.0, locked_orl: float = 0.0,
+                  candidate_gap: dict | None = None) -> str | None:
     """
     Apply setup rules in priority order.
     Returns "BREAKOUT" | "CONTINUATION" | "PULLBACK" | "EMA20_PULLBACK" | None.
@@ -713,7 +714,7 @@ def detect_setup(row: dict, now: datetime | None = None,
             and locked_orh > 0
             and price < locked_orh
             and now < fade_end):
-        gap = candidate_gap.get(row["symbol"], 0.0)
+        gap = (candidate_gap or {}).get(row["symbol"], 0.0)
         if locked_orl > 0:
             orb_range = (locked_orh - locked_orl) / locked_orl * 100
         else:
@@ -921,6 +922,7 @@ def main():
             row, now_ct, vwap_data=vwap_data,
             locked_orh=lvl.get("orh", 0.0),
             locked_orl=lvl.get("orl", 0.0),
+            candidate_gap=candidate_gap,
         )
         if setup is not None:
             # VWAP reclaim: prev cycle price was below VWAP, now above
