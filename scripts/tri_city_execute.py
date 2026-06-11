@@ -75,6 +75,7 @@ from managers.trade_executor import execute_tri_city_trade, get_open_positions
 CT           = ZoneInfo("America/Chicago")
 LOG_FILE     = WORKSPACE / "logs" / "tri-city-executions.json"
 MISSED_FILE  = WORKSPACE / "logs" / "tri-city-missed-slots.json"
+BLOCKED_FILE = WORKSPACE / "logs" / "tri-city-blocked-signals.json"
 
 STOP_OFFSET      = 0.13   # minimum floor: 13 cents below ORH
 STOP_OFFSET_PCT  = float(os.getenv("STOP_OFFSET_PCT", "0.8"))    # 0.8% of ORH price (scales with stock price)
@@ -245,6 +246,50 @@ def log_missed_slot(symbol: str, setup: str, args, rvol, blocked_by: str) -> Non
         logger.info(f"Missed slot logged: {symbol} {setup} @ ${entry['price']} — {blocked_by}")
     except Exception as e:
         logger.debug(f"log_missed_slot failed: {e}")
+
+
+# ── Blocked-signal log (all guards) ───────────────────────────────────────────
+
+def log_blocked_signal(symbol: str, setup: str, args, rvol, blocked_by: str, **extra) -> None:
+    """
+    Log any signal rejected by a guard (RVOL floor, daily loss, regime, extension,
+    duplicate checks, etc.) so blocked signals can be reviewed post-session
+    alongside taken trades — same fields as tri-city-executions.json plus
+    `blocked_by` (guard name) and any guard-specific `extra` context.
+
+    Written to logs/tri-city-blocked-signals.json — one entry per blocked signal.
+    """
+    try:
+        BLOCKED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entries: list = []
+        if BLOCKED_FILE.exists():
+            try:
+                entries = json.loads(BLOCKED_FILE.read_text())
+            except Exception:
+                pass
+
+        now = datetime.now(CT)
+        entry = {
+            "date":       now.strftime("%Y-%m-%d"),
+            "time":       now.strftime("%H:%M:%S CT"),
+            "symbol":     symbol,
+            "setup":      setup,
+            "price":      getattr(args, "price", None),
+            "orh":        getattr(args, "orh",   None),
+            "orl":        getattr(args, "orl",   None),
+            "rsi":        getattr(args, "rsi",   None),
+            "ema_dev":    getattr(args, "ema_dev", None),
+            "rvol":       rvol,
+            "gap_pct":    getattr(args, "gap",   None),
+            "cup":        getattr(args, "cup",   False),
+            "signal":     getattr(args, "signal", setup),
+            "blocked_by": blocked_by,
+        }
+        entry.update(extra)
+        entries.append(entry)
+        BLOCKED_FILE.write_text(json.dumps(entries, indent=2, default=str))
+    except Exception as e:
+        logger.debug(f"log_blocked_signal failed: {e}")
 
 
 # ── Guard 1 & 2: duplicate checks ─────────────────────────────────────────────
@@ -1160,12 +1205,14 @@ def main():
     if args.setup == "PULLBACK" and args.rsi < MIN_RSI_PULLBACK and not args.dry_run:
         if not args.quiet:
             print(f"SKIP: PULLBACK disabled (MIN_RSI_PULLBACK={MIN_RSI_PULLBACK:.0f}, RSI={args.rsi:.1f}).")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="min_rsi_pullback")
         sys.exit(0)
 
     # Guard 0c.5: PULLBACK master kill switch
     if args.setup == "PULLBACK" and not PULLBACK_ENABLED:
         if not args.quiet:
             print(f"SKIP: PULLBACK disabled (PULLBACK_ENABLED=false in .env).")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="pullback_disabled")
         sys.exit(0)
 
     # Guard 0d: PULLBACK Parkinson trending gate (Davey Ch. 7).
@@ -1189,6 +1236,7 @@ def main():
                 print(f"SKIP: PULLBACK on {symbol} blocked — park_trending=False "
                       f"(mean-reverting regime, not trending). "
                       f"Set PULLBACK_TRENDING_REQUIRED=false in .env to override.")
+            log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="pullback_not_trending")
             sys.exit(0)
 
     # Finding 2: PULLBACK only valid when price is at or above EMA (EMA Dev% >= 0).
@@ -1196,6 +1244,7 @@ def main():
     if args.setup == "PULLBACK" and args.ema_dev < 0.0:
         print(f"SKIP: PULLBACK requires EMA Dev% >= 0.0% (got {args.ema_dev:+.2f}%). "
               f"Price is still below EMA — wait for reclaim.")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="pullback_below_ema")
         sys.exit(0)
 
     # Guard 0e: PULLBACK ORB spread filter — tiny opening range = no level to trade against.
@@ -1210,6 +1259,8 @@ def main():
                       f"{orb_spread_pct:.2f}% < min {PULLBACK_MIN_ORB_SPREAD_PCT:.2f}%. "
                       f"(ORH ${args.orh:.2f} / ORL ${args.orl:.2f} — range too tight). "
                       f"Set PULLBACK_MIN_ORB_SPREAD_PCT=0 in .env to disable.")
+            log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="pullback_orb_spread",
+                                orb_spread_pct=round(orb_spread_pct, 3))
             sys.exit(0)
 
     cup_tag = " + CUP 🏆" if args.cup else ""
@@ -1225,12 +1276,14 @@ def main():
     if already_executed_today(symbol, args.setup) and not getattr(args, "force", False):
         if not args.quiet:
             print(f"SKIP: {args.setup} already executed for {symbol} today.")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="already_executed_today")
         sys.exit(0)
 
     # ── Guard 2: already in position ───────────────────────────────────────────
     if already_in_position(symbol):
         if not args.quiet:
             print(f"SKIP: Already holding {symbol}.")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="already_in_position")
         sys.exit(0)
 
     # ── Correlation warning (advisory — does not block) ────────────────────────
@@ -1251,6 +1304,7 @@ def main():
     if check_daily_loss_limit(today):
         if not args.quiet:
             print(f"SKIP: Daily loss limit (${MAX_DAILY_LOSS:.0f}) reached.")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="daily_loss_limit")
         sys.exit(0)
 
     # ── Guard 4b: late-entry cutoff — no new positions after 1:30 PM CT ─────────
@@ -1277,6 +1331,8 @@ def main():
         print(f"SPY regime: {spy_regime} ({spy_str})")
     if spy_regime == "BEAR" and not args.dry_run and args.setup != "SUPERTREND_FLIP":
         print(f"SKIP: SPY bearish ({spy_str}) — blocking LONG entries.")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="market_regime_bear",
+                            spy_change=spy_change)
         sys.exit(0)
     elif spy_regime == "BEAR" and args.setup == "SUPERTREND_FLIP":
         print(f"WARN: SPY bearish ({spy_str}) — proceeding with SUPERTREND_FLIP (trend-follow override)")
@@ -1289,6 +1345,7 @@ def main():
         print(f"SKIP: ATR circuit breaker — SPY volatility spike detected "
               f"(ATR(5) > {VOLATILITY_ATR_CEILING:.1f}x ATR(20) baseline). "
               f"Set VOLATILITY_CHECK_ENABLED=false to override.")
+        log_blocked_signal(symbol, args.setup, args, args.rvol or 0.0, blocked_by="atr_circuit_breaker")
         sys.exit(0)
 
     # ── Guard 6: relative volume (setup-specific + afternoon floor) ───────────
@@ -1321,6 +1378,7 @@ def main():
     if rvol is not None and rvol < rvol_floor and not args.dry_run and not getattr(args, "force", False):
         if not args.quiet:
             print(f"SKIP: RVol {rvol_str} below {args.setup} minimum {rvol_floor:.2f}x.")
+        log_blocked_signal(symbol, args.setup, args, rvol, blocked_by="rvol_floor", rvol_floor=rvol_floor)
         sys.exit(0)
 
     # ── Guard 7: parabolic ORB check + RSI overbought ─────────────────────────
@@ -1341,6 +1399,8 @@ def main():
                 f"SKIP: Price ${args.price:.2f} already at or beyond T1 ${current_t1:.2f} "
                 f"({T1_PCT:.0f}% above ORH ${args.orh:.2f}) — no upside left in the setup."
             )
+            log_blocked_signal(symbol, args.setup, args, getattr(args, "rvol", None) or 0.0,
+                                blocked_by="t1_already_passed", t1=current_t1)
             sys.exit(0)
 
     if args.setup in ("BREAKOUT", "CONTINUATION") and not args.dry_run:
@@ -1357,12 +1417,15 @@ def main():
                     f"({now.strftime('%H:%M CT')} — within 90-min parabolic window). "
                     f"Gap exhausted at open. Consider FADE signal instead."
                 )
+                log_blocked_signal(symbol, args.setup, args, rvol, blocked_by="parabolic_orb_range",
+                                    orb_range_pct=round(orb_range_pct, 2))
                 sys.exit(0)
         if args.rsi >= BREAKOUT_MAX_RSI:
             print(
                 f"SKIP: RSI {args.rsi:.1f} at or above {BREAKOUT_MAX_RSI:.0f} "
                 f"cap — overbought, skip and wait for re-base."
             )
+            log_blocked_signal(symbol, args.setup, args, rvol, blocked_by="rsi_overbought")
             sys.exit(0)
 
     # ── FADE: gap-and-crap short ───────────────────────────────────────────────
@@ -1375,10 +1438,14 @@ def main():
             orb_range_pct = (args.orh - args.orl) / args.orl * 100
             if orb_range_pct < FADE_ORB_MIN_PCT:
                 print(f"SKIP: FADE requires ORB range >= {FADE_ORB_MIN_PCT:.1f}% (got {orb_range_pct:.1f}%).")
+                log_blocked_signal(symbol, args.setup, args, getattr(args, "rvol", None) or 0.0,
+                                    blocked_by="fade_orb_range_too_small", orb_range_pct=round(orb_range_pct, 2))
                 sys.exit(0)
         gap_pct_fade = args.gap if args.gap is not None else 0.0
         if gap_pct_fade < GAP_FADE_MIN_PCT:
             print(f"SKIP: FADE requires gap >= {GAP_FADE_MIN_PCT:.1f}% (got {gap_pct_fade:.1f}%).")
+            log_blocked_signal(symbol, args.setup, args, getattr(args, "rvol", None) or 0.0,
+                                blocked_by="fade_gap_too_small")
             sys.exit(0)
         fade_entry  = args.price
         fade_stop   = round(args.orh * (1 + FADE_STOP_BUFFER / 100), 2)
@@ -1386,6 +1453,8 @@ def main():
         fade_risk   = round(fade_stop - fade_entry, 2)
         if fade_risk <= 0:
             print(f"SKIP: FADE stop ${fade_stop} is below entry ${fade_entry} — price already above ORH, not a fade.")
+            log_blocked_signal(symbol, args.setup, args, getattr(args, "rvol", None) or 0.0,
+                                blocked_by="fade_invalid_risk")
             sys.exit(0)
         try:
             equity = float(get_account_equity())
