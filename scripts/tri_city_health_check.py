@@ -178,6 +178,30 @@ def check_poller() -> tuple[str, str]:
         return "PASS", "PID exists (permission check only)"
 
 
+def check_scanner_table() -> tuple[str, str]:
+    """
+    Check that shared/tri-city-table.json holds the Inator scanner table
+    (header "SYMBOL | PRICE | RSI ..."), not a different indicator's table.
+    A wrong-shaped table parses to zero rows in the signal detector and
+    silently produces "no signals" every cycle — see 2026-06-11 incident
+    where this went undetected for ~4.5 hours.
+    """
+    f = SHARED / "tri-city-table.json"
+    if not f.exists():
+        return "WARN", "tri-city-table.json missing — poller hasn't written yet"
+    try:
+        data = json.loads(f.read_text())
+        rows = data if isinstance(data, list) else data.get("rows", [])
+        if not rows:
+            return "WARN", "table.json is empty — waiting for poller"
+        header = rows[0].upper()
+        if header.startswith("SYMBOL") and "PRICE" in header and "RSI" in header:
+            return "PASS", f"{len(rows)} rows, header OK"
+        return "FAIL", f"table.json has wrong indicator's table (header={rows[0]!r}) — poller is reading the wrong study"
+    except Exception as e:
+        return "WARN", f"JSON parse error: {e}"
+
+
 def check_executions(today: str) -> tuple[str, str]:
     """Check for execution errors logged today."""
     f = LOGS / "tri-city-executions.json"
@@ -215,6 +239,7 @@ def main():
         ("flags.json",          check_flags(today)),
         ("levels.json (ORH)",   check_levels(today)),
         ("TV Poller (Phase 3)", check_poller()),
+        ("Scanner table.json", check_scanner_table()),
         ("Alpaca / Balance",    check_alpaca()),
         ("Execution Log",       check_executions(today)),
     ]

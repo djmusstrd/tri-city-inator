@@ -243,6 +243,20 @@ def process_pine_tables(raw: list) -> list[str] | None:
     return None
 
 
+def is_scanner_table(rows: list[str] | None) -> bool:
+    """
+    True if `rows` looks like the Tri-City Inator scanner table
+    (header: "SYMBOL | PRICE | RSI ..."). Used to detect when the CDP
+    table-read accidentally captured a different indicator's table
+    (e.g. a single-symbol HUD) after an indicator_set_inputs reload
+    leaves Kbzkkm's table briefly empty.
+    """
+    if not rows:
+        return False
+    header = rows[0].upper()
+    return header.startswith("SYMBOL") and "PRICE" in header and "RSI" in header
+
+
 # ── macOS notifications ────────────────────────────────────────────────────────
 
 def notify(title: str, body: str, sound: str = "Ping") -> None:
@@ -396,10 +410,26 @@ def run_cycle() -> None:
     raw = cdp_evaluate(ws_url, _PINE_TABLE_JS)
     rows = process_pine_tables(raw) if raw else None
 
-    # (b) Write tri-city-table.json only when we have data; position management still runs regardless
-    if rows:
+    # If the Inator table came back empty/wrong-shaped (e.g. right after an
+    # indicator_set_inputs reload, Kbzkkm's table can take a moment to
+    # repopulate and the CDP read falls back to a different indicator's
+    # table), retry once after a short delay before giving up.
+    if not is_scanner_table(rows):
+        time.sleep(2)
+        raw = cdp_evaluate(ws_url, _PINE_TABLE_JS)
+        rows = process_pine_tables(raw) if raw else None
+
+    # (b) Write tri-city-table.json only when we have a valid scanner table;
+    # otherwise keep the last-known-good table.json so the detector doesn't
+    # silently run on garbage data. Position management still runs regardless.
+    if is_scanner_table(rows):
         TABLE_FILE.write_text(json.dumps(rows))
         logger.info(f"Wrote table.json: {len(rows)} rows")
+    elif rows:
+        logger.warning(
+            f"Pine table read returned wrong indicator ({len(rows)} rows, "
+            f"header={rows[0]!r}) — keeping stale table.json"
+        )
     else:
         logger.warning("Pine table returned no rows — signal detection skipped; position management will still run")
 
