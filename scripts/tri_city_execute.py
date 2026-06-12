@@ -860,7 +860,8 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                      cup: bool = False,
                      htf: bool = False,
                      bb_squeeze: bool = False,
-                     vwap: float | None = None) -> dict:
+                     vwap: float | None = None,
+                     st_band: float | None = None) -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
@@ -912,6 +913,11 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                 stop = round(ema20 - EMA_STOP_BUFFER, 2)
         else:
             stop  = round(price * (1 - STOP_PCT / 100), 2)
+    elif setup == "SUPERTREND_FLIP" and st_band is not None and 0 < st_band < price:
+        # Supertrend band = the trend's own invalidation level. Tighter and more
+        # meaningful than a generic %-stop for a trend-follow entry.
+        stop = round(st_band, 2)
+        logger.info(f"SUPERTREND stop: ${stop:.2f} (band) vs ${round(price * (1 - STOP_PCT / 100), 2):.2f} ({STOP_PCT}%)")
     else:
         stop = round(price * (1 - STOP_PCT / 100), 2)
 
@@ -1149,6 +1155,10 @@ def main():
     parser.add_argument("--vwap",         default=None, type=float,
                         help="Current session VWAP. If provided, tightens stop to just below "
                              "VWAP when that gives a better (higher) stop than the standard stop.")
+    parser.add_argument("--st_band",      default=None, type=float,
+                        help="Supertrend band level at signal time. For SUPERTREND_FLIP, used "
+                             "as the stop (trend invalidation level) instead of the generic "
+                             f"{STOP_PCT}%% stop.")
     parser.add_argument("--candle_type", default=None,
                         help="Override candle type (HAMMER/NEUTRAL/BEARISH/DOJI). "
                              "Auto-detected from last 1-min bar if not provided.")
@@ -1546,7 +1556,8 @@ def main():
                                     args.ema_dev, rvol=rvol, candle_type=candle_type,
                                     cup=args.cup, htf=getattr(args, "htf", False),
                                     bb_squeeze=getattr(args, "bb_squeeze", False),
-                                    vwap=getattr(args, "vwap", None))
+                                    vwap=getattr(args, "vwap", None),
+                                    st_band=getattr(args, "st_band", None))
 
     # Fix 4: tighter T1 for large-cap earnings gap plays.
     # Large-caps gapping 15%+ on earnings consolidate the gap rather than extending it.
