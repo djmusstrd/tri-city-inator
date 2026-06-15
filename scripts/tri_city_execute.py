@@ -140,6 +140,12 @@ FADE_STOP_BUFFER  = float(os.getenv("FADE_STOP_BUFFER",   "0.5"))  # stop above 
 RVOL_SIZE_BOOST_MAX    = float(os.getenv("RVOL_SIZE_BOOST_MAX",    "1.25"))  # max multiplier
 RVOL_SIZE_BOOST_THRESH = float(os.getenv("RVOL_SIZE_BOOST_THRESH", "3.0"))   # RVOL level for max boost
 
+# Choppy-regime size penalty for BREAKOUT (Kaufman efficiency ratio).
+# BREAKOUT isn't blocked when the tape is choppy (it might still run), but size
+# is cut so a failed breakout in chop (RGTU/AHMA, ER<0.25) costs less.
+CHOPPY_ER_MIN     = float(os.getenv("CHOPPY_ER_MIN",     "0.25"))
+CHOPPY_SIZE_MULT  = float(os.getenv("CHOPPY_SIZE_MULT",  "0.5"))
+
 # ATR-based stop calibration (Davey Ch. 9): stops scale with actual stock volatility
 # ATR_STOP_MULT × ATR(14) gives stop distance from ORH; overrides fixed % when larger
 # Kill switches: set to 0 in .env to disable ATR widening and fall back to fixed %
@@ -861,7 +867,8 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                      htf: bool = False,
                      bb_squeeze: bool = False,
                      vwap: float | None = None,
-                     st_band: float | None = None) -> dict:
+                     st_band: float | None = None,
+                     er: float | None = None) -> dict:
     """
     Build trade signal with stop, targets, and position size.
 
@@ -973,6 +980,18 @@ def calculate_signal(symbol: str, price: float, orh: float, setup: str,
                     f"(x{multiplier:.2f})"
                 )
             position_size = boosted
+
+    # Choppy-regime size cut: BREAKOUT is still allowed in chop (it might run),
+    # but at half size — RGTU (ER=0.09) and AHMA (ER=0.24) were both choppy
+    # BREAKOUT losers; halving size caps the damage without forfeiting the trade.
+    if setup == "BREAKOUT" and er is not None and er < CHOPPY_ER_MIN:
+        reduced = max(1, int(position_size * CHOPPY_SIZE_MULT))
+        if reduced != position_size:
+            logger.info(
+                f"Choppy regime (ER={er:.2f} < {CHOPPY_ER_MIN}): BREAKOUT size "
+                f"{position_size}→{reduced} (x{CHOPPY_SIZE_MULT})"
+            )
+        position_size = reduced
 
     if setup == "PULLBACK":
         # HTF override: High & Tight Flag (+90% in 3mo) — skip all size penalties.
@@ -1159,6 +1178,9 @@ def main():
                         help="Supertrend band level at signal time. For SUPERTREND_FLIP, used "
                              "as the stop (trend invalidation level) instead of the generic "
                              f"{STOP_PCT}%% stop.")
+    parser.add_argument("--er",           default=None, type=float,
+                        help="Kaufman efficiency ratio at signal time (0=choppy, 1=trending). "
+                             f"For BREAKOUT, ER < {CHOPPY_ER_MIN} halves position size.")
     parser.add_argument("--candle_type", default=None,
                         help="Override candle type (HAMMER/NEUTRAL/BEARISH/DOJI). "
                              "Auto-detected from last 1-min bar if not provided.")
@@ -1557,7 +1579,8 @@ def main():
                                     cup=args.cup, htf=getattr(args, "htf", False),
                                     bb_squeeze=getattr(args, "bb_squeeze", False),
                                     vwap=getattr(args, "vwap", None),
-                                    st_band=getattr(args, "st_band", None))
+                                    st_band=getattr(args, "st_band", None),
+                                    er=getattr(args, "er", None))
 
     # Fix 4: tighter T1 for large-cap earnings gap plays.
     # Large-caps gapping 15%+ on earnings consolidate the gap rather than extending it.

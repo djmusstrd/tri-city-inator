@@ -171,6 +171,8 @@ def build_execute_cmd(sig: dict) -> list[str]:
         cmd += ["--gap", str(sig["gap_pct"])]
     if sig.get("st_band") is not None:
         cmd += ["--st_band", str(sig["st_band"])]
+    if sig.get("er") is not None:
+        cmd += ["--er", str(sig["er"])]
     return cmd
 
 

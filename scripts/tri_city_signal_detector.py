@@ -72,6 +72,8 @@ VWAP_FILE    = SHARED / "tri-city-vwap-state.json"
 SIG_FILE     = SHARED / "tri-city-signals.json"
 LEVELS_FILE  = SHARED / "tri-city-levels.json"
 ST_STATE_FILE = SHARED / "tri-city-supertrend-state.json"
+CONFIRM_FILE  = SHARED / "tri-city-pending-confirm.json"
+NEAR_MISS_FILE = WORKSPACE / "logs" / "tri-city-near-misses.json"
 
 CT = ZoneInfo("America/Chicago")
 
@@ -144,6 +146,70 @@ EMA20_PB_END_M     = 30     # latest CT minute (11:30 AM, before lunch)
 
 # ── BREAKOUT quality filters ──────────────────────────────────────────────────
 BREAKOUT_MAX_ORH_ORL_SPREAD = 8.0  # % of price — wide spread = indecision, skip
+
+# ── Regime detection (efficiency ratio) ───────────────────────────────────────
+# Kaufman efficiency ratio over the last REGIME_ER_PERIOD bars:
+#   net displacement / sum of absolute bar-to-bar moves.
+# Near 1.0 = trending (clean directional move), near 0 = choppy/range-bound
+# (price bouncing back and forth without progress — the QPUX "fails just above
+# midpoint, never breaks the range" pattern). CONTINUATION and PULLBACK rely on
+# a real trend continuing, so both are blocked when the symbol is currently chopping.
+REGIME_ER_PERIOD = int(_os.getenv("REGIME_ER_PERIOD", "10"))
+REGIME_ER_MIN    = float(_os.getenv("REGIME_ER_MIN", "0.25"))
+
+# ── Confirmation-bar requirement ──────────────────────────────────────────────
+# BREAKOUT/CONTINUATION setups must be detected on 2 consecutive poller cycles
+# (6 min apart) before executing. Blocks single-bar spike-and-reverse patterns
+# (RGTU/XOVR/QPUX-style: price pokes above ORH for one bar then immediately
+# chops back inside the range).
+CONFIRM_SETUPS = {"BREAKOUT", "CONTINUATION"}
+
+# ── Near-miss logging ──────────────────────────────────────────────────────────
+# When Pine fires a signal (BREAKOUT/CONTINUATION/PULLBACK) but exactly one of our
+# extra band checks (RSI/EMA dev/RVOL) fails by a small margin, log it. This is the
+# "all the stars must align" concern — data to see how often a single condition is
+# the only thing standing between a Pine signal and an executed trade.
+NEAR_MISS_RSI_TOL  = float(_os.getenv("NEAR_MISS_RSI_TOL", "3.0"))   # RSI points
+NEAR_MISS_EMA_TOL  = float(_os.getenv("NEAR_MISS_EMA_TOL", "0.3"))   # EMA dev %
+NEAR_MISS_RVOL_TOL = float(_os.getenv("NEAR_MISS_RVOL_TOL", "0.2"))  # RVOL x
+
+
+def _near_band(value: float, lo: float | None, hi: float | None, tol: float) -> bool:
+    """True if value is just outside [lo, hi] — within tol of the boundary it missed."""
+    if lo is not None and value < lo and (lo - value) <= tol:
+        return True
+    if hi is not None and value > hi and (value - hi) <= tol:
+        return True
+    return False
+
+
+def log_near_miss(symbol: str, setup: str, row: dict, reason: str, value: float,
+                  lo: float | None = None, hi: float | None = None) -> None:
+    """Append a near-miss to logs/tri-city-near-misses.json (one entry per occurrence)."""
+    try:
+        NEAR_MISS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entries: list = []
+        if NEAR_MISS_FILE.exists():
+            try:
+                entries = json.loads(NEAR_MISS_FILE.read_text())
+            except Exception:
+                pass
+        now = datetime.now(CT)
+        entries.append({
+            "date":   now.strftime("%Y-%m-%d"),
+            "time":   now.strftime("%H:%M:%S CT"),
+            "symbol": symbol,
+            "setup":  setup,
+            "signal": row.get("signal"),
+            "price":  row.get("price"),
+            "reason": reason,   # e.g. "rsi", "ema_dev", "rvol"
+            "value":  value,
+            "lo":     lo,
+            "hi":     hi,
+        })
+        NEAR_MISS_FILE.write_text(json.dumps(entries, indent=2, default=str))
+    except Exception as e:
+        logger.debug(f"log_near_miss failed: {e}")
 
 # ── Symbols that should skip yfinance VWAP/data fetches ───────────────────────
 # SPACs and units (e.g. QETAU, ASPCU) cause yfinance "possibly delisted" errors
@@ -738,6 +804,26 @@ def compute_supertrend(bars: list[dict], period: int = 10, mult: float = 3.0) ->
     return {"trend": current_trend, "band": round(band, 4)}
 
 
+# ── Regime detection (Kaufman efficiency ratio) ───────────────────────────────
+
+def compute_efficiency_ratio(bars: list[dict], period: int = REGIME_ER_PERIOD) -> float | None:
+    """
+    net displacement / sum of |bar-to-bar moves| over the last `period` closes.
+    1.0 = straight-line trend, near 0 = chop (price oscillating without progress).
+    Returns None if there aren't enough bars yet.
+    """
+    closes = [b["close"] for b in bars if b.get("close") is not None]
+    if len(closes) < period + 1:
+        return None
+
+    closes = closes[-(period + 1):]
+    net   = abs(closes[-1] - closes[0])
+    total = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
+    if total == 0:
+        return None
+    return net / total
+
+
 # ── Setup detection ───────────────────────────────────────────────────────────
 
 def detect_setup(row: dict, now: datetime | None = None,
@@ -781,6 +867,10 @@ def detect_setup(row: dict, now: datetime | None = None,
     last_bar         = vwap_data.get("last_bar")     if vwap_data else None
     change_from_open = vwap_data.get("change_from_open_pct", 0.0) if vwap_data else 0.0
 
+    # Regime: efficiency ratio over recent bars — near 0 means the symbol is
+    # chopping (bouncing inside a range without progress). None = not enough data.
+    er = compute_efficiency_ratio(vwap_data["bars"]) if vwap_data and vwap_data.get("bars") else None
+
     # VWAP guard: no BREAKOUT or CONTINUATION longs below VWAP (Aziz)
     if vwap is not None and vwap > 0 and price < vwap:
         if sig in ("BREAKOUT", "CONTINUATION"):
@@ -816,6 +906,19 @@ def detect_setup(row: dict, now: datetime | None = None,
     # SETUP 1: BREAKOUT
     # EMA ribbon expanding → momentum confirmed → allow RSI as low as 45 (vs 50 default)
     breakout_rsi_min = BREAKOUT_RSI_MIN - 5 if ribbon == "EXPANDING" else BREAKOUT_RSI_MIN
+
+    # Near-miss: Pine fired BREAKOUT but exactly one of our extra checks fails by a hair
+    if sig == "BREAKOUT":
+        _rsi_ok, _ema_ok, _orh_ok = rsi > breakout_rsi_min, ema_dev > 0, above_orh
+        if sum(not x for x in (_rsi_ok, _ema_ok, _orh_ok)) == 1:
+            if not _rsi_ok and _near_band(rsi, breakout_rsi_min, None, NEAR_MISS_RSI_TOL):
+                log_near_miss(row["symbol"], "BREAKOUT", row, "rsi", rsi, lo=breakout_rsi_min)
+            elif not _ema_ok and _near_band(ema_dev, 0.0, None, NEAR_MISS_EMA_TOL):
+                log_near_miss(row["symbol"], "BREAKOUT", row, "ema_dev", ema_dev, lo=0.0)
+            elif (not _orh_ok and orh > 0 and price > 0
+                    and 0 < (orh - price) / price * 100 <= NEAR_MISS_EMA_TOL):
+                log_near_miss(row["symbol"], "BREAKOUT", row, "orh_proximity", price, hi=orh)
+
     if sig == "BREAKOUT" and above_orh and rsi > breakout_rsi_min and ema_dev > 0:
         # ORH/ORL spread filter: wide range = uncertain direction (FUTG pattern)
         if orh > 0 and orl > 0 and price > 0:
@@ -835,9 +938,23 @@ def detect_setup(row: dict, now: datetime | None = None,
     # SETUP 2: CONTINUATION — MACD + ribbon checks
     # EMA ribbon compressing → tighten EMA dev window to 0–0.5% (vs 0–1.0% default)
     cont_ema_max = 0.5 if ribbon == "COMPRESSING" else CONT_EMA_MAX
+
+    # Near-miss: Pine fired CONTINUATION but EMA dev or ORH check fails by a hair
+    if sig == "CONTINUATION":
+        _ema_ok, _orh_ok = 0 <= ema_dev <= cont_ema_max, above_orh
+        if sum(not x for x in (_ema_ok, _orh_ok)) == 1:
+            if not _ema_ok and _near_band(ema_dev, 0.0, cont_ema_max, NEAR_MISS_EMA_TOL):
+                log_near_miss(row["symbol"], "CONTINUATION", row, "ema_dev", ema_dev, lo=0.0, hi=cont_ema_max)
+            elif (not _orh_ok and orh > 0 and price > 0
+                    and 0 < (orh - price) / price * 100 <= NEAR_MISS_EMA_TOL):
+                log_near_miss(row["symbol"], "CONTINUATION", row, "orh_proximity", price, hi=orh)
+
     if (sig == "CONTINUATION"
             and above_orh
             and 0 <= ema_dev <= cont_ema_max):
+        if er is not None and er < REGIME_ER_MIN:
+            logger.info(f"CONTINUATION {row['symbol']} blocked: choppy (ER={er:.2f} < {REGIME_ER_MIN})")
+            return None
         macd_ok = macd_is_bullish(row["symbol"], now)
         if macd_ok is False:
             logger.info(f"CONTINUATION {row['symbol']} blocked: MACD bearish")
@@ -845,9 +962,22 @@ def detect_setup(row: dict, now: datetime | None = None,
         return "CONTINUATION"
 
     # SETUP 3: PULLBACK
+    # Near-miss: Pine fired PULLBACK but EMA dev or RSI band fails by a hair
+    if sig == "PULLBACK":
+        _ema_ok = 0 <= ema_dev <= PULLBACK_EMA_MAX
+        _rsi_ok = PULLBACK_RSI_MIN <= rsi <= PULLBACK_RSI_MAX
+        if sum(not x for x in (_ema_ok, _rsi_ok)) == 1:
+            if not _ema_ok and _near_band(ema_dev, 0.0, PULLBACK_EMA_MAX, NEAR_MISS_EMA_TOL):
+                log_near_miss(row["symbol"], "PULLBACK", row, "ema_dev", ema_dev, lo=0.0, hi=PULLBACK_EMA_MAX)
+            elif not _rsi_ok and _near_band(rsi, PULLBACK_RSI_MIN, PULLBACK_RSI_MAX, NEAR_MISS_RSI_TOL):
+                log_near_miss(row["symbol"], "PULLBACK", row, "rsi", rsi, lo=PULLBACK_RSI_MIN, hi=PULLBACK_RSI_MAX)
+
     if (sig == "PULLBACK"
             and 0 <= ema_dev <= PULLBACK_EMA_MAX
             and PULLBACK_RSI_MIN <= rsi <= PULLBACK_RSI_MAX):
+        if er is not None and er < REGIME_ER_MIN:
+            logger.info(f"PULLBACK {row['symbol']} blocked: choppy (ER={er:.2f} < {REGIME_ER_MIN})")
+            return None
         return "PULLBACK" if PULLBACK_ENABLED else None
 
     # SETUP 4: EMA20_PULLBACK — price at EMA20 after a significant run, above VWAP
@@ -884,6 +1014,9 @@ def detect_setup(row: dict, now: datetime | None = None,
             and 50 <= rsi <= LOCKED_CONT_RSI_MAX):
         if vwap is not None and vwap > 0 and price < vwap:
             return None  # VWAP guard
+        if er is not None and er < REGIME_ER_MIN:
+            logger.info(f"LOCKED CONT {row['symbol']} blocked: choppy (ER={er:.2f} < {REGIME_ER_MIN})")
+            return None
         macd_ok = macd_is_bullish(row["symbol"], now)
         if macd_ok is False:
             logger.info(f"LOCKED CONT {row['symbol']} blocked: MACD bearish")
@@ -949,6 +1082,9 @@ def detect_setup(row: dict, now: datetime | None = None,
             and locked_orl <= price <= locked_orh
             and 0 <= ema_dev <= PULLBACK_EMA_MAX
             and PULLBACK_RSI_MIN <= rsi <= LOCKED_PULLBACK_RSI_MAX):
+        if er is not None and er < REGIME_ER_MIN:
+            logger.info(f"LOCKED PULLBACK {row['symbol']} blocked: choppy (ER={er:.2f} < {REGIME_ER_MIN})")
+            return None
         if change_from_open >= 25.0:
             pm_cutoff = now.replace(hour=11, minute=30, second=0, microsecond=0)
             if now >= pm_cutoff:
@@ -1118,6 +1254,15 @@ def main():
         except Exception:
             pass
 
+    # ── Load pending confirmation state (BREAKOUT/CONTINUATION 2-cycle confirm) ──
+    prev_pending: dict[str, str] = {}
+    if CONFIRM_FILE.exists():
+        try:
+            prev_pending = json.loads(CONFIRM_FILE.read_text())
+        except Exception:
+            pass
+    new_pending: dict[str, str] = {}
+
     # ── Detect signals ──────────────────────────────────────────────────────
     signals: list[dict] = []
     new_vwap_state: dict[str, dict] = {}
@@ -1132,6 +1277,7 @@ def main():
             continue
         vwap_data = vwap_map.get(sym)   # dict | None
         vwap      = vwap_data["vwap"] if vwap_data else None
+        er        = compute_efficiency_ratio(vwap_data["bars"]) if vwap_data and vwap_data.get("bars") else None
 
         lvl = locked_levels.get(sym, {})
         setup = detect_setup(
@@ -1141,6 +1287,17 @@ def main():
             candidate_gap=candidate_gap,
             premarket_bars=premarket_map.get(sym),
         )
+
+        # Confirmation-bar: BREAKOUT/CONTINUATION must be detected on 2 consecutive
+        # cycles (6 min) before executing — blocks single-bar spike-and-reverse chop.
+        if setup in CONFIRM_SETUPS:
+            if prev_pending.get(sym) == setup:
+                logger.info(f"CONFIRMED: {setup} {sym} — held for 2nd cycle, executing")
+            else:
+                new_pending[sym] = setup
+                logger.info(f"PENDING: {setup} {sym} — awaiting confirmation next cycle")
+                setup = None
+
         if setup is not None:
             # VWAP reclaim: prev cycle price was below VWAP, now above
             prev = prev_vwap_state.get(sym, {})
@@ -1175,6 +1332,7 @@ def main():
                 "vwap_above":         vwap_above,
                 "vwap_reclaim":       vwap_reclaim,
                 "change_from_open":   change_from_open,
+                "er":                 er,
             })
 
             # Track VWAP state for next cycle's reclaim detection
@@ -1305,6 +1463,9 @@ def main():
         # Merge new Supertrend state (preserve symbols not in current scan)
         merged_st = {**_prev_st_state, **_new_st_state}
         ST_STATE_FILE.write_text(json.dumps(merged_st))
+        # Pending confirmation state — full replace (cleared for symbols that
+        # didn't repeat or no longer signal)
+        CONFIRM_FILE.write_text(json.dumps(new_pending))
 
     # ── Write output ────────────────────────────────────────────────────────
     output = {
