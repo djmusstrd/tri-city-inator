@@ -6,7 +6,7 @@ WORKSPACE="$HOME/tri-city-inator"
 PID_FILE="$WORKSPACE/shared/sandbox-poller.pid"
 LOG_FILE="$WORKSPACE/logs/sandbox-poller.log"
 
-# Kill any existing sandbox poller
+# Kill any existing sandbox poller — by PID file first, then by name as safety net
 if [ -f "$PID_FILE" ]; then
     OLD_PID=$(cat "$PID_FILE")
     if kill -0 "$OLD_PID" 2>/dev/null; then
@@ -15,6 +15,13 @@ if [ -f "$PID_FILE" ]; then
         sleep 1
     fi
     rm -f "$PID_FILE"
+fi
+# Kill any orphaned sandbox_poller processes missed by the PID file
+ORPHANS=$(pgrep -f "sandbox_poller.py" 2>/dev/null)
+if [ -n "$ORPHANS" ]; then
+    echo "Killing orphaned sandbox poller(s): $ORPHANS"
+    kill $ORPHANS 2>/dev/null
+    sleep 1
 fi
 
 # Resolve python (prefer conda)
