@@ -74,6 +74,7 @@ def fetch_intraday_movers() -> list[dict]:
 
         ss = StockScreener()
         ss.set_markets("america")
+        ss.sort_by("change", order="desc")
         ss.set_range(0, 500)
         ss.add_filter("change",                   FilterOperator.ABOVE_OR_EQUAL, MIN_CHANGE_PCT)
         ss.add_filter("close",                    FilterOperator.ABOVE_OR_EQUAL, MIN_PRICE)

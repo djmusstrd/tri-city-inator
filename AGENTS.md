@@ -1,4 +1,4 @@
-# Tri-City Inator — Claude Session Instructions
+# Tri-City Inator — Codex Session Instructions
 
 ## Before Starting
 
@@ -10,7 +10,7 @@
 ## Start a Session
 
 ```bash
-tricity   # opens TradingView Desktop + Claude in one command
+tricity   # opens TradingView Desktop + Codex in one command
 ```
 
 The `.mcp.json` in this directory auto-connects the TradingView MCP server.
@@ -34,7 +34,7 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 9:00 AM+ CT        Symbol push        →  every 30 min all day: push updated candidates into Pine slots
 ```
 
-> **ORB timeframe:** Set `ORB_MINUTES` in `.env` (5, 15, or 30 — default 15). Claude reads this
+> **ORB timeframe:** Set `ORB_MINUTES` in `.env` (5, 15, or 30 — default 15). Codex reads this
 > at session start and schedules level lock + monitor at the right time.
 > The Tri-City Inator scanner on your TradingView chart must be set to the same timeframe.
 
@@ -45,7 +45,7 @@ The `.mcp.json` in this directory auto-connects the TradingView MCP server.
 When a session starts:
 
 **Step 0 — Session resumption check**
-Read `~/tri-city-inator/shared/tri-city-candidates.json`. If the `"date"` field matches today AND `~/tri-city-inator/shared/tri-city-levels.json` exists with at least one non-zero ORH value, this session was already initialized today. Skip the 7:30 AM, 8:00 AM, and 8:15 AM crons (they already ran; level lock is handled by launchd, not a cron). Register only the 9:30 AM and 11:30 AM symbol-push crons that haven't fired yet. Check if the poller is already running: read `shared/tri-city-poller.pid` and verify the PID is alive (`kill -0 PID`). If the poller is not running, launch it via `bash ~/tri-city-inator/scripts/start_poller.sh`. Announce: "Resuming session — candidates and levels already loaded from earlier today."
+Read `~/tri-city-inator/shared/tri-city-candidates.json`. If the `"date"` field matches today AND `~/tri-city-inator/shared/tri-city-levels.json` exists with at least one non-zero ORH value, this session was already initialized today. Skip the 7:30 AM, 8:00 AM, 8:15 AM, and level-lock crons (they already ran). Register only the 9:30 AM and 11:30 AM symbol-push crons that haven't fired yet. Check if the poller is already running: read `shared/tri-city-poller.pid` and verify the PID is alive (`kill -0 PID`). If the poller is not running, launch it via `bash ~/tri-city-inator/scripts/start_poller.sh`. Announce: "Resuming session — candidates and levels already loaded from earlier today."
 
 **Step 0.5 — Connect TradingView via CDP**
 First check if CDP is already live:
@@ -80,7 +80,7 @@ Read the file `~/tri-city-inator/.env`. Look for a line like `ORB_MINUTES=15`.
 Calculate the level lock time: market open (8:30 AM CT) + ORB_MINUTES.
 Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 → 9:00 AM.
 
-**Step 2 — Register four crons silently** (level lock + signal monitor are headless — handled by launchd + the TV poller, not a Claude cron)
+**Step 2 — Register six crons silently** (signal monitor is headless — handled by the TV poller, not a cron)
 
 1. Premarket scanner — weekdays at 7:30 AM CT:
    /loop 7:30am weekdays First, call watchlist_get to fetch the current TradingView watchlist symbols. Write those symbols (as a JSON object {"symbols": ["NASDAQ:XXX", ...], "written_at": "HH:MM CT"}) to ~/tri-city-inator/shared/tri-city-watchlist-seeds.json. Then execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table and any parabolic warnings. The scanner will automatically include watchlist symbols that aren't in the gap screener universe. Then read the "TV WATCHLIST" line at the bottom of the output and add each symbol to the TradingView watchlist using watchlist_add (one call per symbol).
@@ -91,24 +91,19 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
 3. Re-scan + health check — weekdays at 8:15 AM CT:
    /loop 8:15am weekdays Run `python -W ignore ~/tri-city-inator/scripts/tri_city_health_check.py` via Bash and print the full output. If any item shows FAIL, alert the user immediately. If all PASS or WARN, report the summary line only. Then run the scanner again to refresh with updated pre-market data: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash. Read the updated ~/tri-city-inator/shared/tri-city-candidates.json. Push the refreshed "tv_symbols" array into Pine: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Report: "8:15 re-scan complete — {N} symbols updated in Pine."
 
-4. Intraday symbol push — every 30 min all day (fires continuously after registration):
+4. Level lock — weekdays at the computed level lock time (8:30 AM CT + ORB_MINUTES):
+   /loop {LEVEL_LOCK_TIME}am weekdays Read the Tri-City Inator scanner table using data_get_pine_tables with study_filter="Inator". Use the first study (20 symbols). Extract ORH and ORL for every non-blank symbol from the "ORH/ORL" column and save to shared/tri-city-levels.json as {"_date": "YYYY-MM-DD", "SYMBOL": {"orh": float, "orl": float}, ...} (include today's date in the "_date" field so stale data from a prior session is detectable). Report symbols loaded. Then immediately start the poller via Bash: `bash ~/tri-city-inator/scripts/start_poller.sh`. The poller runs headlessly every 3 min — no further action needed.
+
+5. Intraday symbol push — every 30 min all day (fires continuously after registration):
    /loop 30m weekdays Check current CT time. If before 9:00 AM, skip silently. Otherwise: read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Then read the current Pine scanner table (data_get_pine_tables with study_filter="Inator") and for any symbol in the new tv_symbols that does NOT already have an entry in shared/tri-city-levels.json, read its ORH/ORL from the Pine table "ORH/ORL" column and append it to tri-city-levels.json. Report: how many symbols were pushed to Kbzkkm. If before 9 AM, report nothing.
 
-> **Level lock is handled by `tri_city_level_lock.py` via launchd (NOT a Claude cron).**
-> A launchd agent (`~/Library/LaunchAgents/com.starks-labs.tricity-level-lock.plist`) fires the
-> script at 8:36, 8:46, and 9:01 AM CT every weekday — covering ORB_MINUTES = 5/15/30. The script
-> reads ORB_MINUTES from `.env`, checks it's in the right window for that setting, connects to
-> TradingView via CDP (port 9222) directly, locks ORH/ORL to `tri-city-levels.json`, and launches
-> the poller via `start_poller.sh`. This was moved off a Claude cron because CronCreate jobs only
-> fire when the session is idle, so the level lock was consistently late on busy mornings.
->
-> **Signal monitor is handled by `tri_city_tv_poller.py` (NOT a Claude cron).**
+> **Signal monitor is handled by `tri_city_tv_poller.py` (NOT a Codex cron).**
 > The poller connects directly to TradingView via CDP port 9222, reads the Pine table, runs
 > detect→execute→manage every 3 minutes, and also runs the intraday scanner every 30 min
-> after 9:30 AM CT. Sends macOS desktop notifications. Claude is invoked only for EOD summary.
+> after 9:30 AM CT. Sends macOS desktop notifications. Codex is invoked only for EOD summary.
 
 **Step 3 — Confirm with one line only:**
-"Session ready. Scanner 7:30 AM, swap 8:00 AM, re-scan + health 8:15 AM, levels + poller via launchd at {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), symbol push every 30 min from 9 AM, all CT. Signal monitor running headless."
+"Session ready. Scanner 7:30 AM, swap 8:00 AM, re-scan + health 8:15 AM, levels + poller {LEVEL_LOCK_TIME} AM ({ORB_MINUTES}-min ORB), symbol push every 30 min from 9 AM, all CT. Signal monitor running headless."
 
 Do not show the /loop commands to the user. Do not ask them to paste anything.
 
@@ -259,11 +254,11 @@ python -W ignore ~/tri-city-inator/scripts/tri_city_position_manager.py --eod
 | `tri_city_scanner.py` | 7:30 AM + 8:15 AM crons | Gap-up candidates ranked by score; includes watchlist seeds; saves score components, news, earnings flag to tri-city-candidates.json + tri-city-flags.json |
 | Symbol swap (inline) | 8:00 AM cron | Reads tv_symbols → `indicator_set_inputs` on Kbzkkm (in_7–in_26, 20 slots) |
 | `tri_city_health_check.py` | 8:15 AM cron | Session health verifier: .env keys, candidates, flags, levels, Alpaca, poller, execution errors |
-| `tri_city_level_lock.py` | launchd (8:36/8:46/9:01 AM CT) | Standalone CDP read of Tri-City table → saves ORH/ORL to tri-city-levels.json → launches start_poller.sh; exits silently if ORB_MINUTES window doesn't match or already locked today |
+| Level lock (inline) | ORB_MINUTES cron | Reads Tri-City table → saves ORH/ORL to tri-city-levels.json → launches start_poller.sh |
 | `tri_city_intraday_scanner.py` | Inside poller (every 30 min after 9:30 AM) | Re-scores intraday movers; RVOL floor 0.8x; writes tv_symbols + intraday_symbols + tri-city-flags.json |
 | Symbol push (inline) | 9:30 AM + 11:30 AM crons | Reads updated tv_symbols → `indicator_set_inputs` on Kbzkkm; locks ORH/ORL for any new symbols |
 | `tri_city_tv_poller.py` | Headless daemon (started at level lock) | CDP port 9222; reads Pine table; detect→execute→manage every 3 min; intraday scan every 30 min after 9:30 AM; macOS notifications; PID in tri-city-poller.pid; auto-stops at 3:05 PM CT |
-| `start_poller.sh` | Called by tri_city_level_lock.py | Kills any existing poller; launches tri_city_tv_poller.py in background with nohup |
+| `start_poller.sh` | Called by level-lock cron | Kills any existing poller; launches tri_city_tv_poller.py in background with nohup |
 | `tri_city_monitor.py` | Called by tri_city_tv_poller.py | Orchestrates detect→execute→manage pipeline; writes tri-city-summary.json |
 | `tri_city_signal_detector.py` | Called by tri_city_monitor.py | Reads tri-city-table.json; detects BREAKOUT/CONT/PULLBACK/EMA20_PULLBACK + RVOL spikes; fetches VWAP; writes tri-city-signals.json |
 | `tri_city_execute.py` | Called by tri_city_monitor.py | 7-guard gate → 50-25-25 bracket orders via Alpaca → logs to tri-city-executions.json |

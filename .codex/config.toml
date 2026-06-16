@@ -1,0 +1,6 @@
+[mcp_servers.tradingview]
+command = "node"
+args = ["/Users/georgestarks/tradingview-mcp-jackson/src/server.js"]
+
+[mcp_servers.tradingview.env]
+RULES_PATH = "/Users/georgestarks/tradingview-mcp-jackson/rules.json"
