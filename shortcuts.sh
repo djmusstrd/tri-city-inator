@@ -31,6 +31,16 @@ tricity-cheatsheet()  { cd "$_TC" && python -W ignore scripts/generate_cheatshee
 # ── Dashboard ────────────────────────────────────────────────────────────────
 tricity-dash() { launchctl kickstart -k gui/$(id -u)/com.starks-labs.tricity-dashboard 2>/dev/null; echo "Tri-City → https://tricity.clawbotinator.trade  pw: meadow-harbor-ember-44"; }
 
+# ── APEX (Strategy V2 — see docs/STRATEGY_V2_DESIGN.md) ───────────────────────
+# Layer 1 daily filter: rank the liquid universe by RS, write shared/apex-leaders.json
+apex-leaders()  { cd "$_TC" && python -W ignore scripts/apex_daily_filter.py "$@"; }
+# Walk-forward: do RS leaders prospectively beat SPY?
+apex-validate() { cd "$_TC" && python -W ignore scripts/apex_daily_filter.py --validate "$@"; }
+# Phase 0 concept backtest (RS + ribbon, --no-tp for let-it-run)
+apex-backtest() { cd "$_TC" && python -W ignore scripts/apex_phase0_backtest.py "$@"; }
+# Phase 2 entry-timing backtest (OPEN vs ORB15 vs VWAP_PB on leaders)
+apex-entry()    { cd "$_TC" && python -W ignore scripts/apex_phase2_entry_backtest.py "$@"; }
+
 echo "Tri-City shortcuts loaded:"
 echo "  Session  : tricity  tricity-poller  tricity-health"
 echo "  Scan     : tricity-scan  tricity-intraday"
@@ -38,3 +48,4 @@ echo "  Positions: tricity-status  tricity-eod"
 echo "  Reports  : tricity-report  tricity-all  tricity-recap"
 echo "  Research : tricity-backtest  tricity-walkforward  tricity-cheatsheet"
 echo "  Dashboard: tricity-dash"
+echo "  APEX     : apex-leaders  apex-validate  apex-backtest  apex-entry"
