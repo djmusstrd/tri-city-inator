@@ -26,6 +26,7 @@ BASE_DIR = Path(__file__).parent.parent
 JOURNAL_PATH = BASE_DIR / "logs" / "tri-city-journal.json"
 EXECUTIONS_PATH = BASE_DIR / "logs" / "tri-city-executions.json"
 CANDIDATES_PATH = BASE_DIR / "shared" / "tri-city-candidates.json"
+RESEARCH_NOTES_PATH = BASE_DIR / "shared" / "research-notes.json"
 
 # ─── Theme constants ──────────────────────────────────────────────────────────
 PLOTLY_THEME = "plotly_dark"
@@ -159,6 +160,28 @@ def load_candidates() -> dict:
         return {}
 
 
+def load_research_notes() -> dict:
+    """Load research-notes.json: {symbol: {decision, notes, updated_at, scan_date}}."""
+    if not RESEARCH_NOTES_PATH.exists():
+        return {}
+    try:
+        return json.loads(RESEARCH_NOTES_PATH.read_text()) or {}
+    except Exception:
+        return {}
+
+
+def save_research_note(symbol: str, decision: str, notes: str, scan_date: str) -> None:
+    data = load_research_notes()
+    data[symbol] = {
+        "decision": decision,
+        "notes": notes,
+        "scan_date": scan_date,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    RESEARCH_NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RESEARCH_NOTES_PATH.write_text(json.dumps(data, indent=2))
+
+
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("Tri-City Inator")
@@ -277,7 +300,7 @@ def _base_layout(fig, title: str, height: int = 320, **kwargs):
 # ═══════════════════════════════════════════════════════════════════════════════
 page = st.sidebar.radio(
     "Navigation",
-    ["Positions", "Overview", "Trade Log", "Signal Analysis", "Risk & Sizing", "Candidates"],
+    ["Positions", "Overview", "Trade Log", "Signal Analysis", "Risk & Sizing", "Candidates", "Playbook"],
     label_visibility="collapsed",
 )
 
@@ -1120,6 +1143,66 @@ elif page == "Candidates":
     st.dataframe(tbl, use_container_width=True, height=520,
                  hide_index=True, column_config=col_config)
 
+    st.divider()
+
+    # ── Research / decision queue ──
+    st.subheader("Research")
+
+    notes = load_research_notes()
+    symbols = filtered.sort_values("rank")["symbol"].tolist()
+    if symbols:
+        sel_symbol = st.selectbox("Symbol", symbols)
+        srow = filtered[filtered["symbol"] == sel_symbol].iloc[0]
+
+        rc1, rc2 = st.columns([1, 1])
+        with rc1:
+            st.metric("Score", f"{srow.get('score', 0):.4f}")
+            st.metric("Gap %", f"{srow.get('gap_pct', 0):+.1f}%")
+            st.metric("RVOL", f"{srow.get('rvol', 0):.1f}x")
+            st.metric("RSI", f"{srow.get('rsi', 0):.1f}")
+            st.write(f"**Float:** {srow.get('float_cat', '—')} ({srow.get('float_shares', '—')})")
+            st.write(f"**Flags:** {srow.get('flags', '—')}")
+        with rc2:
+            headline = srow.get("news_headline")
+            url = srow.get("news_url")
+            if headline:
+                if url:
+                    st.write(f"**News:** [{headline}]({url})")
+                else:
+                    st.write(f"**News:** {headline}")
+            else:
+                st.write("**News:** —")
+
+            for sc in sc_cols:
+                if sc in srow.index and pd.notna(srow[sc]):
+                    st.caption(f"{sc}: {srow[sc]:+.4f}")
+
+        existing = notes.get(sel_symbol, {})
+        decisions = ["No decision", "Watch", "Take", "Skip"]
+        default_idx = decisions.index(existing["decision"]) if existing.get("decision") in decisions else 0
+
+        with st.form(f"research_form_{sel_symbol}"):
+            decision = st.radio("Decision", decisions, index=default_idx, horizontal=True)
+            note_text = st.text_area("Notes", value=existing.get("notes", ""), height=100)
+            submitted = st.form_submit_button("Save")
+            if submitted:
+                save_research_note(sel_symbol, decision, note_text, raw.get("date", "—"))
+                st.success(f"Saved {decision} for {sel_symbol}")
+                st.rerun()
+
+        if existing.get("updated_at"):
+            st.caption(f"Last updated {existing['updated_at']} (scan {existing.get('scan_date', '—')})")
+    else:
+        st.info("No candidates match the current filters.")
+
+    # ── Decision log ──
+    if notes:
+        with st.expander("Decision log (all symbols)", expanded=False):
+            log_df = pd.DataFrame([
+                {"Symbol": sym, **vals} for sym, vals in notes.items()
+            ]).sort_values("updated_at", ascending=False)
+            st.dataframe(log_df, use_container_width=True, hide_index=True)
+
     # ── Score weight reference ──
     with st.expander("Score weight reference"):
         weights = {
@@ -1139,3 +1222,16 @@ elif page == "Candidates":
             for k, v in weights.items()
         ])
         st.dataframe(wdf, use_container_width=True, hide_index=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PAGE 7 — PLAYBOOK
+# ──────────────────────────────────────────────────────────────────────────────
+elif page == "Playbook":
+    st.title("Playbook")
+    st.caption("Full operating instructions for System 1 (Tri-City) and the Sandbox.")
+
+    cheatsheet = BASE_DIR / "CHEATSHEET.md"
+    if cheatsheet.exists():
+        st.markdown(cheatsheet.read_text())
+    else:
+        st.error("CHEATSHEET.md not found. Expected at: " + str(cheatsheet))
