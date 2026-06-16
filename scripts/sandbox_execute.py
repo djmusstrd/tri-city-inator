@@ -217,8 +217,8 @@ def execute_signal(signal, state: dict, dry_run: bool = False) -> bool:
                       "executed_today": [], "stopped_today": []})
         logger.info("New day — sandbox state reset")
 
-    # Guard 1: market hours (9:35 AM – 2:30 PM ET)
-    market_open  = now_et.replace(hour=9,  minute=35, second=0, microsecond=0)
+    # Guard 1: market hours (9:30 AM – 2:30 PM ET)
+    market_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
     market_close = now_et.replace(hour=14, minute=30, second=0, microsecond=0)
     if not (market_open <= now_et <= market_close):
         logger.info(f"[{symbol}] BLOCKED: outside market hours ({now_et.strftime('%H:%M ET')})")

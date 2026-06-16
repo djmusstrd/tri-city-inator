@@ -3,7 +3,7 @@
 ## Before Starting
 
 1. **TradingView Desktop must be running** with the **Tri-City Inator** scanner visible on
-   the **TRI CITY INATOR III** layout before 8:00 AM CT
+   the **Tri-City Scanner** layout before 8:00 AM CT
 2. `.env` must contain valid Alpaca API keys
 3. Start in paper trading mode until you have validated signals live
 
@@ -70,7 +70,9 @@ for i in $(seq 1 8); do
   [ "$READY" = "yes" ] && break
 done
 ```
-Once the chart page appears in CDP (or after 40s whichever comes first), call `layout_switch("TRI CITY INATOR III")`. If layout_switch fails or times out, continue anyway — the user can switch manually. Do NOT retry layout_switch more than once. Proceeding without the correct layout is better than blocking session startup.
+Once the chart page appears in CDP (or after 40s whichever comes first), call `layout_switch("Tri-City Scanner")`. If layout_switch fails or times out, continue anyway — the user can switch manually. Do NOT retry layout_switch more than once. Proceeding without the correct layout is better than blocking session startup.
+
+> **Note:** "Tri-City Scanner" (ID 190030097) is the active layout. "TRI CITY INATOR III" (ID 168250176) is stale (last modified 2025-12-05). Do NOT call `layout_switch` during an active session — it disrupts the MCP active tab context.
 
 **Step 1 — Read ORB_MINUTES from .env**
 Read the file `~/tri-city-inator/.env`. Look for a line like `ORB_MINUTES=15`.
@@ -86,13 +88,15 @@ Examples: ORB_MINUTES=5 → 8:35 AM, ORB_MINUTES=15 → 8:45 AM, ORB_MINUTES=30 
    /loop 7:30am weekdays First, call watchlist_get to fetch the current TradingView watchlist symbols. Write those symbols (as a JSON object {"symbols": ["NASDAQ:XXX", ...], "written_at": "HH:MM CT"}) to ~/tri-city-inator/shared/tri-city-watchlist-seeds.json. Then execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash and report the full output including ranked candidate table and any parabolic warnings. The scanner will automatically include watchlist symbols that aren't in the gap screener universe. Then read the "TV WATCHLIST" line at the bottom of the output and add each symbol to the TradingView watchlist using watchlist_add (one call per symbol).
 
 2. Symbol swap — weekdays at 8:00 AM CT:
-   /loop 8:00am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 20 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Build an inputs dict mapping in_7 through in_26 to those symbols (in_7=sym[0], in_8=sym[1], ..., in_26=sym[19]; omit keys for positions beyond the available count). Call indicator_set_inputs with entity_id="Kbzkkm" and that inputs dict. Report: how many symbols were pushed and list them.
+   /loop 8:00am weekdays Read ~/tri-city-inator/shared/tri-city-candidates.json. Extract the "tv_symbols" array (up to 20 exchange-prefixed symbols, e.g. "NASDAQ:RKLB"). Run `python -W ignore ~/tri-city-inator/scripts/tri_city_symbol_push.py` via Bash to push symbols into the Tri-City Inator scanner. Report: how many symbols were pushed and list them.
+
+   > **Why the script:** `indicator_set_inputs(entity_id="Kbzkkm")` fails because Kbzkkm lives on pane 1 (the MCP tool only searches pane 0). `study.restart()` reverts to server-saved state. The script uses `study._apiInputs()` + `_sendRequestImpl('modify_study', [sessionId, 'Kbzkkm', turnaround, inputs])` where sessionId comes from `_studyCounter` keys. See `scripts/tri_city_symbol_push.py`.
 
 3. Re-scan + health check — weekdays at 8:15 AM CT:
-   /loop 8:15am weekdays Run `python -W ignore ~/tri-city-inator/scripts/tri_city_health_check.py` via Bash and print the full output. If any item shows FAIL, alert the user immediately. If all PASS or WARN, report the summary line only. Then run the scanner again to refresh with updated pre-market data: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash. Read the updated ~/tri-city-inator/shared/tri-city-candidates.json. Push the refreshed "tv_symbols" array into Pine: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Report: "8:15 re-scan complete — {N} symbols updated in Pine."
+   /loop 8:15am weekdays Run `python -W ignore ~/tri-city-inator/scripts/tri_city_health_check.py` via Bash and print the full output. If any item shows FAIL, alert the user immediately. If all PASS or WARN, report the summary line only. Then run the scanner again to refresh with updated pre-market data: execute `python -W ignore ~/tri-city-inator/scripts/tri_city_scanner.py` via Bash. Read the updated ~/tri-city-inator/shared/tri-city-candidates.json. Push the refreshed "tv_symbols" array into Pine: run `python -W ignore ~/tri-city-inator/scripts/tri_city_symbol_push.py` via Bash. Report: "8:15 re-scan complete — {N} symbols updated in Pine."
 
 4. Intraday symbol push — every 30 min all day (fires continuously after registration):
-   /loop 30m weekdays Check current CT time. If before 9:00 AM, skip silently. Otherwise: read ~/tri-city-inator/shared/tri-city-candidates.json. Push the "tv_symbols" array (top-20 combined) into the main indicator: build an inputs dict mapping in_7 through in_26 and call indicator_set_inputs with entity_id="Kbzkkm". Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Then read the current Pine scanner table (data_get_pine_tables with study_filter="Inator") and for any symbol in the new tv_symbols that does NOT already have an entry in shared/tri-city-levels.json, read its ORH/ORL from the Pine table "ORH/ORL" column and append it to tri-city-levels.json. Report: how many symbols were pushed to Kbzkkm. If before 9 AM, report nothing.
+   /loop 30m weekdays Check current CT time. If before 9:00 AM, skip silently. Otherwise: run `python -W ignore ~/tri-city-inator/scripts/tri_city_symbol_push.py` via Bash. Also add any new symbols to the TradingView watchlist using watchlist_add (one call per new symbol). Then read the current Pine scanner table (data_get_pine_tables with study_filter="Inator") and for any symbol in the new tv_symbols that does NOT already have an entry in shared/tri-city-levels.json, read its ORH/ORL from the Pine table "ORH/ORL" column and append it to tri-city-levels.json. Report: how many symbols were pushed to Kbzkkm. If before 9 AM, report nothing.
 
 > **Level lock is handled by `tri_city_level_lock.py` via launchd (NOT a Claude cron).**
 > A launchd agent (`~/Library/LaunchAgents/com.starks-labs.tricity-level-lock.plist`) fires the
@@ -118,17 +122,26 @@ Do not show the /loop commands to the user. Do not ask them to paste anything.
 
 | Item | Value |
 |------|-------|
-| Layout | **TRI CITY INATOR III** (ID 168250176) |
+| Layout | **Tri-City Scanner** (ID 190030097) |
 | Indicator | **Tri-City Inator** (Pine shorttitle: "Tri-City") |
-| Entity ID | `Kbzkkm` |
+| Entity ID | `Kbzkkm` (on **pane 1** — the sub-pane below the main chart) |
 | Symbol inputs | `in_7` through `in_26` (20 slots) |
 | Table columns | SYMBOL · PRICE · RSI · EMA DEV% · RVOL · ORH/ORL · CUP · SMA↑ · SIGNAL |
+
+> ⚠️ **`indicator_set_inputs` MCP tool does NOT work for this indicator** — it uses `getStudyById` which only searches the active pane and cannot reach pane 1. Use CDP JavaScript directly (see below).
+
+To push symbols via CDP (the only working method):
+```bash
+python -W ignore ~/tri-city-inator/scripts/tri_city_symbol_push.py
+```
+The script gets `sessionId` from `_studyCounter`, calls `study._apiInputs()`, updates `in_7`–`in_26`, then sends via `_sendRequestImpl('modify_study', ...)`. Do NOT use `study.restart()` — it reverts to server-saved state.
 
 To read the live scanner table:
 ```
 data_get_pine_tables with study_filter="Inator"
 ```
 > Note: use `"Inator"` not `"Tri-City"` — the Positions tracker is also named "Tri-City Positions" and would otherwise appear first.
+> Note: if data_get_pine_tables returns empty, switch to tab 0 first with tab_switch(index=0).
 
 ---
 
