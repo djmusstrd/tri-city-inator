@@ -93,7 +93,7 @@ def _write_summary(state: dict, cycle: int, last_signals: list) -> None:
             "executed_today": state.get("executed_today", []),
             "last_signals":  [
                 {"symbol": s.symbol, "direction": s.direction,
-                 "strategy": s.strategy, "label": s.label_text}
+                 "strategy": s.strategy, "label": s.signal_id}
                 for s in last_signals
             ],
         }, indent=2))
@@ -155,9 +155,9 @@ def run(poll_interval: int = DEFAULT_POLL_INTERVAL, dry_run: bool = False) -> No
 
             if signals:
                 logger.info(f"[cycle {cycle}] {len(signals)} signal(s): "
-                            f"{[(s.symbol, s.direction, s.label_text) for s in signals]}")
+                            f"{[(s.symbol, s.direction, s.signal_id) for s in signals]}")
             else:
-                logger.info(f"[cycle {cycle}] No new signals (lastBarIdx={new_bar_idx})")
+                logger.info(f"[cycle {cycle}] No new signals")
 
             # Execute new LONG signals
             long_signals = [s for s in signals if s.direction == "long"]

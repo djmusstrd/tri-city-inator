@@ -236,7 +236,7 @@ def manage(exit_signals: list, state: dict, dry_run: bool = False) -> dict:
         if symbol not in positions:
             continue
         if dry_run:
-            logger.info(f"[{symbol}] DRY-RUN exit signal: {signal.label_text}")
+            logger.info(f"[{symbol}] DRY-RUN exit signal: {signal.signal_id}")
             continue
         # Cancel bracket legs first, then close
         _cancel_all_orders(client, symbol)

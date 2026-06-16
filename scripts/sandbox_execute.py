@@ -113,14 +113,16 @@ def _compute_atr(symbol: str) -> float | None:
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from datetime import timedelta
         import pandas as pd
 
         client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        start  = datetime.now(ET) - timedelta(hours=8)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-            limit=ATR_PERIOD * 3,
-            feed="iex",
+            start=start,
+            feed="sip",
             adjustment="raw",
         )
         bars = client.get_stock_bars(req).df
