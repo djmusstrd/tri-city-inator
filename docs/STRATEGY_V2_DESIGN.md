@@ -233,13 +233,27 @@ liquidity filter → full history on survivors).
   "expanding" refinement; liquidity floor scaling with account equity; pre-open scheduling.
 
 ### Phase 2 — Timing Engine (Layer 2) + Rationale Capture (Layer 6 foundation)
-- [ ] Faster open cadence (1-min first hour) in a V2 poller; separate from the paused system.
-- [ ] Intraday entry setups (gap-and-go / first-pullback / ORB) on eligible leaders only.
+**Phase 2a — entry-timing validation ✅ DONE (2026-06-16).**
+`scripts/apex_phase2_entry_backtest.py` compared entry triggers on the same leaders
+(bias-free). 40 leaders, 24 days, forward returns on daily closes:
+| Trigger | N | Close% | +2D% | Win% |
+|---|---|---|---|---|
+| OPEN (baseline) | 949 | +0.89 | +4.77 | 53% |
+| **ORB15 (vol-confirmed)** | 445 | **+1.51** | **+6.38** | **66%** |
+| VWAP_PB | 734 | +0.97 | +5.84 | 57% |
+→ **ORB15 (volume-confirmed opening-range breakout) is the primary entry** (best R/R + 66%
+win, fires on ~47% of leader-days = self-filters to names with real intraday momentum).
+**VWAP_PB = secondary entry.** Naive open-buy is worst — timing matters. Caveats: short
+24-day strong-tape sample (relative ordering robust, absolute won't hold in chop); ORB fills
+modeled at breakout level.
+
+**Phase 2b — live engine build (needs a live session to test). TODO:**
+- [ ] V2 intraday poller (faster open cadence) reading the Layer-1 leader watchlist; separate
+      from the paused system. Primary entry = ORB15, secondary = VWAP_PB.
 - [ ] Composite confluence score + tunable entry threshold.
 - [ ] Data-quality gate (no RSI=0 / EMA_dev=0 entries).
 - [ ] **Trade Rationale snapshot on every entry** (score breakdown, RS pct, ribbon state,
-      filters passed, regime, levels, health-at-entry) — the record that powers alerts +
-      dashboard + Layer 4. Build this with the entry path, not later.
+      filters passed, regime, levels, health-at-entry) — powers alerts + dashboard + Layer 4.
 - [ ] **Rich Telegram entry alert** carrying the rationale (why this stock, why now).
 
 ### Phase 3 — Trade Health Monitor (Layer 3)
