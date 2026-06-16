@@ -1,0 +1,105 @@
+//@version=6
+// APEX Phase 0 — concept smoke-test: RS (single-symbol proxy) + EMA Ribbon, long-only.
+// NOTE: This is a CHEAP concept test. The fake single-symbol RS here is replaced by a
+// true universe-percentile RS in the Python build (Phase 1). RSI divergence dropped
+// (broken in source). See docs/STRATEGY_V2_DESIGN.md.
+strategy("APEX Phase 0 — RS + EMA Ribbon", shorttitle="APEX-P0", overlay=true,
+         initial_capital=5000,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         commission_type=strategy.commission.percent, commission_value=0.1,
+         calc_on_every_tick=false, max_bars_back=600, pyramiding=0)
+
+// ---------- Inputs ----------
+g_risk = "Risk & Exits"
+risk_pct      = input.float(2.0, "Risk per trade (%)", minval=0.25, maxval=10, step=0.25, group=g_risk)
+atr_len       = input.int(14, "ATR length", minval=5, maxval=50, group=g_risk)
+atr_stop_mult = input.float(2.0, "ATR stop mult", minval=0.5, maxval=5, step=0.5, group=g_risk)
+tp_ratio      = input.float(2.5, "Take-profit R:R", minval=1.0, maxval=6.0, step=0.5, group=g_risk)
+use_tp        = input.bool(true, "Use take-profit", group=g_risk)
+exit_on_break = input.bool(true, "Exit on trend break (close < EMA21)", group=g_risk)
+
+g_rs = "Relative Strength (single-symbol vs benchmark)"
+benchmark = input.symbol("SPY", "Benchmark", group=g_rs)
+rs_min    = input.float(55.0, "Min RS score to go long (0-100)", minval=0, maxval=100, group=g_rs)
+
+g_ema = "EMA Ribbon"
+e1 = input.int(8,  "EMA 1", group=g_ema)
+e2 = input.int(13, "EMA 2", group=g_ema)
+e3 = input.int(21, "EMA 3", group=g_ema)
+e4 = input.int(34, "EMA 4", group=g_ema)
+e5 = input.int(55, "EMA 5", group=g_ema)
+
+g_sig = "Signal"
+entry_thresh = input.float(65.0, "Composite entry threshold", minval=40, maxval=90, group=g_sig)
+rs_weight    = input.float(50.0, "RS weight %", minval=0, maxval=100, step=5, group=g_sig)
+ema_weight   = input.float(50.0, "EMA weight %", minval=0, maxval=100, step=5, group=g_sig)
+
+// ---------- Relative Strength (IBD-style quarter weighting, single-symbol proxy) ----------
+bench = request.security(benchmark, timeframe.period, close)
+q1 = 63
+q2 = 126
+q3 = 189
+q4 = 252
+perf(src, n) => (src / src[n] - 1) * 100
+stock_w = perf(close, q1) * 0.4 + perf(close, q2) * 0.2 + perf(close, q3) * 0.2 + perf(close, q4) * 0.2
+bench_w = perf(bench, q1) * 0.4 + perf(bench, q2) * 0.2 + perf(bench, q3) * 0.2 + perf(bench, q4) * 0.2
+rs_diff  = stock_w - bench_w
+rs_score = math.max(0, math.min(100, 50 + rs_diff))
+
+// ---------- EMA Ribbon ----------
+m1 = ta.ema(close, e1)
+m2 = ta.ema(close, e2)
+m3 = ta.ema(close, e3)
+m4 = ta.ema(close, e4)
+m5 = ta.ema(close, e5)
+bull      = close > m1 and m1 > m2 and m2 > m3 and m3 > m4 and m4 > m5
+width     = (m1 - m5) / m3 * 100
+expanding = width > width[1]
+above     = close > m1 and close > m2 and close > m3
+
+ema_score = 50.0
+if bull and expanding and above
+    ema_score := 100
+else if bull and above
+    ema_score := 80
+else if above and expanding
+    ema_score := 65
+else if above
+    ema_score := 50
+else
+    ema_score := 25
+
+// ---------- Composite ----------
+tw   = rs_weight + ema_weight
+comp = rs_score * (rs_weight / tw) + ema_score * (ema_weight / tw)
+
+// ---------- Sizing (risk-based, long-only, no leverage) ----------
+atr_v     = ta.atr(atr_len)
+stop_dist = atr_v * atr_stop_mult
+risk_dollars = strategy.equity * (risk_pct / 100)
+raw_qty   = stop_dist > 0 ? math.floor(risk_dollars / stop_dist) : 0
+cash_qty  = math.floor(strategy.equity / close)
+qty       = math.max(1, math.min(raw_qty, cash_qty))
+
+// ---------- Entry / Exit ----------
+long_cond = strategy.position_size == 0 and comp > entry_thresh and rs_score > rs_min and not na(atr_v)
+
+var float stop_px = na
+var float tp_px   = na
+if long_cond
+    stop_px := close - stop_dist
+    tp_px   := close + stop_dist * tp_ratio
+    strategy.entry("L", strategy.long, qty=qty)
+
+if strategy.position_size > 0
+    strategy.exit("L-x", "L", stop=stop_px, limit=use_tp ? tp_px : na)
+    if exit_on_break and close < m3
+        strategy.close("L", comment="trend break")
+
+// ---------- Plots ----------
+plot(m1, "EMA8",  color=color.red)
+plot(m2, "EMA13", color=color.orange)
+plot(m3, "EMA21", color=color.yellow)
+plot(m4, "EMA34", color=color.green)
+plot(m5, "EMA55", color=color.blue)
+plotshape(long_cond, "Entry", shape.triangleup, location.belowbar, color.lime, size=size.small)

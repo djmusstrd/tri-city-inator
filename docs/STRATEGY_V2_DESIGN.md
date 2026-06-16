@@ -195,11 +195,25 @@ From the operator's "Multi-Indicator Strategy: IBD RS + EMA Ribbon + RSI Diverge
 
 ## 6. Phased Build Plan (the to-do list)
 
-### Phase 0 — Validate the concept cheaply (TradingView, no Python)
-- [ ] Clean the source Pine script: drop broken RSI divergence, mark RS as single-symbol
-      momentum, fix sizing, long-only.
-- [ ] Run daily-bar backtest across a representative basket (typical universe + known leaders).
-- [ ] Read backtest stats — does RS + ribbon core show edge? Go/no-go gate before any Python.
+### Phase 0 — Validate the concept ✅ DONE (2026-06-16) — GREENLIGHT
+- [x] Clean Pine script (`pine/apex_phase0.pine`): RSI divergence dropped, RS marked as
+      single-symbol proxy, sizing fixed, long-only.
+- [x] Pivoted from single-symbol TV backtest to a **multi-symbol Python backtest**
+      (`scripts/apex_phase0_backtest.py`, Alpaca daily bars) — more rigorous aggregate
+      expectancy, zero risk to the live TV tabs. TV tab handling was flaky + single-symbol
+      can't test a relative-strength concept.
+- [x] Results (3y daily, R-multiple expectancy):
+      - **Take-profit capped:** 547 trades, 35.6% win, **+0.214R**, PF 1.66.
+      - **Let-it-run (no TP):** 442 trades, 32.6% win, **+0.424R**, PF 2.32, best +21.85R.
+        → *Letting winners run ~doubles expectancy* (bias-free, same basket). Validates the
+        "never sell without a reason" core. Edge = fat right tail, not high win rate.
+      - **Neutral/laggard basket (robustness):** **+0.146R**, PF 1.44 — still positive; RS
+        filter self-throttled (2–5 trades on laggards vs 20–35 on trenders).
+- [x] **Verdict: GREENLIGHT.** Positive expectancy across winner + laggard baskets; let-it-run
+      is the key driver; RS filter discriminates.
+- Caveats (NOT yet proven): daily-close fills, no slippage/commission in R, single-symbol RS
+  proxy (not the real universe percentile), no walk-forward. The core Phase 1 question —
+  *can RS ranking pick leaders prospectively?* — remains to be tested.
 
 ### Phase 1 — Daily Filter (Layer 1) in Python
 - [ ] Universe RS percentile in the scanner (rank weighted returns vs. full scanned universe).
