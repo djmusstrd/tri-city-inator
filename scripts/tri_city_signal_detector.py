@@ -1096,12 +1096,19 @@ def detect_setup(row: dict, now: datetime | None = None,
 
 # ── RVOL spike detection ──────────────────────────────────────────────────────
 
+RVOL_SPIKE_LOG = WORKSPACE / "logs" / "tri-city-rvol-spikes.json"
+
+
 def detect_rvol_spikes(rows: list[dict], prev_state: dict) -> list[dict]:
     """
     Compare current RVOL to previous cycle snapshot.
     Alert if increase ≥ RVOL_SPIKE_THRESH AND current ≥ RVOL_SPIKE_MIN.
+    Appends full row context to logs/tri-city-rvol-spikes.json for study.
     """
     spikes = []
+    new_entries = []
+    now_str = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d %H:%M CT")
+
     for row in rows:
         sym  = row["symbol"]
         now  = row["rvol"]
@@ -1109,7 +1116,30 @@ def detect_rvol_spikes(rows: list[dict], prev_state: dict) -> list[dict]:
         if prev > 0 and now >= RVOL_SPIKE_MIN:
             increase = (now - prev) / prev
             if increase >= RVOL_SPIKE_THRESH:
-                spikes.append({"symbol": sym, "prev": prev, "now": now})
+                spike = {"symbol": sym, "prev": round(prev, 2), "now": round(now, 2)}
+                spikes.append(spike)
+                new_entries.append({
+                    "ts":      now_str,
+                    "symbol":  sym,
+                    "rvol_prev": round(prev, 2),
+                    "rvol_now":  round(now, 2),
+                    "pct_jump":  round(increase * 100, 1),
+                    "price":   row.get("price", 0),
+                    "signal":  row.get("signal", ""),
+                    "rsi":     row.get("rsi", 0),
+                    "ema_dev": row.get("ema_dev", 0),
+                    "orh":     row.get("orh", 0),
+                    "orl":     row.get("orl", 0),
+                    "cup":     row.get("cup", False),
+                })
+
+    if new_entries:
+        try:
+            existing = json.loads(RVOL_SPIKE_LOG.read_text()) if RVOL_SPIKE_LOG.exists() else []
+            RVOL_SPIKE_LOG.write_text(json.dumps(existing + new_entries, indent=2))
+        except Exception as e:
+            logger.warning(f"RVOL spike log write failed: {e}")
+
     return spikes
 
 
