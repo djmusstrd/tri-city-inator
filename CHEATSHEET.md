@@ -17,6 +17,35 @@
 
 ---
 
+## ⚠️ APEX (System 4 — in build) & Test Isolation
+
+APEX is the new relative-strength **leader** system: daily filter (universe-ranked RS + EMA
+ribbon) → intraday **ORB15** entry → **let winners run** (positions graduate intraday→swing).
+Alpaca-native — **no TradingView / CDP**. Full design: `docs/STRATEGY_V2_DESIGN.md`.
+Resume the build any time by typing **`apex`** in the terminal.
+
+> **⚠️ To run an APEX test in isolation — disable the old System 1 first.**
+> System 1 **auto-starts every weekday** via launchd (`com.starks-labs.tricity-level-lock`
+> at 8:36 / 8:46 / 9:01 AM CT) — it locks levels and launches the System 1 poller on the
+> **same paper account**, which would muddy an APEX test. The **Sandbox does NOT auto-start**
+> (manual only), so it won't interfere unless you launch it.
+
+```bash
+# Disable System 1 auto-start (reversible)
+launchctl unload ~/Library/LaunchAgents/com.starks-labs.tricity-level-lock.plist
+# Re-arm it later:
+launchctl load   ~/Library/LaunchAgents/com.starks-labs.tricity-level-lock.plist
+
+# Confirm nothing is already running before the test
+ps aux | grep -E "tri_city_tv_poller|sandbox_poller|apex_poller" | grep -v grep
+
+# Run APEX alone (dry-run first)
+apex-leaders                                                  # build today's leader watchlist
+bash ~/tri-city-inator/scripts/start_apex_poller.sh --dry-run # then drop --dry-run for paper
+```
+
+---
+
 ## Daily Schedule (Central Time)
 
 | Time (CT) | Event | Who runs it |
@@ -231,7 +260,48 @@ cat ~/tri-city-inator/shared/sandbox-state.json
 # Check pollers are running
 kill -0 $(cat ~/tri-city-inator/shared/tri-city-poller.pid) && echo "S1 running" || echo "S1 STOPPED"
 kill -0 $(cat ~/tri-city-inator/shared/sandbox-poller.pid)  && echo "SB running" || echo "SB STOPPED"
+
+# APEX — live poller activity + state
+tail -f ~/tri-city-inator/logs/apex-poller.log
+cat ~/tri-city-inator/shared/apex-state.json
 ```
+
+---
+
+## 🐞 Debugging — if something looks wrong
+
+**1. What's running + what auto-starts:**
+```bash
+ps aux | grep -E "tri_city_tv_poller|sandbox_poller|apex_poller" | grep -v grep
+launchctl list | grep starks          # tricity-level-lock = System 1 auto-start
+```
+
+**2. Logs (newest activity / errors):**
+| System | Log file |
+|---|---|
+| System 1 poller | `logs/tri-city-tv-poller.log` |
+| System 1 exec / blocked | `logs/tri-city-execute.log` |
+| Sandbox | `logs/sandbox-poller.log` |
+| APEX | `logs/apex-poller.log` |
+
+**3. APEX self-test (full chain, NO live market needed):**
+```bash
+# Replay a past session through detect → guards → sizing → rationale → Telegram
+python -W ignore ~/tri-city-inator/scripts/apex_poller.py --self-test 2026-06-15
+cat ~/tri-city-inator/shared/apex-leaders.json     # today's leaders
+cat ~/tri-city-inator/logs/apex-rationale.json      # why each entry fired
+cat ~/tri-city-inator/logs/apex-executions.json     # entries + order ids
+```
+
+**4. Known failure modes (lessons learned):**
+| Symptom | Cause / fix |
+|---|---|
+| Duplicate trades / extra signals | Zombie pollers — start scripts pkill by name; verify with `ps aux` |
+| Sandbox shows non-ETF symbols (SPCB, INDI) | Wrong-tab CDP read — fixed via tab probe; only affects TV-based systems |
+| "SANDBOX CDP target not found" | CDP probe timeout / TV tab closed — APEX is CDP-free, immune |
+| Entries with RSI=0 / EMA_dev=0 | Stale/empty scanner table (System 1) — APEX has a data-quality gate |
+| Absurd stop distance / tiny qty | Wide ATR stop — APEX caps stop at `APEX_MAX_STOP_PCT` (10%) |
+| Nothing trading on the APEX account | Did `apex-leaders` run today? Is `apex_poller` running? Is it `--dry-run`? |
 
 ---
 
