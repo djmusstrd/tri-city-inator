@@ -88,12 +88,39 @@ _PUSH_JS_TEMPLATE = """(function() {{
 }})()"""
 
 
+_PROBE_JS = """(function() {
+  try {
+    var panes = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().panes();
+    for (var pi=0; pi<panes.length; pi++) {
+      var srcs = panes[pi].dataSources();
+      for (var si=0; si<srcs.length; si++) {
+        try { if (srcs[si].id() === 'Kbzkkm') return 'found'; } catch(e) {}
+      }
+    }
+    return 'not_found';
+  } catch(e) { return 'err'; }
+})()"""
+
+
 def get_tv_tab():
+    """Return the TV chart tab that contains the Kbzkkm study."""
     try:
         resp = requests.get(f"http://{CDP_HOST}:{CDP_PORT}/json/list", timeout=5)
-        for t in resp.json():
-            if t.get("type") == "page" and "tradingview.com/chart" in t.get("url", "").lower():
-                return t
+        tabs = [t for t in resp.json()
+                if t.get("type") == "page" and "tradingview.com/chart" in t.get("url", "").lower()]
+        # Try each tab — return the one where Kbzkkm is found
+        for t in tabs:
+            ws_url = t.get("webSocketDebuggerUrl")
+            if not ws_url:
+                continue
+            try:
+                result = cdp_evaluate(ws_url, _PROBE_JS, timeout=5)
+                if result == "found":
+                    return t
+            except Exception:
+                pass
+        # Fallback: return first tab
+        return tabs[0] if tabs else None
     except Exception as e:
         logger.warning(f"CDP list failed: {e}")
     return None
