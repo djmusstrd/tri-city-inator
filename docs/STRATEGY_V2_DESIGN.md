@@ -247,14 +247,26 @@ win, fires on ~47% of leader-days = self-filters to names with real intraday mom
 24-day strong-tape sample (relative ordering robust, absolute won't hold in chop); ORB fills
 modeled at breakout level.
 
-**Phase 2b — live engine build (needs a live session to test). TODO:**
-- [ ] V2 intraday poller (faster open cadence) reading the Layer-1 leader watchlist; separate
-      from the paused system. Primary entry = ORB15, secondary = VWAP_PB.
-- [ ] Composite confluence score + tunable entry threshold.
-- [ ] Data-quality gate (no RSI=0 / EMA_dev=0 entries).
-- [ ] **Trade Rationale snapshot on every entry** (score breakdown, RS pct, ribbon state,
-      filters passed, regime, levels, health-at-entry) — powers alerts + dashboard + Layer 4.
-- [ ] **Rich Telegram entry alert** carrying the rationale (why this stock, why now).
+**Phase 2b — live engine SKELETON ✅ BUILT (2026-06-16, untested live — validated via self-test).**
+Alpaca-native (NO TradingView/CDP dependency — removes the fragility class that broke the old
+system). Modules:
+- `apex_config.py` — central tunables + Layer 4 guardrail bands; loads .env centrally.
+- `apex_entry_engine.py` — ORB15 (primary) / VWAP_PB (secondary) detector mirroring the
+  Phase 2a backtest; data-quality gate; composite confluence score.
+- `apex_execute.py` — guards (positions/dup/daily-loss/score), risk-based sizing (no leverage,
+  cash-capped), ATR stop **capped at MAX_STOP_PCT (10%)**, entry+stop order (NO TP cap —
+  Layer 3 owns the exit), exec log + rationale + Telegram.
+- `apex_rationale.py` — Layer 6 snapshot ("why this stock, why now") + rich Telegram message.
+- `apex_poller.py` — orchestration loop, fast cadence first hour, `--self-test [DATE]` replays
+  a past session with no live market, `--dry-run`. Layer 5 regime = SPY/50-SMA stub.
+- `start_apex_poller.sh` — launcher with orphan-kill safety net (sandbox-zombie lesson).
+- Self-test (replay 2026-06-15, 192 leaders): full chain fired 5 entries, guards + capped
+  stops + rationale + Telegram all correct. Max-stop cap added after self-test exposed 60%
+  ATR stops on volatile leaders.
+- [ ] **Remaining for go-live (next live session):** wire into a live paper session, watch a
+      real ORB15 entry fire, confirm Telegram delivery + rationale persistence intraday.
+- TODO (small-account practicality): high-priced leaders ($2k+ names) only afford 1 share on
+  $5K — consider fractional shares or account-aware price ceiling in Layer 1.
 
 ### Phase 3 — Trade Health Monitor (Layer 3)
 - [ ] Per-position health-score function (thesis, momentum, levels, time-in-trade).
