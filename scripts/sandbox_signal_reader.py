@@ -131,11 +131,11 @@ def _find_sandbox_target() -> dict | None:
             if not ws_url:
                 continue
             try:
-                result = _cdp_evaluate(ws_url, _PROBE_SANDBOX_JS, timeout=5)
+                result = _cdp_evaluate(ws_url, _PROBE_SANDBOX_JS, timeout=12)
                 if result == "sandbox":
                     return t
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Probe failed for {t.get('id','?')}: {e}")
         return None
     except Exception as e:
         logger.warning(f"CDP target list failed: {e}")
