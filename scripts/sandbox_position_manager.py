@@ -42,6 +42,9 @@ ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_PAPER      = os.getenv("ALPACA_PAPER", "true").lower() == "true"
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
 EOD_HOUR   = int(os.getenv("SANDBOX_EOD_HOUR",   "14"))
 EOD_MINUTE = int(os.getenv("SANDBOX_EOD_MINUTE", "45"))
 
@@ -167,6 +170,13 @@ def _log_exit(symbol: str, position: dict, exit_price: float,
     _save_journal(journal)
     logger.info(f"[{symbol}] EXIT {exit_reason}: pnl={pnl:.2f} R={r_multiple}")
     _notify(f"SANDBOX {symbol} EXIT", f"{exit_reason} P&L={pnl:+.2f} R={r_multiple}")
+    emoji = "✅" if pnl >= 0 else "🔴"
+    _send_telegram(
+        f"{emoji} <b>SANDBOX EXIT</b> — {symbol}\n"
+        f"Reason: {exit_reason}\n"
+        f"Entry: ${entry_price:.2f}  Exit: ${exit_price:.2f}\n"
+        f"P&L: ${pnl:+.2f}  R: {r_multiple:+.2f}"
+    )
     return pnl
 
 
@@ -179,6 +189,18 @@ def _notify(title: str, msg: str) -> None:
         )
     except Exception:
         pass
+
+
+def _send_telegram(msg: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        import urllib.parse, urllib.request as _ur
+        url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}).encode()
+        _ur.urlopen(_ur.Request(url, data=data), timeout=5)
+    except Exception as e:
+        logger.debug(f"Telegram send failed: {e}")
 
 
 def manage(exit_signals: list, state: dict, dry_run: bool = False) -> dict:

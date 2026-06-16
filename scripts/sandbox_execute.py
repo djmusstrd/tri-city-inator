@@ -61,6 +61,9 @@ ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_PAPER      = os.getenv("ALPACA_PAPER", "true").lower() == "true"
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -314,6 +317,13 @@ def execute_signal(signal, state: dict, dry_run: bool = False) -> bool:
 
     logger.info(f"[{symbol}] ORDER PLACED: qty={qty} stop={result['stop']:.2f} target={result['target']:.2f}")
     _notify(f"SANDBOX {symbol} LONG", f"qty={qty} entry={entry_price:.2f} stop={result['stop']:.2f}")
+    _send_telegram(
+        f"🟢 <b>SANDBOX LONG</b> — {symbol}\n"
+        f"Strategy: {strategy}\n"
+        f"Entry: ${entry_price:.2f}  Qty: {qty}\n"
+        f"Stop: ${result['stop']:.2f}  Target: ${result['target']:.2f}\n"
+        f"ATR: {atr:.2f}{'  [DRY-RUN]' if dry_run else ''}"
+    )
     return True
 
 
@@ -327,3 +337,15 @@ def _notify(title: str, msg: str) -> None:
         )
     except Exception:
         pass
+
+
+def _send_telegram(msg: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        import urllib.parse, urllib.request as _ur
+        url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}).encode()
+        _ur.urlopen(_ur.Request(url, data=data), timeout=5)
+    except Exception as e:
+        logger.debug(f"Telegram send failed: {e}")
