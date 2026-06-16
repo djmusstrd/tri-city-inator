@@ -101,19 +101,42 @@ _SANDBOX_JS = """
 """
 
 
+_PROBE_SANDBOX_JS = """(function() {
+  try {
+    var api = window.TradingViewApi;
+    var defs = api._chartWidgetCollection._chartWidgetsDefs;
+    var syms = [];
+    for (var i = 0; i < 3; i++) {
+      try {
+        var s = defs[i].chartWidget.model().mainSeries().symbolInfo().name || '';
+        syms.push(s.split(':').pop());
+      } catch(e) { syms.push(''); }
+    }
+    var has = function(x) { return syms.indexOf(x) !== -1; };
+    return (has('QQQ') && has('SPY') && has('IWM')) ? 'sandbox' : 'other';
+  } catch(e) { return 'err'; }
+})()"""
+
+
 def _find_sandbox_target() -> dict | None:
     try:
         resp = requests.get(f"http://{CDP_HOST}:{CDP_PORT}/json/list", timeout=5)
-        targets = resp.json()
-        tv = [t for t in targets
+        tv = [t for t in resp.json()
               if t.get("type") == "page"
               and "tradingview.com/chart" in t.get("url", "").lower()]
         if not tv:
             return None
         for t in tv:
-            if "sandbox" in t.get("title", "").lower():
-                return t
-        return tv[0]
+            ws_url = t.get("webSocketDebuggerUrl")
+            if not ws_url:
+                continue
+            try:
+                result = _cdp_evaluate(ws_url, _PROBE_SANDBOX_JS, timeout=5)
+                if result == "sandbox":
+                    return t
+            except Exception:
+                pass
+        return None
     except Exception as e:
         logger.warning(f"CDP target list failed: {e}")
         return None
@@ -138,8 +161,11 @@ def _cdp_evaluate(ws_url: str, expression: str, timeout: int = 20) -> object:
                 msg = json.loads(ws.recv())
                 if msg.get("id") == 1:
                     res = msg.get("result", {}).get("result", {})
-                    if res.get("type") == "object" and "value" in res:
+                    rtype = res.get("type")
+                    if rtype == "object" and "value" in res:
                         return res["value"]
+                    if rtype == "string":
+                        return res.get("value")
                     exc = msg.get("result", {}).get("exceptionDetails")
                     if exc:
                         logger.warning(f"CDP JS error: {exc.get('text', exc)}")
