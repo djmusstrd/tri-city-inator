@@ -1,76 +1,81 @@
 # APEX — Live-Paper Operating Playbook
 
 The complete workflow for running APEX (System 4) on the Alpaca **paper** account.
-APEX = daily RS-leader scan → real-time ORB15 / VWAP_PB entries → Layer 3 health-managed exits.
-**Architecture:** Alpaca = daily scan + intraday levels + execution · TradingView quote session
-(CDP) = real-time trigger price + the chart · Telegram = alerts · dashboard = your eyes.
+APEX = daily RS-leader scan → real-time ORB15 / VWAP_PB entries → Layer 3 health-managed exits →
+operator-steered overnight swings. Autonomous within standing operator flags.
 
-> Money is **paper only** (`ALPACA_PAPER=true`). Never real funds in this phase.
+> **Architecture:** Alpaca = daily scan + intraday levels + execution · TradingView quote session
+> (CDP) = real-time trigger price + the chart · Telegram = alerts + carry control · dashboard =
+> your cockpit. Money is **paper only** (`ALPACA_PAPER=true`).
 
 ---
 
-## TL;DR — the daily rhythm (3 commands)
+## TL;DR — the daily rhythm
 
 ```bash
-apex            # morning: brings up TV+CDP, leaders, poller (LIVE PAPER) + opens Claude
-                # …APEX trades itself all day; you watch the dashboard / Telegram…
-end session     # type this in Claude at the end → flatten + day summary
+apex            # morning: TV+CDP, leaders, poller (LIVE PAPER) + Telegram listener + Claude
+                # …APEX trades itself; you steer with flags + approve/deny carries…
+end session     # type in Claude → stop poller + flatten intraday (swings stay)
 ```
 
-That's the whole loop. Everything below is detail, monitoring, and troubleshooting.
+Dashboard: **https://apex.clawbotinator.trade** (phone + desktop, behind Cloudflare). Carry control
+from your phone: reply **`deny SYM`** / **`keep SYM`** to the Telegram bot.
 
 ---
 
 ## Pre-flight checklist
 
 **One-time / rarely changes**
-- [ ] `.env` has Alpaca **paper** keys and `ALPACA_PAPER=true`  ✓ confirmed
-- [ ] Telegram bot token + chat ID in `.env`  ✓ confirmed (alerts fire to your phone)
-- [ ] TradingView Desktop is **logged in** with a **real-time** US-equity data feed
-      (the hybrid needs real-time quotes; a delayed TV plan would defeat the purpose)
-- [ ] **System 1 is OFF** so it doesn't trade the same paper account and muddy results:
-      ```bash
-      launchctl list | grep level-lock        # expect: no output (not loaded) ✓
-      # if it IS loaded, disable it:
-      launchctl unload ~/Library/LaunchAgents/com.starks-labs.tricity-level-lock.plist
-      ```
+- [ ] `.env` has Alpaca **paper** keys + `ALPACA_PAPER=true`; Telegram bot token + chat ID
+- [ ] TradingView Desktop logged in with a **real-time** US-equity feed (the hybrid needs it)
+- [ ] **System 1 OFF** so it doesn't trade the same paper account:
+      `launchctl list | grep level-lock` → expect no output
+- [ ] Cloudflare: `apex.clawbotinator.trade` is gated by your **Cloudflare Access** policy (this
+      dashboard places/closes trades — never leave it open)
 
-**Each morning (handled by `apex`, but good to know)**
-- TradingView running with CDP on port 9222
-- Today's leader watchlist built (`shared/apex-leaders.json` dated today)
-- Poller running (`shared/apex-poller.pid` alive)
+**Each morning (handled by `apex`)** — TV+CDP up · today's leaders built · poller running ·
+Telegram reply-listener active (inside the poller).
 
 ---
 
 ## Daily workflow
 
-### 1. Start — type `apex`
-Best **before 8:30 AM CT** (market open) so it captures the morning, but it works any time —
-the poller idles until the open and the opening range. `apex` runs `apex_session_start.sh`:
-1. Brings up **TradingView + CDP** (or detects it's already up)
-2. Builds **today's leaders** (or detects today's are ready)
-3. Starts the **poller in LIVE PAPER mode**
-4. Opens **Claude** to monitor + handle "end session"
+### 1. Start — `apex`
+Best before the 8:30 CT open. Runs `apex_session_start.sh`: brings up TV+CDP, builds today's
+leaders, starts the poller in **LIVE PAPER** mode (`apex --dry-run` for log-only), opens Claude to
+monitor. The poller also runs the Telegram listener and clears any stale quote subscriptions.
 
-> Log-only instead? `apex --dry-run` (no orders placed).
+### 2. The trading day (autonomous, you steer)
+Each cycle (fast first hour + fast again in the EOD window, slow midday) the poller:
+1. Pulls delayed bars (levels) + **real-time TV quotes** for positions + prioritized + breakout candidates
+2. **Entries** — ORB15 fires when the live price crosses the ORB high; VWAP_PB on a live VWAP reclaim.
+   Enters at the live price, runs the guards + your flags, places a paper bracket (entry + stop).
+3. **Layer 3 management** — live-price health; proactive exit < 40; decay warnings; at EOD proposes
+   healthy runners as overnight carries.
+4. **Telegram** — rich alert on every entry/exit/health/carry; **reads your `deny/keep` replies**.
 
-Confirm the banner ends with `════ APEX ready to trade ════` and Claude reports one line:
-mode / poller PID / CDP up / leader count.
+### 3. End — `end session` (in Claude)
+Runs `apex_session_end.sh`: stops the poller, **flattens intraday positions only** — swing/
+multi-week holdings stay open (durable). Prints the day summary. `apex-flatten` closes *everything*.
 
-### 2. The trading day (automatic)
-You don't touch anything. Each cycle (~60s in the first hour, slower after 10:30 ET) the poller:
-1. Pulls delayed bars (levels) + **real-time TV quotes** for positions + breakout-zone leaders
-2. **Entries** — ORB15 fires when the live price crosses the ORB high; VWAP_PB on a live VWAP
-   reclaim. Enters at the **live price**. Passes the 6 guards → places a paper bracket (entry + stop).
-3. **Layer 3 management** — recomputes each position's health on the live price; proactive-exits
-   on breakdown (health < 40), warns on decay (< 60), and near the close either carries a healthy
-   runner overnight or flattens the weak.
-Every entry and exit pings **Telegram** and lands in the dashboard + journal.
+---
 
-### 3. End — type `end session` (in Claude)
-Runs `apex_session_end.sh`: stops the poller, **flattens all open positions** (paper-liquidated
-via Alpaca), and prints the day's summary. TradingView is left running (close it manually if you
-want). No-Claude alternative: `apex-end`.
+## Operator controls (you stay autonomous, but in charge)
+
+### Trade flags — Leaders page (✓ Apply) + sidebar
+- **🚫 avoid** — never trade this name (blocks new entries; doesn't flatten a held one)
+- **⭐ prioritize** — relaxed entry threshold + always kept real-time; alerts tagged ⭐
+- **🎯 strict mode** (sidebar toggle) — trade **only** prioritized names (curated test universe)
+- Avoid wins over prioritize. Flags persist; a flagged name shows pre-checked when it reappears.
+
+### Overnight carry — confirm/deny (default = CARRY)
+At the 2:45 EOD pass APEX **proposes** each healthy runner (health ≥ 70, green, > VWAP) as an
+overnight swing — it **carries by default** unless you deny it before the 3:00 CT close:
+- **Dashboard** → Live Positions → **✅ Keep** / **🚫 Deny**
+- **Phone** → reply to the Telegram carry alert: **`deny SYM`**, **`keep SYM`**, **`deny all`**, **`keep all`**
+
+Carried positions become swings, managed daily by the swing manager (not the intraday engine).
+Set `APEX_ALLOW_OVERNIGHT_CARRY=false` to flatten everything at EOD (intraday-only validation).
 
 ---
 
@@ -78,78 +83,75 @@ want). No-Claude alternative: `apex-end`.
 
 | Channel | How | Shows |
 |---|---|---|
-| **Telegram** | your phone | Real-time entry / exit / health-decay / carry alerts with the "why" |
-| **Dashboard** | `apex-dash` → http://localhost:8533 | The real **Alpaca paper account** (equity, day P&L, buying power) + everything below |
-| **Log** | `tail -f ~/tri-city-inator/logs/apex-poller.log` | Each pass: `live quotes N/45`, `K open, M done, X new, Y managed`, every ENTRY/EXIT |
+| **Telegram** | your phone | Rich entry/exit/health/carry/swing alerts (setup · catalyst · levels · R:R · VIX · float · Decision); **reply `deny/keep SYM` to steer carries** |
+| **Dashboard** | **https://apex.clawbotinator.trade** (or `apex-dash` locally) | The real Alpaca paper account + everything below |
+| **Log** | `tail -f ~/tri-city-inator/logs/apex-poller.log` | Each pass: `live quotes N/25`, open/done/new/managed, every ENTRY/EXIT, telegram replies |
 
-**Dashboard pages** (every ticker is a clickable link → its TradingView chart):
-- **Live Positions** — real Alpaca fills + unrealized P&L merged with Layer 3 health/status/stop;
-  account strip up top. Inspect any position: candlestick with entry/stop/VWAP/ORB + the **live
-  price line** + a health-score timeline.
-- **Chart a Leader** — pick any leader → its chart + what APEX *would* do (hypothetical entry + health).
-- **Entries — Why** — the Layer 6 rationale card for each fill ("why this stock, why now").
-- **Closed Trades** — journal with a **Live paper / Dry-run / All** filter (keeps the live record clean).
-- **Leaders** — the universe APEX trades from, with **open / current / chg %** per name to spot movers.
+**Dashboard pages** (every ticker → its TradingView chart; toggle Web-link vs Desktop-drive in the sidebar):
+- **Live Positions** — real Alpaca fills + unrealized P&L + Layer 3 health/status/stop; account
+  strip; **carry ✅Keep/🚫Deny** when pending; inspect any position (candles + entry/stop/VWAP/ORB +
+  **live price line** + health timeline).
+- **Chart a Leader** — any leader + the hypothetical entry/health APEX would assign.
+- **Trade Journal** — full thesis card per trade (setup · catalyst · entry/stop · support/
+  resistance · plan) + outcome once closed; ⏰ badge on late entries.
+- **Closed Trades** — journal with Live/Dry/All filter + a **late-vs-normal** performance eval.
+- **Leaders** — the universe with **open/current/chg %** + the 🚫/⭐/➕ flag checkboxes.
 - **Playbook** — this document, in-app.
 
 ---
 
 ## Risk & guards (live values)
 
-| Parameter | Value | Meaning |
-|---|---|---|
-| Account equity | $5,000 | Paper; sizing base (compounds, no leverage) |
-| Risk per trade | 1% (~$50), hard cap $150 | Position size = risk ÷ stop distance |
-| Max concurrent positions | 5 | Guard #3 |
-| Daily loss circuit breaker | −$250 | Guard #4 — no new entries past this |
-| Entry composite threshold | 65 | RS + trigger + volume + VWAP confluence gate |
-| ATR stop | 2× ATR, **capped at 10%** | Protective stop on every entry |
-| Proactive exit | health < 40 | Layer 3 cuts the fade before the hard stop |
-| Carry overnight | health ≥ 70, green, > VWAP | Graduates intraday → swing → multi-week (5d) |
+| Parameter | Value |
+|---|---|
+| Account equity (sizing base) | $5,000 |
+| Risk per trade | 1% (~$50), hard cap $150 |
+| Max concurrent positions | 5 |
+| Daily loss circuit breaker | −$250 |
+| Entry composite threshold | 65 (−5 for ⭐ prioritized) |
+| ATR stop | 2× ATR, capped 10% |
+| Proactive exit / carry | health < 40 / health ≥ 70 |
+| Swing exit (daily) | close < invalidation or < EMA10 trend |
 
-Override any of these in `.env` (e.g. `APEX_MAX_POSITIONS`, `APEX_DAILY_LOSS`, `APEX_RISK_PCT`,
-`APEX_EXIT_HEALTH`). Restart the poller to apply.
-
----
-
-## The hybrid feed & fallback (what to expect)
-
-- **Real-time** comes from your TV quote session over CDP — the *trigger price* and *position
-  health* are live. Coverage shows as `live quotes N/45` in the log (N warms up over cycles).
-- If **TV/CDP goes down** (you close TradingView, it crashes), APEX **auto-falls back to delayed
-  Alpaca bars** per symbol — it keeps trading, just 15 min behind, no crash. The dashboard shows
-  "TV/CDP down" on the live read-out. Bring TV back with `apex` (idempotent) to restore real-time.
-- Kill the hybrid entirely with `APEX_USE_TV_QUOTES=false` (pure delayed Alpaca).
+Override any in `.env` (`APEX_*`). Restart the poller to apply.
 
 ---
 
-## Daily review (during the validation period)
-
-After `end session`, review:
-1. **The printed summary** — entries, exits, net P&L, win rate.
-2. **Dashboard → Closed Trades** — per-trade P&L, exit reason, peak gain vs realized.
-3. Ask the key questions:
-   - Did **Layer 3** add value? (proactive exits beating the −5%/−10% stop; runners held through chop)
-   - Did **real-time entries** fill meaningfully better than the delayed bar price?
-   - Did any **guard** misfire (blocked a good trade / let a bad one through)?
-   - **peak_gain vs realized** — are we giving back too much? (→ tune toward a peak-aware trail)
-
-Logs to mine: `logs/apex-journal.json` (closed trades), `logs/apex-executions.json` (entries),
-`logs/apex-rationale.json` (why), `logs/apex-blocked-signals.json` if present.
+## Hybrid feed & fallback
+Real-time **trigger price + position health** come from your TV quote session over CDP (warm set
+capped at `MAX_LIVE_QUOTES`=25 so it never lags the app). If TV/CDP goes down, APEX **falls back to
+delayed Alpaca bars** per symbol — keeps trading, ~15 min behind. `apex-quotes release` clears the
+feed if the desktop app ever feels heavy; `APEX_USE_TV_QUOTES=false` disables the hybrid entirely.
 
 ---
 
-## Validation goals — when is it "working"?
+## Swing tier (overnight holds)
+A carried position is owned by **`apex_swing.py`**, which runs **daily at 3:10 PM CT via launchd**
+(independent of whether you ran `apex`). It exits only on swing rules — daily close below the
+documented **invalidation** (the thesis support) or below the **EMA10 trend**. Overnight is covered
+by the resting stop. Run it manually with `apex-swing`.
 
-Run live-paper for a **meaningful sample** (aim ~2–4 weeks / 30–50+ trades across different
-market days) before judging. Watch for:
-- **Positive expectancy** (avg R > 0) that holds across up/down/chop days
-- **Win rate × avg win** vs **loss rate × avg loss** favorable
-- Layer 3 demonstrably better than a dumb fixed stop
-- No recurring guard/plumbing failures
+---
 
-Only after that — and as a separate decision — consider real money with **reduced** risk caps.
-Until then: **paper only.**
+## Late-entry tracking
+Entries in the last hour (after `LATE_ENTRY_ET` 15:00 ET) are tagged **late** — ⏰ on the Trade
+Journal, and a late-vs-normal eval on Closed Trades. Not blocked yet; gathering data on whether
+late entries fade intraday or become overnight runners, to design a smart gate.
+
+---
+
+## Daily review
+After `end session`: read the printed summary, then **Dashboard → Closed Trades** (P&L, exit
+reasons, peak vs realized, **late-entry eval**) and **Trade Journal** (the thesis behind each).
+Ask: did Layer 3 add value? did real-time entries fill better? any guard/flag misfire? peak give-back?
+
+Logs: `logs/apex-journal.json` (closed) · `apex-executions.json` (entries) · `apex-rationale.json`
+(thesis) · `apex-swing.log` (swing decisions).
+
+## Validation goals
+Run ~2–4 weeks / 30–50+ trades across market types. Look for positive expectancy that holds, Layer
+3 beating a fixed stop, no recurring failures. Only then — separate decision — small live with
+reduced caps. Until then: **paper only.**
 
 ---
 
@@ -157,29 +159,31 @@ Until then: **paper only.**
 
 | Symptom | Check / Fix |
 |---|---|
-| `apex` says "CDP not confirmed" | TV didn't start with the debug port. Re-run `apex`; or check `curl -s localhost:9222/json/list`. APEX still runs on delayed fallback meanwhile. |
-| `live quotes 0/45` in log | TV closed or not logged in / not real-time. Reopen via `apex`. Falls back to delayed automatically. |
-| No entries firing | Normal pre-open and before ~10:00 ET (opening range + data). Check regime/log. Verify leaders built (`apex-leaders` count). |
-| Poller not running | `cat shared/apex-poller.pid; kill -0 <pid>`. Restart: `bash scripts/start_apex_poller.sh` (add `--dry-run` for log-only). |
-| Two pollers / stuck | `apex-end` then `apex` — start/stop scripts wait-and-kill duplicates. |
-| Want to stop NOW, keep positions | `kill $(cat shared/apex-poller.pid)` (stops trading; does **not** flatten). |
-| Flatten everything immediately | `apex-end` (stops + flattens + summary). |
+| Dashboard URL down | tunnel: `pgrep -f 'run starks-dashboards'`; dashboard: `pgrep -f apex_dashboard`. Local fallback: `apex-dash` → localhost:8533 |
+| Telegram replies ignored | the listener runs inside the poller — only active while the poller's up (i.e. during a session) |
+| `live quotes 0/25` | TV closed / not real-time. Reopen via `apex`; falls back to delayed automatically |
+| Desktop TV laggy | `apex-quotes release` (clears the quote feed) |
+| No entries firing | normal pre-open / before ~10:00 ET; check strict mode isn't on with no ⭐ names; verify leaders built |
+| Stop trading now, keep positions | `kill $(cat shared/apex-poller.pid)` |
+| Flatten everything now | `apex-flatten` |
 
 ---
 
 ## Command reference
 
 ```bash
-apex                 # START a live-paper session (TV+CDP, leaders, poller) + open Claude
-apex --dry-run       # same, but log-only (no orders)
-end session          # (in Claude) stop + flatten + summary
+apex                 # START a live-paper session (TV+CDP, leaders, poller, listener) + Claude
+apex --dry-run       # same, log-only (no orders)
+end session          # (in Claude) stop poller + flatten intraday (swings stay)
 apex-end             # same shutdown, without Claude
-apex-dash            # open the dashboard (localhost:8533)
-apex-quotes WDC NUAI # spot-check the real-time TV feed
-apex-leaders         # rebuild today's leader watchlist manually
+apex-flatten         # close EVERYTHING (intraday + swings)
+apex-dash            # dashboard locally (also at https://apex.clawbotinator.trade)
+apex-swing           # run the daily swing manager now
+apex-quotes [SYMS]   # spot-check the real-time feed   ·   apex-quotes release  (clear the feed)
+apex-leaders         # rebuild today's leader watchlist
 apex-health --self-test [YYYY-MM-DD]   # replay a session's health trajectory
-apex-build           # resume DEV/design work on APEX (not a trading session)
+apex-build           # resume APEX DEV/design work (not a trading session)
 ```
+Telegram (phone): `deny SYM` · `keep SYM` · `deny all` · `keep all` — steer overnight carries.
 
-Full design + rationale: `docs/STRATEGY_V2_DESIGN.md`. Quick architecture: `CHEATSHEET.md`,
-CLAUDE.md "APEX SESSION".
+Full design: `docs/STRATEGY_V2_DESIGN.md`. Quick architecture: `CHEATSHEET.md`, CLAUDE.md "APEX SESSION".
