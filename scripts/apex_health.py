@@ -45,18 +45,22 @@ def _vwap(g: pd.DataFrame) -> pd.Series:
     return (tp * g["volume"]).cumsum() / g["volume"].cumsum()
 
 
-def compute_health(position: dict, bars: pd.DataFrame) -> dict:
+def compute_health(position: dict, bars: pd.DataFrame, live_price: float | None = None) -> dict:
     """
     Recompute a position's health (0-100) from today's accumulating regular-session 5-min
     bars (same frame the entry engine uses: open/high/low/close/volume + 'tod').
     Returns {} if there isn't enough data yet.
+
+    Hybrid feed: VWAP / EMA9 / momentum / structure come from `bars`; the CURRENT price (thesis,
+    VWAP/EMA checks, gain%) uses `live_price` (TradingView real-time) when given, so health and
+    the proactive-exit decision react to the live price, not a 15-min-old bar close.
     """
     if bars is None or bars.empty:
         return {}
     g = bars.sort_values("tod").reset_index(drop=True)
     g = g.assign(vwap=_vwap(g).values)
     last = g.iloc[-1]
-    price = float(last["close"])
+    price = float(live_price) if live_price is not None else float(last["close"])
     vwap = float(last["vwap"])
     entry = float(position["entry"])
     ema9 = float(g["close"].ewm(span=9, adjust=False).mean().iloc[-1])
@@ -189,18 +193,22 @@ def _eod_now() -> bool:
     return datetime.now(ET).time() >= dtime(hh, mm)
 
 
-def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool) -> int:
+def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
+                     live_quotes: dict | None = None) -> int:
     """
     Recompute health for every open position, then act:
       proactive exit on breakdown · conditional EOD carry/close · health-decay warning.
+    `live_quotes` (from apex_tv_quotes) supplies the real-time price per symbol when available.
     Returns the number of positions that took an action (exit / carry-graduation).
     """
     c = cfg.effective()
     eod = _eod_now()
+    lq = live_quotes or {}
     actions = 0
     for sym in list(state.get("positions", {})):
         p = state["positions"][sym]
-        h = compute_health(p, intraday.get(sym))
+        lp = lq.get(sym, {}).get("last")
+        h = compute_health(p, intraday.get(sym), live_price=lp)
         if not h:
             continue
         prev = p.get("health", 100)

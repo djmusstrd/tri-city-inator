@@ -35,6 +35,7 @@ import apex_config as cfg
 from apex_entry_engine import detect_entry
 from apex_execute import execute
 from apex_health import manage_positions
+import apex_tv_quotes
 
 import numpy as np
 import pandas as pd
@@ -109,6 +110,59 @@ def atr_from_daily(close_df: pd.DataFrame, length=14) -> float:
     return float(v) if not pd.isna(v) else 0.0
 
 
+def live_watch_set(leaders, intraday, positions, executed=None) -> set:
+    """
+    Symbols worth a real-time quote this cycle: every open position (for health, always) + the
+    not-yet-traded leaders sitting in the ORB-high CROSSING ZONE (just below to barely above the
+    level — the imminent-breakout moment), ranked by closeness and capped at MAX_LIVE_QUOTES so
+    TV streams them reliably as 'fast' symbols. A leader left out simply uses its delayed price
+    for this cycle (graceful degradation) and gets picked up next cycle if it nears the level.
+    """
+    watch = set(positions)
+    skip = watch | set(executed or [])
+    end_min = SESS_OPEN.hour * 60 + SESS_OPEN.minute + cfg.ORB_MINUTES
+    orb_end = dtime(end_min // 60, end_min % 60)
+    cands = []  # (distance_from_orb_high, symbol)
+    for ld in leaders:
+        sym = ld["symbol"]
+        if sym in skip:
+            continue
+        bars = intraday.get(sym)
+        if bars is None or bars.empty:
+            continue
+        g = bars.sort_values("tod")
+        orb = g[g["tod"] < orb_end]
+        if orb.empty:
+            continue
+        orb_high = float(orb["high"].max())
+        if orb_high <= 0:
+            continue
+        last = float(g.iloc[-1]["close"])
+        # crossing zone: -1.5% below to +0.7% above the ORB high (about to / just breaking)
+        if orb_high * 0.985 <= last <= orb_high * 1.007:
+            cands.append((abs(last / orb_high - 1.0), sym))
+    cands.sort()
+    room = max(0, cfg.MAX_LIVE_QUOTES - len(watch))
+    watch.update(sym for _, sym in cands[:room])
+    return watch
+
+
+def fetch_live_quotes(symbols) -> dict:
+    """Real-time TV quotes for the given symbols (hybrid trigger feed). {} on any failure."""
+    if not cfg.USE_TV_QUOTES or not symbols:
+        return {}
+    try:
+        q = apex_tv_quotes.get_quotes(list(symbols), wait_ms=cfg.TV_QUOTE_WAIT_MS)
+        if q:
+            logger.info(f"live quotes: {len(q)}/{len(symbols)} symbols from TV real-time")
+        else:
+            logger.debug("no live TV quotes (CDP/TV down?) — using delayed bars")
+        return q
+    except Exception as e:
+        logger.warning(f"live quote fetch failed: {e} — using delayed bars")
+        return {}
+
+
 def classify_regime(daily: pd.DataFrame) -> str:
     """Layer 5 STUB: SPY vs 50-day SMA. Refined in Phase 4 (VIX, breadth)."""
     try:
@@ -140,8 +194,9 @@ def load_leaders() -> list:
 
 
 # ── one detection+execution pass over the leaders ──────────────────────────────
-def run_pass(leaders, intraday, daily, regime, state, dry_run) -> int:
+def run_pass(leaders, intraday, daily, regime, state, dry_run, live_quotes=None) -> int:
     c = cfg.effective()
+    lq = live_quotes or {}
     fired = 0
     for ld in leaders:
         sym = ld["symbol"]
@@ -150,7 +205,8 @@ def run_pass(leaders, intraday, daily, regime, state, dry_run) -> int:
         bars = intraday.get(sym)
         if bars is None or bars.empty:
             continue
-        sig = detect_entry(sym, bars, orb_minutes=c["orb_minutes"])
+        live_price = lq.get(sym, {}).get("last")
+        sig = detect_entry(sym, bars, orb_minutes=c["orb_minutes"], live_price=live_price)
         if sig is None:
             continue
         try:
@@ -253,9 +309,13 @@ def run_live(dry_run: bool) -> None:
                 regime = classify_regime(daily)
                 last_daily_day = today
             intraday = fetch_intraday(syms, today)
-            fired = run_pass(leaders, intraday, daily, regime, state, dry_run)
+            # Hybrid feed: real-time TV prices only for breakout-candidate leaders + open positions
+            watch = live_watch_set(leaders, intraday, state.get("positions", {}),
+                                   state.get("executed_today", []))
+            live_quotes = fetch_live_quotes(watch)
+            fired = run_pass(leaders, intraday, daily, regime, state, dry_run, live_quotes)
             # Layer 3 — recompute health, proactive-exit breakdowns, carry/close at EOD
-            managed = manage_positions(intraday, state, regime, dry_run)
+            managed = manage_positions(intraday, state, regime, dry_run, live_quotes)
             save_state(state)
             logger.info(f"pass: {len(state['positions'])} open, "
                         f"{len(state['executed_today'])} done today, {fired} new, "

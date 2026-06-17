@@ -41,10 +41,16 @@ def _orb_window_end(open_time: dtime, orb_minutes: int) -> dtime:
 
 
 def detect_entry(symbol: str, day_bars: pd.DataFrame, orb_minutes: int = 15,
-                 already_entered: bool = False) -> EntrySignal | None:
+                 already_entered: bool = False, live_price: float | None = None) -> EntrySignal | None:
     """
     day_bars: today's regular-session 5-min bars (cols: open/high/low/close/volume, 'tod' time).
     Returns the first valid EntrySignal, or None. ORB15 takes priority over VWAP_PB.
+
+    Hybrid feed: levels (ORB high/low, VWAP) come from `day_bars` (Alpaca, possibly delayed).
+    If `live_price` (TradingView real-time) is given, the ORB15 trigger fires the moment the
+    LIVE price is above the opening-range high — entering at the live price instead of waiting
+    for a delayed bar to print the break. When `live_price` is None it falls back to the
+    original bar-based breakout detection, so behavior is unchanged without TV.
     """
     if already_entered or day_bars is None or len(day_bars) < 4:
         return None
@@ -71,9 +77,25 @@ def detect_entry(symbol: str, day_bars: pd.DataFrame, orb_minutes: int = 15,
     tp = (g["high"] + g["low"] + g["close"]) / 3
     vwap_series = (tp * g["volume"]).cumsum() / g["volume"].cumsum()
     g = g.assign(vwap=vwap_series.values)
+    last_vwap = float(g.iloc[-1]["vwap"])
 
-    # ── Primary: ORB15 breakout with volume confirmation ──
-    if not after.empty:
+    # ── Primary: ORB15 breakout ──
+    # Real-time path: live price already above the opening-range high (volume confirmed by the
+    # latest bar). Enter NOW at the live price.
+    if live_price is not None and not after.empty and live_price > orb_high:
+        last_bar = g.iloc[-1]
+        if float(last_bar["volume"]) > orb_vol:    # volume confirmation (latest bar proxy)
+            rvol = float(last_bar["volume"] / orb_vol) if orb_vol > 0 else 0.0
+            return EntrySignal(
+                symbol=symbol, trigger="ORB15", price=float(live_price),
+                orb_high=orb_high, orb_low=orb_low, vwap=last_vwap,
+                rvol=round(rvol, 2), bar_time="live",
+                context={"open": o, "live_price": float(live_price),
+                         "orb_avg_vol": orb_vol, "feed": "tv_realtime"},
+            )
+
+    # Bar-based path (no live price, or live price not yet above ORB): original detection.
+    if live_price is None and not after.empty:
         brk = after[(after["high"] > orb_high) & (after["volume"] > orb_vol)]
         if not brk.empty:
             bar = brk.iloc[0]

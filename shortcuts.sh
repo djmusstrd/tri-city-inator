@@ -46,6 +46,8 @@ apex-entry()    { cd "$_TC" && python -W ignore scripts/apex_phase2_entry_backte
 apex-health()   { cd "$_TC" && python -W ignore scripts/apex_health.py --self-test "$@"; }
 # Visual management dashboard (candles + health timeline + why + journal + leaders)
 apex-dash()     { cd "$_TC" && python3 -m streamlit run scripts/apex_dashboard.py "$@"; }
+# Test the real-time TV quote reader (hybrid feed) — needs TV running with CDP
+apex-quotes()   { cd "$_TC" && python -W ignore scripts/apex_tv_quotes.py "$@"; }
 
 echo "Tri-City shortcuts loaded:"
 echo "  Session  : tricity  tricity-poller  tricity-health"

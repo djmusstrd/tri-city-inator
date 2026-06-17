@@ -268,6 +268,27 @@ system). Modules:
 - TODO (small-account practicality): high-priced leaders ($2k+ names) only afford 1 share on
   $5K — consider fractional shares or account-aware price ceiling in Layer 1.
 
+**Phase 2c — HYBRID real-time feed ✅ BUILT (2026-06-17, live-validated).** The basic Alpaca data
+plan is 15-min delayed SIP, which lagged both decisions and the dashboard. Rather than pay to
+upgrade, APEX now takes the live TRIGGER price from **TradingView's real-time quote session over
+CDP** (the operator already pays for real-time TV data), while keeping Alpaca for the daily
+universe scan, the intraday *levels* (ORB/VWAP/EMA — intraday-stable, lag is harmless), and
+execution. This re-introduces a TV/CDP dependency **but for raw quotes only** — NOT the Pine
+table that broke System 1.
+- `apex_tv_quotes.py` — reads `window.getQuoteSessionInstance()` over CDP: `setFields` +
+  `subscribe`(bare symbols) + `setFastSymbols` → `_symbol_data[..].values.last_price`.
+- `detect_entry(live_price=)` — ORB15 fires the moment the LIVE price crosses the bar-computed
+  ORB high (enters at the live price, `feed=tv_realtime`); falls back to bar detection w/o TV.
+- `compute_health(live_price=)` — thesis/VWAP/gain checks use the live price; momentum/structure
+  stay bar-based. Health + proactive exit now react in real-time.
+- Poller `live_watch_set()` pre-filters to open positions + leaders in the ORB-high crossing
+  zone, capped at `MAX_LIVE_QUOTES` (45) so TV streams them reliably; the rest gracefully use the
+  delayed price for the cycle. Toggle with `APEX_USE_TV_QUOTES`.
+- Live-validated 2026-06-17: ARMG fired real-time ORB15 at $57.31 (vs stale bar VWAP_PB); open
+  positions' health updated from live prices (BWET $206.62 live = state). Proves the delay gap
+  closed without an Alpaca upgrade.
+- [ ] TODO: VWAP_PB still enters at the (delayed) bar price — only ORB15 is real-time so far.
+
 ### Phase 3 — Trade Health Monitor (Layer 3) ✅ BUILT (2026-06-17, dry-run validated)
 `apex_health.py`, wired into the poller at every pass; closed trades → `logs/apex-journal.json`.
 - [x] Per-position health-score function (0-100): thesis (above entry/breakout), VWAP, 5-min
