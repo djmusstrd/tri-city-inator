@@ -36,6 +36,7 @@ DAILY_LOSS_GUARD = float(os.getenv("APEX_DAILY_LOSS", "-250"))  # circuit breake
 
 # ── Entry ───────────────────────────────────────────────────────────────────
 ENTRY_THRESH_TUNABLE = float(os.getenv("APEX_ENTRY_THRESH", "65"))  # composite score gate (Layer 4 band 60-75)
+PRIORITIZE_RELAX     = float(os.getenv("APEX_PRIORITIZE_RELAX", "5"))  # lower the entry threshold by this for prioritized names
 RS_MIN               = float(os.getenv("APEX_RS_MIN", "90"))        # leader watchlist already gates this
 ORB_MINUTES          = int(os.getenv("APEX_ORB_MINUTES", "15"))
 ATR_LEN              = 14

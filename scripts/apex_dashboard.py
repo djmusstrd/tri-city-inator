@@ -39,6 +39,7 @@ from apex_entry_engine import detect_entry      # noqa: E402
 from apex_health import compute_health          # noqa: E402
 import apex_tv_quotes                            # noqa: E402  (real-time TV quote, hybrid feed)
 import apex_tv_control                           # noqa: E402  (drive desktop chart + watchlist add)
+import apex_flags                                # noqa: E402  (operator avoid/prioritize/strict flags)
 
 ET = ZoneInfo("America/New_York")
 SESS_OPEN, SESS_CLOSE = dtime(9, 30), dtime(16, 0)
@@ -302,6 +303,16 @@ with st.sidebar:
     st.radio("Ticker click →", ["Web (APEX layout)", "Desktop TV (CDP)"], key="link_mode",
              help="Web: opens the APEX layout in a browser tab. Desktop: drives your running "
                   "TradingView app to that symbol via CDP.")
+    _flags = apex_flags.load_flags()
+    _strict = st.toggle("🎯 Strict mode", value=bool(_flags.get("strict")),
+                        help="When ON, APEX trades ONLY ⭐ prioritized names (your curated test "
+                             "universe). With no prioritized names, it trades nothing.")
+    if _strict != bool(_flags.get("strict")):
+        apex_flags.set_strict(_strict)
+        st.rerun()
+    if _strict:
+        n = len(_flags.get("prioritize", {}))
+        st.caption(f"🎯 STRICT: only {n} prioritized name(s)" + (" — ⚠ none, nothing will trade!" if not n else ""))
     st.divider()
     if acct:
         st.metric("Equity", f"${acct['equity']:,.2f}",
@@ -585,8 +596,16 @@ elif page == "Leaders":
     st.caption(f"The universe APEX trades from. RS≥{int(cfg.RS_MIN)} & ribbon-bull, from "
                f"{leaders_doc.get('liquid_size', '—')} liquid names "
                f"(≥${leaders_doc.get('min_dollar_vol', 0):,.0f}/day). Click a ticker to open it on TradingView.")
-    st.caption("Check **➕ watch** on any names and click the button to add them to your APEX "
-               "TradingView watchlist. (Bought stocks are added automatically.)")
+    st.caption("**🚫 avoid** (never trade) · **⭐ prioritize** (relaxed threshold + always real-time) "
+               "· **➕ watch** (add to TV watchlist). Set them, then **Apply**. Previously-flagged "
+               "names show pre-checked. Avoid wins over prioritize.")
+    flags = apex_flags.load_flags()
+    avoid_now, prefer_now = set(flags.get("avoid", {})), set(flags.get("prioritize", {}))
+    if avoid_now or prefer_now:
+        flagged_here = [l["symbol"] for l in leaders if l["symbol"] in avoid_now | prefer_now]
+        if flagged_here:
+            st.info("⚑ Flagged names in today's leaders (reminder): "
+                    + " · ".join(f"{s} ({apex_flags.flag_label(s, flags)})" for s in flagged_here))
     if not leaders:
         st.info("No leaders file yet — run `apex-leaders`.")
     else:
@@ -597,12 +616,17 @@ elif page == "Leaders":
         ldf["current"] = ldf["symbol"].map(lambda s: prices.get(s, (None, None))[1])
         ldf["chg %"] = (ldf["current"] - ldf["open"]) / ldf["open"] * 100
         ldf.insert(0, "➕ watch", False)
+        ldf.insert(0, "⭐ prioritize", ldf["symbol"].isin(prefer_now))
+        ldf.insert(0, "🚫 avoid", ldf["symbol"].isin(avoid_now))
         ldf["symbol"] = ldf["symbol"].map(tv_url)
-        cols = [c for c in ["➕ watch", "symbol", "rs_pct", "open", "current", "chg %"] if c in ldf.columns]
+        editable = ["🚫 avoid", "⭐ prioritize", "➕ watch"]
+        cols = editable + [c for c in ["symbol", "rs_pct", "open", "current", "chg %"] if c in ldf.columns]
         edited = st.data_editor(
             ldf[cols], width="stretch", hide_index=True,
-            disabled=[c for c in cols if c != "➕ watch"], key="leaders_editor",
+            disabled=[c for c in cols if c not in editable], key="leaders_editor",
             column_config={
+                "🚫 avoid": st.column_config.CheckboxColumn("🚫 avoid", default=False),
+                "⭐ prioritize": st.column_config.CheckboxColumn("⭐ prioritize", default=False),
                 "➕ watch": st.column_config.CheckboxColumn("➕ watch", default=False),
                 "symbol": st.column_config.LinkColumn("symbol", display_text=r"symbol=(.+)$"),
                 "rs_pct": st.column_config.NumberColumn("RS pct", format="%.1f"),
@@ -610,9 +634,26 @@ elif page == "Leaders":
                 "current": st.column_config.NumberColumn("current price", format="$%.2f"),
                 "chg %": st.column_config.NumberColumn("chg %", format="%+.1f%%"),
             })
-        checked = [bare[i] for i, v in enumerate(edited["➕ watch"].tolist()) if v]
-        if st.button(f"➕ Add {len(checked)} to APEX watchlist", disabled=not checked):
-            add_to_watchlist(checked)
+        av = edited["🚫 avoid"].tolist()
+        pr = edited["⭐ prioritize"].tolist()
+        wl = edited["➕ watch"].tolist()
+        if st.button("✓ Apply flags + watchlist"):
+            changed = 0
+            for i, s in enumerate(bare):
+                was_av, was_pr = s in avoid_now, s in prefer_now
+                if av[i] and not was_av:
+                    apex_flags.set_flag("avoid", s); changed += 1
+                elif not av[i] and was_av:
+                    apex_flags.clear_flag("avoid", s); changed += 1
+                if pr[i] and not was_pr and not av[i]:
+                    apex_flags.set_flag("prioritize", s); changed += 1
+                elif not pr[i] and was_pr:
+                    apex_flags.clear_flag("prioritize", s); changed += 1
+            watch_syms = [bare[i] for i, v in enumerate(wl) if v]
+            if watch_syms:
+                add_to_watchlist(watch_syms)
+            st.success(f"Applied {changed} flag change(s)" + (f", {len(watch_syms)} to watchlist" if watch_syms else ""))
+            st.rerun()
 
 elif page == "Playbook":
     st.title("APEX Playbook")

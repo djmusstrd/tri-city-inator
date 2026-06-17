@@ -110,15 +110,15 @@ def atr_from_daily(close_df: pd.DataFrame, length=14) -> float:
     return float(v) if not pd.isna(v) else 0.0
 
 
-def live_watch_set(leaders, intraday, positions, executed=None) -> set:
+def live_watch_set(leaders, intraday, positions, executed=None, prefer=None) -> set:
     """
-    Symbols worth a real-time quote this cycle: every open position (for health, always) + the
-    not-yet-traded leaders sitting in the ORB-high CROSSING ZONE (just below to barely above the
-    level — the imminent-breakout moment), ranked by closeness and capped at MAX_LIVE_QUOTES so
-    TV streams them reliably as 'fast' symbols. A leader left out simply uses its delayed price
-    for this cycle (graceful degradation) and gets picked up next cycle if it nears the level.
+    Symbols worth a real-time quote this cycle: every open position (for health, always) + any
+    operator-prioritized names + the not-yet-traded leaders sitting in the ORB-high CROSSING ZONE
+    (just below to barely above the level — the imminent-breakout moment), ranked by closeness and
+    capped at MAX_LIVE_QUOTES so TV streams them reliably as 'fast' symbols. A leader left out
+    simply uses its delayed price for this cycle (graceful) and gets picked up next cycle.
     """
-    watch = set(positions)
+    watch = set(positions) | (set(prefer or []) & {l["symbol"] for l in leaders})
     skip = watch | set(executed or [])
     end_min = SESS_OPEN.hour * 60 + SESS_OPEN.minute + cfg.ORB_MINUTES
     orb_end = dtime(end_min // 60, end_min % 60)
@@ -197,9 +197,18 @@ def load_leaders() -> list:
 def run_pass(leaders, intraday, daily, regime, state, dry_run, live_quotes=None) -> int:
     c = cfg.effective()
     lq = live_quotes or {}
+    import apex_flags
+    flags = apex_flags.load_flags()
+    avoid = set(flags.get("avoid", {}))
+    prefer = set(flags.get("prioritize", {}))
+    strict = bool(flags.get("strict"))
     fired = 0
     for ld in leaders:
         sym = ld["symbol"]
+        if sym in avoid:                       # operator blacklist — never trade
+            continue
+        if strict and sym not in prefer:        # strict mode: only prioritized names
+            continue
         if sym in state.get("executed_today", []) or sym in state.get("positions", {}):
             continue
         bars = intraday.get(sym)
@@ -215,7 +224,7 @@ def run_pass(leaders, intraday, daily, regime, state, dry_run, live_quotes=None)
         except Exception:
             dsub, atr = None, 0.0
         if execute(sig, ld.get("rs_pct", 0.0), atr, regime, state,
-                   dry_run=dry_run, daily_bars=dsub):
+                   dry_run=dry_run, daily_bars=dsub, prioritized=(sym in prefer)):
             fired += 1
     save_state(state)
     return fired
@@ -317,9 +326,11 @@ def run_live(dry_run: bool) -> None:
                 regime = classify_regime(daily)
                 last_daily_day = today
             intraday = fetch_intraday(syms, today)
-            # Hybrid feed: real-time TV prices only for breakout-candidate leaders + open positions
+            # Hybrid feed: real-time TV prices for positions + prioritized + breakout candidates
+            import apex_flags
+            _prefer = set(apex_flags.load_flags().get("prioritize", {}))
             watch = live_watch_set(leaders, intraday, state.get("positions", {}),
-                                   state.get("executed_today", []))
+                                   state.get("executed_today", []), prefer=_prefer)
             live_quotes = fetch_live_quotes(watch)
             fired = run_pass(leaders, intraday, daily, regime, state, dry_run, live_quotes)
             # Layer 3 — recompute health, proactive-exit breakdowns, carry/close at EOD

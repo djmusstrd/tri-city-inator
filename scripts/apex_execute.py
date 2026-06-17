@@ -68,7 +68,7 @@ def _save_exec_log(rows: list) -> None:
 
 
 def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
-            dry_run: bool = False, daily_bars=None) -> bool:
+            dry_run: bool = False, daily_bars=None, prioritized: bool = False) -> bool:
     """Run guards → size → place entry+stop → log execution + rationale → Telegram."""
     c = cfg.effective()
     sym = signal.symbol
@@ -77,6 +77,13 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
     if signal.trigger in c["disabled_setups"]:
         logger.info(f"[{sym}] BLOCKED: {signal.trigger} disabled by Layer 4")
         return False
+    try:
+        from apex_flags import load_flags
+        if sym in load_flags().get("avoid", {}):
+            logger.info(f"[{sym}] BLOCKED: flagged AVOID by operator")
+            return False
+    except Exception:
+        pass
     if sym in state.get("positions", {}):
         logger.info(f"[{sym}] BLOCKED: already in position")
         return False
@@ -94,8 +101,10 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
         return False
 
     score = composite_score(signal, rs_pct)
-    if score < c["entry_thresh"]:
-        logger.info(f"[{sym}] BLOCKED: score {score} < threshold {c['entry_thresh']}")
+    thresh = c["entry_thresh"] - (cfg.PRIORITIZE_RELAX if prioritized else 0)
+    if score < thresh:
+        logger.info(f"[{sym}] BLOCKED: score {score} < threshold {thresh}"
+                    f"{' (prioritized)' if prioritized else ''}")
         return False
 
     # ── Sizing (risk-based, no leverage) ──
@@ -137,6 +146,8 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
                                 stop_price, atr, qty)
     rationale["order_id"] = order_id
     rationale["dry_run"] = dry_run
+    if prioritized:
+        rationale["flag"] = "⭐ prioritized"
     try:
         rationale["thesis"] = build_thesis(signal, daily_bars, stop_price)
     except Exception as e:
