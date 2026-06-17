@@ -79,13 +79,120 @@ def log_rationale(rationale: dict) -> None:
     RATIONALE_LOG.write_text(json.dumps(existing, indent=2))
 
 
+def _fmt_levels(levels: list, n: int = 3) -> str:
+    levels = [l for l in (levels or []) if l.get("price") is not None][:n]
+    return " · ".join(f"{l['label']} ${l['price']:g}" for l in levels) or "—"
+
+
+def _fmt_float(f) -> str:
+    if not f:
+        return "—"
+    try:
+        f = float(f)
+        return f"{f/1e9:.1f}B" if f >= 1e9 else f"{f/1e6:.0f}M"
+    except Exception:
+        return "—"
+
+
 def telegram_entry_message(rationale: dict) -> str:
-    """Rich entry alert — why this stock, why now."""
+    """Full Trade-Journal-style entry alert (autonomous — Decision = what APEX did + why)."""
+    from apex_thesis import get_vix, get_float
     r = rationale
+    th = r.get("thesis") or {}
+    entry, stop = float(r["entry"]), float(r["stop"])
+    vwap = float(r.get("vwap_at_entry") or entry)
+    open_px = (r.get("context") or {}).get("open") or th.get("context", {}).get("open")
+    stop_pct = (entry - stop) / entry * 100 if entry else 0
+    dist_vwap = (entry - vwap) / vwap * 100 if vwap else 0
+    day_pct = (entry - open_px) / open_px * 100 if open_px else None
+    flag = r.get("flag")        # ⭐ prioritized / etc., set by the engine when relevant
+
+    res = [l for l in (th.get("resistance") or []) if l.get("price")]
+    target = res[0]["price"] if res else None
+    rr = ((target - entry) / (entry - stop)) if (target and entry > stop) else None
+
+    vix = get_vix()
+    flt = get_float(r["symbol"])
+    cat = th.get("catalyst") or []
+    lines = [
+        f"🚀 <b>APEX ENTRY — {r['symbol']}</b>" + (f"  {flag}" if flag else ""),
+        "",
+        f"<b>Ticker:</b> {r['symbol']}",
+        f"<b>Setup:</b> {r['trigger']}" + ("  (real-time)" if (r.get('context') or {}).get('feed') == 'tv_realtime' else ""),
+        f"<b>Entry:</b> ${entry:g}",
+        f"<b>Confidence:</b> {r.get('composite_score')}/100 · RS {r.get('rs_pct')} pct",
+        "",
+        "📊 <b>Market Context</b>",
+        f"<b>Regime:</b> {r.get('regime')}" + (f" · <b>VIX:</b> {vix:.1f}" if vix else ""),
+        f"<b>VWAP:</b> ${vwap:g} ({'ABOVE' if entry >= vwap else 'BELOW'})",
+        "",
+        "💡 <b>Levels</b>  <i>(let winners run — Layer 3 exit, no fixed TP)</i>",
+        f"<b>Entry:</b> ${entry:g}",
+        f"<b>Stop / invalidation:</b> ${stop:g} (−{stop_pct:.1f}% risk)",
+        f"<b>Support:</b> {_fmt_levels(th.get('support'))}",
+        f"<b>Resistance (targets):</b> {_fmt_levels(th.get('resistance'))}"
+        + (f"  ·  R:R to 1st ≈ 1:{rr:.1f}" if rr else ""),
+        "",
+        "💰 <b>Position</b>",
+        f"<b>Shares:</b> {r.get('qty')} · <b>Value:</b> ${r.get('qty', 0) * entry:,.0f} · "
+        f"<b>Risk:</b> ${r.get('risk_dollars')}",
+        "",
+        "📈 <b>Stock Context</b>",
+        f"<b>RVOL:</b> {r.get('rvol')}x · <b>Dist from VWAP:</b> {dist_vwap:+.1f}%"
+        + (f" · <b>Day:</b> {day_pct:+.1f}%" if day_pct is not None else "")
+        + (f" · <b>Float:</b> {_fmt_float(flt)}" if flt else ""),
+    ]
+    if cat:
+        c = cat[0]
+        lines += ["", "📰 <b>Catalyst</b>",
+                  (f"<a href=\"{c['url']}\">{c['headline'][:90]}</a>" if c.get("url")
+                   else c["headline"][:90]) + f"  ({c.get('date','')})"]
+    lines += ["", "🤖 <b>Decision</b>",
+              "EXECUTED (auto) — Layer 3 managed. Hold while healthy, "
+              "carry overnight if strong."]
+    return "\n".join(lines)
+
+
+def telegram_exit_message(rec: dict) -> str:
+    """Layer 3 / swing exit alert — Decision conveys why it closed."""
+    pnl = rec.get("pnl", 0)
+    emoji = "🟩" if pnl >= 0 else "🟥"
+    reason = rec.get("reason", "")
     return (
-        f"🟢 <b>APEX ENTRY</b> — {r['symbol']}  ({r['trigger']})\n"
-        f"<b>Why:</b> {r['why']}\n"
-        f"Score {r['composite_score']} | RS {r['rs_pct']} | RVOL {r['rvol']}x\n"
-        f"Entry ${r['entry']}  Stop ${r['stop']}  Qty {r['qty']}\n"
-        f"Risk ${r['risk_dollars']}  ORB {r['orb_low']}–{r['orb_high']}"
+        f"{emoji} <b>APEX EXIT — {rec.get('symbol')}</b>\n\n"
+        f"<b>Exit:</b> ${rec.get('exit')} (entry ${rec.get('entry')})\n"
+        f"<b>P&L:</b> ${pnl} ({rec.get('gain_pct', 0):+.1f}%) · "
+        f"<b>peak:</b> {rec.get('peak_gain')}%\n"
+        f"<b>Held:</b> {rec.get('status_at_exit', 'intraday')}"
+        + (f" · {rec.get('days_held')}d" if rec.get('days_held') else "") + "\n\n"
+        f"🤖 <b>Decision</b>\nEXITED — {reason}"
+    )
+
+
+def telegram_carry_message(sym: str, health, gain_pct, info: str = "") -> str:
+    """Overnight-carry proposal — Decision conveys the swing-hold + the deny window."""
+    return (
+        f"🌙 <b>APEX CARRY — {sym} → SWING</b>\n\n"
+        f"<b>Health:</b> {health} · <b>Gain:</b> {gain_pct:+.1f}%{(' · ' + info) if info else ''}\n\n"
+        f"🤖 <b>Decision</b>\n"
+        f"HOLD overnight as a swing (default). Managed daily by swing rules.\n"
+        f"<i>Deny on the dashboard before 3:00 CT to flatten instead.</i>"
+    )
+
+
+def telegram_health_message(sym: str, health, reasons: list, gain_pct) -> str:
+    """Momentum-decay warning — Decision = still holding, watching."""
+    return (
+        f"⚠️ <b>APEX HEALTH — {sym}</b>\n\n"
+        f"<b>Health:</b> {health} ({'; '.join(reasons)}) · {gain_pct:+.1f}%\n\n"
+        f"🤖 <b>Decision</b>\nHOLDING — watching; proactive exit if health &lt; 40."
+    )
+
+
+def telegram_swing_message(sym: str, decision: str, detail: str) -> str:
+    """Daily swing-manager alert — Decision = HOLD or EXIT with the daily-level reasoning."""
+    emoji = "✅" if decision == "HOLD" else "🟥"
+    return (
+        f"{emoji} <b>APEX SWING — {sym}</b>\n\n"
+        f"🤖 <b>Decision</b>\n{decision} (swing) — {detail}"
     )

@@ -27,6 +27,7 @@ import pandas as pd
 import apex_config as cfg
 from apex_health import _close
 from apex_tv_quotes import get_quotes
+from apex_rationale import send_telegram, telegram_swing_message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                     handlers=[logging.FileHandler(cfg.LOGS / "apex-swing.log"),
@@ -116,8 +117,11 @@ def manage_swings() -> None:
             acted += 1
         else:
             p["days_held"] = p.get("days_held", 0)
-            logger.info(f"[{sym}] swing HOLD ({p.get('status')}) — close {last:.2f} > "
-                        f"EMA{cfg.SWING_TREND_EMA} {ema:.2f}, > invalidation {inval}")
+            detail = (f"daily close ${last:.2f} > EMA{cfg.SWING_TREND_EMA} ${ema:.2f}"
+                      + (f" > invalidation ${float(inval):.2f}" if inval else "")
+                      + " — trend intact")
+            send_telegram(telegram_swing_message(sym, "HOLD", detail))
+            logger.info(f"[{sym}] swing HOLD ({p.get('status')}) — {detail}")
     _save_state(state)
     print(f"Swing manager: {len(swings)} holding(s), {acted} exited.")
 

@@ -33,7 +33,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 import apex_config as cfg
-from apex_rationale import send_telegram
+from apex_rationale import (send_telegram, telegram_exit_message,
+                            telegram_carry_message, telegram_health_message)
 
 ET = ZoneInfo("America/New_York")
 logger = logging.getLogger("apex.health")
@@ -173,13 +174,7 @@ def _close(sym: str, p: dict, h: dict, reason: str, state: dict, dry_run: bool) 
     _journal_exit(record)
     state["daily_pnl"] = round(state.get("daily_pnl", 0.0) + pnl, 2)
     state.get("positions", {}).pop(sym, None)
-    emoji = "🟥" if pnl < 0 else "🟩"
-    send_telegram(
-        f"{emoji} <b>APEX EXIT</b> — {sym}\n"
-        f"{reason}\n"
-        f"Exit ${price:.2f} (entry ${float(p['entry']):.2f})  "
-        f"P&L ${pnl} ({h['gain_pct']:+.1f}%)  health {h['health']}"
-    )
+    send_telegram(telegram_exit_message(record))
     logger.info(f"[{sym}] EXIT {reason} px={price:.2f} pnl=${pnl} health={h['health']} "
                 f"{'(DRY)' if dry_run else ''}")
 
@@ -237,8 +232,8 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
                 status = p.get("status", "intraday")
                 if status == "intraday":
                     p["status"] = "swing"
-                    send_telegram(f"🌙 <b>APEX CARRY</b> — {sym} graduates intraday→swing\n"
-                                  f"health {h['health']}  +{h['gain_pct']:.1f}%  holding above VWAP")
+                    send_telegram(telegram_carry_message(sym, h["health"], h["gain_pct"],
+                                                         "holding above VWAP"))
                     logger.info(f"[{sym}] CARRY overnight (swing) health={h['health']}")
                     actions += 1
                 elif status == "swing" and p.get("days_held", 0) >= c["grad_days"]:
@@ -258,8 +253,7 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
 
         # 3. Health-decay warning — crossed below 60 from a healthier reading.
         if prev >= 60 and h["health"] < 60:
-            send_telegram(f"⚠️ <b>APEX HEALTH</b> — {sym} weakening: {h['health']} "
-                          f"({'; '.join(h['reasons'])})  +{h['gain_pct']:.1f}%")
+            send_telegram(telegram_health_message(sym, h["health"], h["reasons"], h["gain_pct"]))
             logger.info(f"[{sym}] health decay {prev}->{h['health']} ({'; '.join(h['reasons'])})")
     return actions
 

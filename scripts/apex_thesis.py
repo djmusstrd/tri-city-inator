@@ -71,6 +71,41 @@ def support_resistance(signal, daily: pd.DataFrame | None) -> tuple[list, list, 
     return support, resistance, extras
 
 
+_vix_cache: dict = {"date": None, "value": None}
+_float_cache: dict = {}
+
+
+def get_vix() -> float | None:
+    """Current VIX (cached daily, best-effort). None if unavailable."""
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    if _vix_cache["date"] == today and _vix_cache["value"] is not None:
+        return _vix_cache["value"]
+    try:
+        import yfinance as yf
+        h = yf.Ticker("^VIX").history(period="1d")
+        v = float(h["Close"].iloc[-1]) if not h.empty else None
+        _vix_cache.update(date=today, value=v)
+        return v
+    except Exception:
+        return None
+
+
+def get_float(symbol: str) -> float | None:
+    """Float shares for a symbol (cached, best-effort). None if unavailable."""
+    if symbol in _float_cache:
+        return _float_cache[symbol]
+    val = None
+    try:
+        import yfinance as yf
+        info = yf.Ticker(symbol).get_info()
+        val = info.get("floatShares") or info.get("sharesOutstanding")
+    except Exception:
+        val = None
+    _float_cache[symbol] = val
+    return val
+
+
 def catalyst(symbol: str, limit: int = 3) -> list:
     """Latest news headlines for `symbol` (best-effort, short timeout). [] on any failure."""
     key, sec = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY")
