@@ -438,8 +438,7 @@ elif page == "Leaders":
         ldf = pd.DataFrame(leaders)
         ldf["TV"] = ldf["symbol"].map(lambda s: f"https://www.tradingview.com/chart/?symbol={s}")
         st.dataframe(ldf, width="stretch", hide_index=True,
-                     column_config={"TV": st.column_config.LinkColumn(
-                         "TV", display_text="↗", width="small", pinned=True)})
+                     column_config={"TV": st.column_config.LinkColumn("TV", display_text="open ↗")})
 
 elif page == "Playbook":
     st.title("APEX Playbook")
