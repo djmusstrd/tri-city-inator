@@ -34,6 +34,7 @@ sys.path.insert(0, str(WORKSPACE / "scripts"))
 import apex_config as cfg
 from apex_entry_engine import detect_entry
 from apex_execute import execute
+from apex_health import manage_positions
 
 import numpy as np
 import pandas as pd
@@ -63,13 +64,15 @@ def fetch_intraday(symbols, the_day: ddate) -> dict:
     dc = _data_client()
     start = datetime.combine(the_day, dtime(0, 0))
     end = datetime.combine(the_day + timedelta(days=1), dtime(0, 0))
+    # Delayed-SIP guard: never request into the last SIP_DELAY_MIN minutes (basic plan rejects it)
+    end = min(end, datetime.utcnow() - timedelta(minutes=cfg.SIP_DELAY_MIN))
     out = {}
     for i in range(0, len(symbols), 200):
         batch = symbols[i:i + 200]
         try:
             df = dc.get_stock_bars(StockBarsRequest(
                 symbol_or_symbols=batch, timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-                start=start, end=end, feed="sip", adjustment="raw")).df
+                start=start, end=end, feed=cfg.DATA_FEED, adjustment="raw")).df
         except Exception as e:
             logger.warning(f"intraday batch {i} failed: {e}")
             continue
@@ -208,6 +211,14 @@ def run_live(dry_run: bool) -> None:
     _signal.signal(_signal.SIGTERM, _stop)
     _signal.signal(_signal.SIGINT, _stop)
 
+    def _sleep(secs: int) -> None:
+        # Interruptible sleep: SIGTERM/SIGINT doesn't break time.sleep (PEP 475 retries it),
+        # so poll running[] in 1s steps → prompt shutdown, no lingering duplicate poller.
+        for _ in range(max(1, int(secs))):
+            if not running[0]:
+                return
+            time.sleep(1)
+
     state = load_state()
     daily = None
     regime = "unknown"
@@ -216,18 +227,24 @@ def run_live(dry_run: bool) -> None:
     while running[0]:
         today = datetime.now(ET).date()
         if state.get("date") != str(today):
-            state = {"date": str(today), "daily_pnl": 0.0, "positions": {}, "executed_today": []}
+            # New session: keep open swing/position carries (Layer 3 graduation), age them,
+            # and only reset the daily counters. Force-closes happen via the EOD health pass.
+            carried = state.get("positions", {})
+            for _p in carried.values():
+                _p["days_held"] = _p.get("days_held", 0) + 1
+            state = {"date": str(today), "daily_pnl": 0.0,
+                     "positions": carried, "executed_today": []}
             save_state(state)
 
         if not _market_open_now():
-            time.sleep(cfg.POLL_SLOW)
+            _sleep(cfg.POLL_SLOW)
             continue
 
         leaders = load_leaders()
         syms = [l["symbol"] for l in leaders]
         if not syms:
             logger.warning("no leaders — is apex_daily_filter.py run for today?")
-            time.sleep(cfg.POLL_SLOW)
+            _sleep(cfg.POLL_SLOW)
             continue
 
         try:
@@ -237,15 +254,24 @@ def run_live(dry_run: bool) -> None:
                 last_daily_day = today
             intraday = fetch_intraday(syms, today)
             fired = run_pass(leaders, intraday, daily, regime, state, dry_run)
+            # Layer 3 — recompute health, proactive-exit breakdowns, carry/close at EOD
+            managed = manage_positions(intraday, state, regime, dry_run)
+            save_state(state)
             logger.info(f"pass: {len(state['positions'])} open, "
-                        f"{len(state['executed_today'])} done today, {fired} new | regime {regime}")
-            # TODO Layer 3: manage open positions via health monitor here
+                        f"{len(state['executed_today'])} done today, {fired} new, "
+                        f"{managed} managed | regime {regime}")
         except Exception as e:
             logger.error(f"pass error: {e}", exc_info=True)
 
-        time.sleep(_cadence())
+        _sleep(_cadence())
 
-    cfg.PID_FILE.unlink(missing_ok=True)
+    # Only remove the PID file if it's still OURS — a lingering old poller must never delete
+    # the PID file a freshly-started one just wrote.
+    try:
+        if cfg.PID_FILE.exists() and cfg.PID_FILE.read_text().strip() == str(os.getpid()):
+            cfg.PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
     logger.info("APEX poller stopped")
 
 

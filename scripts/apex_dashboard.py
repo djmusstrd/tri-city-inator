@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""
+APEX Dashboard — visual management for the headless (Alpaca-native, no-chart) APEX engine.
+
+Because APEX has no TradingView chart to babysit, this dashboard IS the chart: per-position
+intraday candlesticks with entry / stop / VWAP / ORB overlays, a live Layer 3 health-score
+timeline (replayed from the same compute_health() the poller uses), the Layer 6 "why" behind
+every entry, the closed-trade journal, and today's RS leader watchlist.
+
+Run:  python3 -m streamlit run ~/tri-city-inator/scripts/apex_dashboard.py
+      (terminal shortcut: apex-dash)
+
+Reads:
+  shared/apex-state.json      live open positions (entry, stop, health, status, days_held)
+  shared/apex-leaders.json    today's RS-ranked leader watchlist
+  logs/apex-rationale.json    Layer 6 entry rationale ("why this stock, why now")
+  logs/apex-journal.json      closed trades (Layer 3 exits: P&L, reason, peak gain)
+  Alpaca market data          today's 5-min bars for the live candlestick + health replay
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import datetime, time as dtime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+WORKSPACE = Path.home() / "tri-city-inator"
+sys.path.insert(0, str(WORKSPACE / "scripts"))
+
+import apex_config as cfg                       # noqa: E402  (loads .env centrally)
+from apex_entry_engine import detect_entry      # noqa: E402
+from apex_health import compute_health          # noqa: E402
+
+ET = ZoneInfo("America/New_York")
+SESS_OPEN, SESS_CLOSE = dtime(9, 30), dtime(16, 0)
+
+st.set_page_config(page_title="APEX", page_icon="🚀", layout="wide",
+                   initial_sidebar_state="expanded")
+
+
+# ── data loaders ─────────────────────────────────────────────────────────────
+def _load_json(path: Path, default):
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return default
+    return default
+
+
+def load_state() -> dict:
+    return _load_json(cfg.STATE_FILE, {"date": "", "daily_pnl": 0.0,
+                                       "positions": {}, "executed_today": []})
+
+
+def load_leaders() -> dict:
+    return _load_json(cfg.LEADERS_FILE, {"leaders": []})
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_bars(symbol: str, day_iso: str) -> pd.DataFrame:
+    """Today's regular-session 5-min bars for one symbol (cached 60s). Empty df if none."""
+    key, sec = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY")
+    if not key or not sec:
+        return pd.DataFrame()
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        day = datetime.fromisoformat(day_iso).date()
+        dc = StockHistoricalDataClient(key, sec)
+        # Delayed-SIP guard: cap end at now − SIP_DELAY_MIN (basic plan rejects recent SIP)
+        end = min(datetime.combine(day + timedelta(days=1), dtime(0, 0)),
+                  datetime.utcnow() - timedelta(minutes=cfg.SIP_DELAY_MIN))
+        df = dc.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=[symbol], timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=datetime.combine(day, dtime(0, 0)),
+            end=end, feed=cfg.DATA_FEED, adjustment="raw")).df
+        if df.empty:
+            return df
+        sub = df.xs(symbol, level="symbol").copy()
+        et_idx = sub.index.tz_convert(ET)
+        sub["tod"] = et_idx.time
+        sub["et"] = et_idx
+        return sub[(sub["tod"] >= SESS_OPEN) & (sub["tod"] < SESS_CLOSE)]
+    except Exception as e:
+        st.warning(f"bar fetch failed for {symbol}: {e}")
+        return pd.DataFrame()
+
+
+def _vwap(g: pd.DataFrame) -> pd.Series:
+    tp = (g["high"] + g["low"] + g["close"]) / 3
+    return (tp * g["volume"]).cumsum() / g["volume"].cumsum()
+
+
+def _orb_levels(g: pd.DataFrame, orb_minutes: int):
+    end_min = SESS_OPEN.hour * 60 + SESS_OPEN.minute + orb_minutes
+    orb = g[g["tod"] < dtime(end_min // 60, end_min % 60)]
+    if orb.empty:
+        return None, None
+    return float(orb["high"].max()), float(orb["low"].min())
+
+
+def health_timeline(entry: float, bars: pd.DataFrame, start_tod: str | None):
+    """Replay compute_health() over accumulating bars from start_tod → (times, healths)."""
+    g = bars.sort_values("tod").reset_index(drop=True)
+    pos = {"entry": float(entry)}
+    start = 0
+    if start_tod:
+        idx = g.index[g["tod"].astype(str) == str(start_tod)]
+        start = int(idx[0]) if len(idx) else 0
+    times, healths = [], []
+    for i in range(start, len(g)):
+        h = compute_health(pos, g.iloc[: i + 1])
+        if not h:
+            continue
+        times.append(g.iloc[i]["et"])
+        healths.append(h["health"])
+    return times, healths
+
+
+def now_ct():
+    return datetime.now(ZoneInfo("America/Chicago")).strftime("%-I:%M %p CT")
+
+
+def _entry_tod(p: dict):
+    """Floor a position's ISO entry_time to its 5-min bar 'HH:MM:SS' (for health replay start)."""
+    et = p.get("entry_time")
+    if not et:
+        return None
+    try:
+        dt = datetime.fromisoformat(et).astimezone(ET)
+        dt = dt.replace(minute=(dt.minute // 5) * 5, second=0, microsecond=0)
+        return str(dt.time())
+    except Exception:
+        return None
+
+
+# ── sidebar ──────────────────────────────────────────────────────────────────
+state = load_state()
+leaders_doc = load_leaders()
+leaders = leaders_doc.get("leaders", [])
+positions = state.get("positions", {})
+
+with st.sidebar:
+    st.title("🚀 APEX")
+    st.caption("Alpaca-native · headless · Layer 3 managed")
+    page = st.radio("View", ["Live Positions", "Chart a Leader",
+                             "Entries — Why", "Closed Trades", "Leaders"])
+    st.divider()
+    st.metric("Open positions", len(positions))
+    st.metric("Day P&L", f"${state.get('daily_pnl', 0.0):,.2f}")
+    st.caption(f"state date: {state.get('date', '—')}")
+    st.caption(f"leaders: {len(leaders)} · {leaders_doc.get('date', '—')}")
+    if st.button("↻ Refresh"):
+        st.cache_data.clear()
+        st.rerun()
+    st.caption(f"loaded {now_ct()}")
+
+day_iso = state.get("date") or leaders_doc.get("date") or datetime.now(ET).date().isoformat()
+ORB_MIN = cfg.ORB_MINUTES
+
+
+# ── shared chart builder ─────────────────────────────────────────────────────
+def render_symbol(symbol: str, entry: float | None, stop: float | None,
+                  start_tod: str | None, trigger: str | None):
+    bars = fetch_bars(symbol, day_iso)
+    if bars.empty:
+        st.info(f"No intraday bars for {symbol} yet (market may be pre-open).")
+        return
+    g = bars.sort_values("tod").reset_index(drop=True)
+    g = g.assign(vwap=_vwap(g).values)
+    orb_h, orb_l = _orb_levels(g, ORB_MIN)
+    x = g["et"]
+
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=x, open=g["open"], high=g["high"], low=g["low"],
+                                 close=g["close"], name=symbol,
+                                 increasing_line_color="#26a69a",
+                                 decreasing_line_color="#ef5350"))
+    fig.add_trace(go.Scatter(x=x, y=g["vwap"], name="VWAP", mode="lines",
+                             line=dict(color="#ab47bc", width=1.5, dash="dot")))
+    if orb_h is not None:
+        fig.add_hline(y=orb_h, line=dict(color="#90a4ae", width=1, dash="dash"),
+                      annotation_text=f"ORB H {orb_h:.2f}", annotation_position="right")
+        fig.add_hline(y=orb_l, line=dict(color="#90a4ae", width=1, dash="dash"),
+                      annotation_text=f"ORB L {orb_l:.2f}", annotation_position="right")
+    if entry is not None:
+        fig.add_hline(y=entry, line=dict(color="#26a69a", width=1.5),
+                      annotation_text=f"Entry {entry:.2f}", annotation_position="left")
+    if stop is not None:
+        fig.add_hline(y=stop, line=dict(color="#ef5350", width=1.5, dash="dash"),
+                      annotation_text=f"Stop {stop:.2f}", annotation_position="left")
+    fig.update_layout(height=430, margin=dict(l=10, r=10, t=30, b=10),
+                      xaxis_rangeslider_visible=False, template="plotly_dark",
+                      title=f"{symbol} · 5-min" + (f" · {trigger}" if trigger else ""),
+                      legend=dict(orientation="h", y=1.02, x=0))
+    st.plotly_chart(fig, width="stretch")
+
+    # health timeline (only meaningful with an entry reference)
+    if entry is not None:
+        times, healths = health_timeline(entry, g, start_tod)
+        if times:
+            hfig = go.Figure()
+            hfig.add_trace(go.Scatter(x=times, y=healths, mode="lines",
+                                      line=dict(color="#42a5f5", width=2),
+                                      fill="tozeroy", fillcolor="rgba(66,165,245,0.12)",
+                                      name="health"))
+            hfig.add_hline(y=cfg.EXIT_HEALTH, line=dict(color="#ef5350", width=1, dash="dash"),
+                           annotation_text=f"exit < {int(cfg.EXIT_HEALTH)}")
+            hfig.add_hline(y=cfg.CARRY_HEALTH, line=dict(color="#26a69a", width=1, dash="dot"),
+                           annotation_text=f"carry ≥ {int(cfg.CARRY_HEALTH)}")
+            hfig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10),
+                               template="plotly_dark", yaxis=dict(range=[0, 105]),
+                               title="Layer 3 health", showlegend=False)
+            st.plotly_chart(hfig, width="stretch")
+
+    # live read-out
+    last = g.iloc[-1]
+    h = compute_health({"entry": entry}, g) if entry is not None else {}
+    cols = st.columns(4)
+    cols[0].metric("Last", f"${float(last['close']):.2f}")
+    cols[1].metric("VWAP", f"${float(last['vwap']):.2f}")
+    if h:
+        cols[2].metric("Health", h["health"])
+        cols[3].metric("Gain", f"{h['gain_pct']:+.1f}%")
+    if h and h.get("reasons"):
+        st.caption("⚠️ " + " · ".join(h["reasons"]))
+    elif h:
+        st.caption("✅ thesis intact — above entry, VWAP, EMA9; momentum/structure OK")
+
+
+# ── pages ────────────────────────────────────────────────────────────────────
+if page == "Live Positions":
+    st.title("Live Positions")
+    st.caption(f"Layer 3 manages these every poller pass · exit < {int(cfg.EXIT_HEALTH)} health · "
+               f"carry ≥ {int(cfg.CARRY_HEALTH)} · regime stub")
+    if not positions:
+        st.info("No open APEX positions yet. The poller fires ORB15 entries after the opening "
+                "range closes (~8:45 CT). Use **Chart a Leader** to eyeball today's watchlist.")
+    else:
+        rows = []
+        for sym, p in positions.items():
+            rows.append({
+                "symbol": sym, "status": p.get("status", "intraday"),
+                "trigger": p.get("trigger"), "health": p.get("health"),
+                "gain %": p.get("gain_pct"), "peak %": p.get("peak_gain"),
+                "entry": p.get("entry"), "last": p.get("last_price"),
+                "stop": p.get("stop"), "qty": p.get("qty"),
+                "days": p.get("days_held", 0),
+            })
+        df = pd.DataFrame(rows).set_index("symbol")
+        st.dataframe(df, width="stretch")
+        st.divider()
+        sym = st.selectbox("Inspect position", list(positions.keys()))
+        p = positions[sym]
+        render_symbol(sym, p.get("entry"), p.get("stop"),
+                      _entry_tod(p), p.get("trigger"))
+
+elif page == "Chart a Leader":
+    st.title("Chart a Leader")
+    st.caption("Pick any leader to see its intraday action + what APEX would do "
+               "(hypothetical ORB15/VWAP_PB entry + health).")
+    if not leaders:
+        st.info("No leaders file yet — run `apex-leaders`.")
+    else:
+        syms = [l["symbol"] for l in leaders]
+        sym = st.selectbox("Leader", syms)
+        bars = fetch_bars(sym, day_iso)
+        entry = stop = start_tod = trig = None
+        if not bars.empty:
+            sig = detect_entry(sym, bars, orb_minutes=ORB_MIN)
+            if sig is not None:
+                entry, start_tod, trig = float(sig.price), str(sig.bar_time), sig.trigger
+                st.success(f"Hypothetical {trig} entry @ ${entry:.2f} ({start_tod})")
+            else:
+                st.caption("No ORB15/VWAP_PB trigger detected yet today.")
+        render_symbol(sym, entry, stop, start_tod, trig)
+
+elif page == "Entries — Why":
+    st.title("Entries — Why this stock, why now")
+    rats = _load_json(cfg.RATIONALE_LOG, [])
+    today = datetime.now(ET).date().isoformat()
+    rats = [r for r in rats if str(r.get("timestamp", "")).startswith(day_iso)] or rats
+    if not rats:
+        st.info("No entries logged yet today.")
+    for r in reversed(rats[-30:]):
+        with st.container(border=True):
+            top = st.columns([2, 1, 1, 1])
+            top[0].subheader(f"{r.get('symbol')} · {r.get('trigger')}")
+            top[1].metric("Score", r.get("composite_score"))
+            top[2].metric("RS pct", r.get("rs_pct"))
+            top[3].metric("RVOL", f"{r.get('rvol')}x")
+            st.write(f"**Why:** {r.get('why')}")
+            d = st.columns(5)
+            d[0].caption(f"Entry ${r.get('entry')}")
+            d[1].caption(f"Stop ${r.get('stop')}")
+            d[2].caption(f"Qty {r.get('qty')}")
+            d[3].caption(f"Risk ${r.get('risk_dollars')}")
+            d[4].caption(f"Regime {r.get('regime')} {'· DRY' if r.get('dry_run') else ''}")
+
+elif page == "Closed Trades":
+    st.title("Closed Trades")
+    journal = _load_json(cfg.APEX_JOURNAL, [])
+    if not journal:
+        st.info("No closed APEX trades yet. Layer 3 logs exits here "
+                "(logs/apex-journal.json).")
+    else:
+        jdf = pd.DataFrame(journal)
+        wins = (jdf["pnl"] > 0).sum()
+        k = st.columns(4)
+        k[0].metric("Trades", len(jdf))
+        k[1].metric("Net P&L", f"${jdf['pnl'].sum():,.2f}")
+        k[2].metric("Win rate", f"{wins / len(jdf) * 100:.0f}%")
+        k[3].metric("Avg gain", f"{jdf['gain_pct'].mean():+.1f}%")
+        show = ["timestamp", "symbol", "trigger", "status_at_exit", "entry", "exit",
+                "gain_pct", "peak_gain", "pnl", "health_at_exit", "reason"]
+        show = [c for c in show if c in jdf.columns]
+        st.dataframe(jdf[show].iloc[::-1], width="stretch", hide_index=True)
+
+elif page == "Leaders":
+    st.title(f"Today's Leaders — {leaders_doc.get('date', '—')}")
+    st.caption(f"RS≥{int(cfg.RS_MIN)} & ribbon-bull, from {leaders_doc.get('liquid_size', '—')} "
+               f"liquid names (≥${leaders_doc.get('min_dollar_vol', 0):,.0f}/day)")
+    if not leaders:
+        st.info("No leaders file yet — run `apex-leaders`.")
+    else:
+        ldf = pd.DataFrame(leaders)
+        st.dataframe(ldf, width="stretch", hide_index=True)

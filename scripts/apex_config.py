@@ -42,9 +42,22 @@ ATR_LEN              = 14
 ATR_STOP_MULT        = float(os.getenv("APEX_ATR_STOP", "2.0"))
 MAX_STOP_PCT         = float(os.getenv("APEX_MAX_STOP_PCT", "0.10"))  # cap stop distance at 10% of entry
 
+# ── Layer 3 (health monitor / exit) ──────────────────────────────────────────
+EXIT_HEALTH   = float(os.getenv("APEX_EXIT_HEALTH", "40"))   # proactive exit below this score
+CARRY_HEALTH  = float(os.getenv("APEX_CARRY_HEALTH", "70"))  # min health to carry overnight
+EOD_CLOSE_ET  = os.getenv("APEX_EOD_CLOSE_ET", "15:45")      # ET wall-clock to start the conditional EOD pass
+GRAD_DAYS     = int(os.getenv("APEX_GRAD_DAYS", "5"))        # days_held to graduate swing → multi-week position
+
 # ── Layer 4 guardrails (bands Layer 4 may move within) ────────────────────────
 SIZE_BAND        = (0.5, 1.5)    # sizing multiplier range
 THRESH_BAND      = (60.0, 75.0)  # entry threshold range
+
+# ── Market data ───────────────────────────────────────────────────────────────
+DATA_FEED     = os.getenv("APEX_DATA_FEED", "sip")        # sip | iex
+# Basic Alpaca data plans serve SIP on a ~15-min delay and REJECT any request whose window
+# reaches into that delay ("subscription does not permit querying recent SIP data"). Cap every
+# intraday request's end at now − SIP_DELAY_MIN. Set to 0 if you upgrade to real-time SIP.
+SIP_DELAY_MIN = int(os.getenv("APEX_SIP_DELAY_MIN", "16"))
 
 # ── Cadence (seconds) ─────────────────────────────────────────────────────────
 POLL_FAST = int(os.getenv("APEX_POLL_FAST", "60"))    # first hour after open
@@ -60,6 +73,7 @@ STATE_FILE     = SHARED / "apex-state.json"
 PID_FILE       = SHARED / "apex-poller.pid"
 EXEC_LOG       = LOGS / "apex-executions.json"
 RATIONALE_LOG  = LOGS / "apex-rationale.json"
+APEX_JOURNAL   = LOGS / "apex-journal.json"   # closed trades (Layer 3 exits) — feeds Layer 4
 POLLER_LOG     = LOGS / "apex-poller.log"
 
 
@@ -91,5 +105,8 @@ def effective() -> dict:
         "orb_minutes": ORB_MINUTES,
         "atr_stop_mult": ATR_STOP_MULT,
         "max_stop_pct": MAX_STOP_PCT,
+        "exit_health": ov.get("exit_health", EXIT_HEALTH),
+        "carry_health": ov.get("carry_health", CARRY_HEALTH),
+        "grad_days": GRAD_DAYS,
         "disabled_setups": ov.get("disabled_setups", []),
     }

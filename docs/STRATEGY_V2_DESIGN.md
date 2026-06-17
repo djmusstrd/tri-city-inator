@@ -268,19 +268,35 @@ system). Modules:
 - TODO (small-account practicality): high-priced leaders ($2k+ names) only afford 1 share on
   $5K — consider fractional shares or account-aware price ceiling in Layer 1.
 
-### Phase 3 — Trade Health Monitor (Layer 3)
-- [ ] Per-position health-score function (thesis, momentum, levels, time-in-trade).
-- [ ] Proactive exit when health degrades below threshold.
-- [ ] Telegram health/management alerts (momentum-decay warnings, T1/T2/T3, stop moves, exits).
+### Phase 3 — Trade Health Monitor (Layer 3) ✅ BUILT (2026-06-17, dry-run validated)
+`apex_health.py`, wired into the poller at every pass; closed trades → `logs/apex-journal.json`.
+- [x] Per-position health-score function (0-100): thesis (above entry/breakout), VWAP, 5-min
+      EMA9 ribbon proxy, last-3-bar momentum, higher-high structure. Transparent v1 weights.
+- [x] Proactive exit when health < `EXIT_HEALTH` (40) — cuts fades before the hard stop.
+- [x] Conditional EOD: carry a healthy runner overnight (health ≥ `CARRY_HEALTH` 70, green,
+      above VWAP) — positions graduate intraday→swing→multi-week (`GRAD_DAYS` 5); force-close
+      the scratch/thesis-broken at the bell. Poller date-reset now preserves carries + ages them.
+- [x] Telegram exit / health-decay / carry / graduation alerts; `apex_health.py --self-test`
+      replays a past session showing the full health trajectory + where it would exit.
+- Validated on 2026-06-15: QH faded from +13%→health 34→proactive exit -2.7% (beat the stop);
+  MUU chopped 53–100 health all day, never tripped 40, rode to +5.6% as a runner.
+- [ ] TODO (data-tune in Phase 3.5 / Layer 4): exit gave back QH's +13% peak — add a
+      peak-gain-aware trail; derive EXIT/CARRY thresholds + weights from the journal once it fills.
 
 ### Phase 4 — Regime Awareness (Layer 5)
 - [ ] Daily regime classifier (SPY trend, VIX, breadth).
 - [ ] Tag every trade with regime in the journal (and in the rationale snapshot).
 
-### Phase 4.5 — Dashboard "Why / Trade Rationale" page (Layer 6)
-- [ ] New dashboard page rendering each trade's entry rationale in plain language.
-- [ ] Live health-score timeline for open positions.
-- [ ] Surface Layer 4 current config + recent autonomous changes with reasons.
+### Phase 4.5 — Dashboard "Why / Trade Rationale" page (Layer 6) ✅ CORE BUILT (2026-06-17)
+Standalone `apex_dashboard.py` (Streamlit, `apex-dash`) — APEX is headless/no-chart, so this
+dashboard IS the chart. AppTest-validated, all pages render clean.
+- [x] Live Positions: health / gain% / status / reasons table + per-position intraday
+      candlestick (entry/stop/VWAP/ORB overlays) + Layer 3 health-score timeline (replays the
+      poller's compute_health over the day — no extra logging needed).
+- [x] "Chart a Leader": chart any leader + the hypothetical ORB15/VWAP_PB entry & health APEX
+      would assign (visual management pre-trade).
+- [x] Entries — Why: Layer 6 rationale cards. Closed Trades: journal P&L. Leaders: RS watchlist.
+- [ ] Surface Layer 4 current config + recent autonomous changes with reasons (after Phase 5).
 
 ### Phase 5 — Self-Improvement Loop (Layer 4, auto-adjust + guardrails)
 - [ ] Rolling-window per-setup / per-regime expectancy calculator.
