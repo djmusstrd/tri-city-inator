@@ -221,8 +221,14 @@ def symbol_table(df: pd.DataFrame, symcol: str, key: str, column_config: dict | 
             except Exception:
                 rows = []
         if rows:
-            desktop_send(str(df.iloc[rows[0]][symcol]))
-        st.caption("🖱️ select a row → sent to your desktop TV")
+            sym = str(df.iloc[rows[0]][symcol])
+            sel_key = f"{key}_lastsel"
+            # Only drive the chart on a NEW selection (an actual click) — never on a passive
+            # rerun, so we don't fight your manual TV navigation.
+            if st.session_state.get(sel_key) != sym:
+                st.session_state[sel_key] = sym
+                desktop_send(sym)
+        st.caption("🖱️ click a row → sent to your desktop TV")
     else:
         d = df.copy()
         d[symcol] = d[symcol].map(tv_url)

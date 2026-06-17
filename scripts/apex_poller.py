@@ -263,6 +263,12 @@ def run_live(dry_run: bool) -> None:
     cfg.PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     cfg.PID_FILE.write_text(str(os.getpid()))
     logger.info(f"APEX poller started | PID {os.getpid()} | dry_run={dry_run}")
+    # Clear any leftover quote subscriptions so we start with a clean (light) load on the TV app
+    if cfg.USE_TV_QUOTES:
+        try:
+            apex_tv_quotes.release_all()
+        except Exception:
+            pass
 
     running = [True]
     def _stop(s, f): running[0] = False; logger.info("shutdown signal")

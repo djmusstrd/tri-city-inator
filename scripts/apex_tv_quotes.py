@@ -118,6 +118,11 @@ def _read_js(symbols: list[str], wait_ms: int) -> str:
                 }}
               }}
             }});
+            // SELF-CLEANING: release our subscriptions so APEX doesn't keep streaming on the
+            // desktop app's quote session between reads (that load lags manual navigation /
+            // blocks running other tools on the same TV). We only hold them for the read window.
+            try {{ if (inst.setFastSymbols) inst.setFastSymbols('apex', []); }} catch(e){{}}
+            syms.forEach(function(s){{ try{{ inst.unsubscribe('apex', s); }}catch(e){{}} }});
             resolve(JSON.stringify(out));
           }}, {wait_ms});
         }} catch(e){{ resolve(JSON.stringify({{__error: e.message}})); }}
@@ -152,8 +157,37 @@ def get_quotes(symbols: list[str], wait_ms: int = 3000, ws_url: str | None = Non
     return result
 
 
+def release_all(ws_url: str | None = None) -> bool:
+    """Unsubscribe APEX from every symbol on the quote session + clear the fast set — clears any
+    accumulated streaming load (call on poller startup, or manually if the desktop TV is laggy)."""
+    if ws_url is None:
+        tab = get_quote_tab()
+        if not tab:
+            return False
+        ws_url = tab["webSocketDebuggerUrl"]
+    js = """(function(){
+      try {
+        var inst = window.getQuoteSessionInstance();
+        try { if (inst.setFastSymbols) inst.setFastSymbols('apex', []); } catch(e){}
+        Object.keys(inst._symbol_data || {}).forEach(function(k){
+          try { inst.unsubscribe('apex', k); } catch(e){}
+        });
+        return 'ok';
+      } catch(e){ return 'err:'+e.message; }
+    })()"""
+    try:
+        return cdp_evaluate(ws_url, js, timeout=8) == "ok"
+    except Exception as e:
+        logger.debug(f"release_all failed: {e}")
+        return False
+
+
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "release":
+        logging.basicConfig(level=logging.INFO)
+        print("release_all:", release_all())
+        raise SystemExit
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     syms = sys.argv[1:] or ["AAPL", "WDC", "NUAI", "MULL", "QH", "SPY"]
     tab = get_quote_tab()
