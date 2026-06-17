@@ -49,9 +49,11 @@ CARRY_HEALTH  = float(os.getenv("APEX_CARRY_HEALTH", "70"))  # min health to car
 EOD_CLOSE_ET  = os.getenv("APEX_EOD_CLOSE_ET", "15:45")      # ET wall-clock to start the conditional EOD pass
 GRAD_DAYS     = int(os.getenv("APEX_GRAD_DAYS", "5"))        # days_held to graduate swing → multi-week position
 
-# Overnight carry is GATED OFF by default — validate intraday first; flip to true to let healthy
-# runners graduate to swings and be carried overnight (then the swing manager owns them).
-ALLOW_OVERNIGHT_CARRY = os.getenv("APEX_ALLOW_OVERNIGHT_CARRY", "false").lower() == "true"
+# Overnight carry: when true, at EOD the system PROPOSES healthy runners as overnight swings
+# (Telegram + dashboard) and carries them BY DEFAULT unless you deny in the close window; the
+# swing manager then owns them. When false, everything flattens at EOD (intraday-only validation).
+ALLOW_OVERNIGHT_CARRY = os.getenv("APEX_ALLOW_OVERNIGHT_CARRY", "true").lower() == "true"
+CARRY_DECISIONS = SHARED / "apex-carry-decisions.json"   # dashboard approve/deny for pending carries
 
 # ── Swing tier (daily-bar management, runs independent of the intraday poller) ────────
 SWING_TREND_EMA = int(os.getenv("APEX_SWING_TREND_EMA", "10"))   # daily close below this EMA = trend break → exit

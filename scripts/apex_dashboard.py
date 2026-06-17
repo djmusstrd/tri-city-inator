@@ -36,7 +36,7 @@ sys.path.insert(0, str(WORKSPACE / "scripts"))
 
 import apex_config as cfg                       # noqa: E402  (loads .env centrally)
 from apex_entry_engine import detect_entry      # noqa: E402
-from apex_health import compute_health          # noqa: E402
+from apex_health import compute_health, record_carry_decision  # noqa: E402
 import apex_tv_quotes                            # noqa: E402  (real-time TV quote, hybrid feed)
 import apex_tv_control                           # noqa: E402  (drive desktop chart + watchlist add)
 import apex_flags                                # noqa: E402  (operator avoid/prioritize/strict flags)
@@ -485,6 +485,26 @@ if page == "Live Positions":
                     f"{acct['day_pnl']/acct['last_equity']*100:+.2f}%" if acct['last_equity'] else None)
         a[2].metric("Buying power", f"${acct['buying_power']:,.0f}")
         a[3].metric("Open positions", len(apos))
+        st.divider()
+
+    # Pending overnight-carry proposals — carries by default; approve to lock, deny to flatten.
+    pending = [s for s, p in positions.items() if p.get("pending_deny")]
+    if pending:
+        st.warning(f"🌙 **Overnight carry proposed** — these carry overnight by default. "
+                   f"**Deny before 3:00 CT to flatten instead.**")
+        for s in pending:
+            p = positions[s]
+            cc = st.columns([3, 1, 1])
+            cc[0].markdown(f"**{s}** · health {p.get('health')} · {p.get('gain_pct', 0):+.1f}% "
+                           f"→ carry as swing?")
+            if cc[1].button("✅ Keep", key=f"appr_{s}"):
+                record_carry_decision(s, "approve")
+                st.toast(f"{s}: carry approved")
+                st.rerun()
+            if cc[2].button("🚫 Deny", key=f"deny_{s}"):
+                record_carry_decision(s, "deny")
+                st.toast(f"{s}: will flatten")
+                st.rerun()
         st.divider()
 
     # union of what Alpaca actually holds and what the engine tracks

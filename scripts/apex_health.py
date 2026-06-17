@@ -136,6 +136,33 @@ def _journal_exit(record: dict) -> None:
     cfg.APEX_JOURNAL.write_text(json.dumps(rows, indent=2))
 
 
+def load_carry_decisions() -> dict:
+    """Dashboard-written approve/deny for pending overnight carries (today only)."""
+    today = datetime.now(ET).date().isoformat()
+    if cfg.CARRY_DECISIONS.exists():
+        try:
+            d = json.loads(cfg.CARRY_DECISIONS.read_text())
+            if d.get("date") == today:
+                d.setdefault("approve", [])
+                d.setdefault("deny", [])
+                return d
+        except Exception:
+            pass
+    return {"date": today, "approve": [], "deny": []}
+
+
+def record_carry_decision(symbol: str, decision: str) -> None:
+    """decision = 'approve' (lock as swing) | 'deny' (flatten). Written by the dashboard; the
+    poller applies it on its next EOD-window pass."""
+    d = load_carry_decisions()
+    other = "deny" if decision == "approve" else "approve"
+    if symbol not in d[decision]:
+        d[decision].append(symbol)
+    if symbol in d.get(other, []):
+        d[other].remove(symbol)
+    cfg.CARRY_DECISIONS.write_text(json.dumps(d, indent=2))
+
+
 def _liquidate(sym: str) -> None:
     """Live close: cancel the symbol's open (protective stop) orders first, then market-sell."""
     client = _trading_client()
@@ -200,11 +227,26 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
     c = cfg.effective()
     eod = _eod_now()
     lq = live_quotes or {}
+    dec = load_carry_decisions()
     actions = 0
     for sym in list(state.get("positions", {})):
         p = state["positions"][sym]
-        # Swing / multi-week holdings are owned by the daily swing manager (apex_swing.py) — the
-        # intraday 5-min health would whipsaw them. Leave them to swing rules.
+        # A. Pending-carry deny window: a carry was PROPOSED at EOD and carries by default — the
+        #    operator can deny it on the dashboard (→ flatten) or approve it (→ lock as swing).
+        if p.get("pending_deny"):
+            if sym in dec.get("deny", []):
+                price = lq.get(sym, {}).get("last") or p.get("last_price") or p["entry"]
+                price = float(price)
+                hh = {"price": price, "health": p.get("health", 0),
+                      "gain_pct": round((price - p["entry"]) / p["entry"] * 100, 2),
+                      "reasons": ["operator denied carry"]}
+                _close(sym, p, hh, "carry DENIED by operator — flattened", state, dry_run)
+                actions += 1
+                continue
+            if sym in dec.get("approve", []):
+                p["pending_deny"] = False    # locked in as a swing
+        # B. Swing / multi-week holdings are owned by the daily swing manager (apex_swing.py) —
+        #    the intraday 5-min health would whipsaw them. Leave them to swing rules.
         if p.get("status", "intraday") != "intraday":
             continue
         lp = lq.get(sym, {}).get("last")
@@ -225,27 +267,20 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
             actions += 1
             continue
 
-        # 2. Conditional EOD — carry the healthy runner, force-close the weak.
+        # 2. Conditional EOD — PROPOSE the healthy runner as an overnight carry (default carry,
+        #    operator can deny on the dashboard); force-close the weak.
         if eod:
             runner = (cfg.ALLOW_OVERNIGHT_CARRY and h["health"] >= c["carry_health"]
                       and h["gain_pct"] > 0 and h["price"] >= h["vwap"])
             if runner:
-                status = p.get("status", "intraday")
-                if status == "intraday":
+                if not p.get("pending_deny"):     # propose once
                     p["status"] = "swing"
+                    p["pending_deny"] = True       # carries by default; deniable until close
                     send_telegram(telegram_carry_message(sym, h["health"], h["gain_pct"],
                                                          "holding above VWAP"))
-                    logger.info(f"[{sym}] CARRY overnight (swing) health={h['health']}")
+                    logger.info(f"[{sym}] CARRY PROPOSED (default carry; deny on dashboard) "
+                                f"health={h['health']}")
                     actions += 1
-                elif status == "swing" and p.get("days_held", 0) >= c["grad_days"]:
-                    p["status"] = "position"
-                    send_telegram(f"🚀 <b>APEX GRADUATE</b> — {sym} swing→multi-week position\n"
-                                  f"{p.get('days_held', 0)}d held  health {h['health']}  "
-                                  f"+{h['gain_pct']:.1f}%")
-                    logger.info(f"[{sym}] GRADUATE to multi-week position "
-                                f"({p.get('days_held', 0)}d) health={h['health']}")
-                    actions += 1
-                # else already swing/position and still healthy → hold, nothing to announce
             else:
                 _close(sym, p, h, "EOD close — thesis weak/scratch (not a runner)",
                        state, dry_run)

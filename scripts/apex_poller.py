@@ -305,6 +305,7 @@ def run_live(dry_run: bool) -> None:
             carried = state.get("positions", {})
             for _p in carried.values():
                 _p["days_held"] = _p.get("days_held", 0) + 1
+                _p.pop("pending_deny", None)   # carry confirmed overnight → now a settled swing
             state = {"date": str(today), "daily_pnl": 0.0,
                      "positions": carried, "executed_today": []}
             save_state(state)
