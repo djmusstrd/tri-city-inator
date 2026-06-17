@@ -142,6 +142,10 @@ def now_ct():
     return datetime.now(ZoneInfo("America/Chicago")).strftime("%-I:%M %p CT")
 
 
+def tv_url(symbol: str) -> str:
+    return f"https://www.tradingview.com/chart/?symbol={symbol}"
+
+
 def _entry_tod(p: dict):
     """Floor a position's ISO entry_time to its 5-min bar 'HH:MM:SS' (for health replay start)."""
     et = p.get("entry_time")
@@ -229,6 +233,7 @@ ORB_MIN = cfg.ORB_MINUTES
 # ── shared chart builder ─────────────────────────────────────────────────────
 def render_symbol(symbol: str, entry: float | None, stop: float | None,
                   start_tod: str | None, trigger: str | None):
+    st.markdown(f"### [{symbol} ↗]({tv_url(symbol)})", help="Open on TradingView")
     bars = fetch_bars(symbol, day_iso)
     if bars.empty:
         st.info(f"No intraday bars for {symbol} yet (market may be pre-open).")
@@ -344,8 +349,11 @@ if page == "Live Positions":
                 "stop": p.get("stop"),
                 "src": "alpaca" if sym in apos else "engine-only",
             })
-        df = pd.DataFrame(rows).set_index("symbol")
-        st.dataframe(df, width="stretch")
+        df = pd.DataFrame(rows)
+        df["symbol"] = df["symbol"].map(tv_url)
+        st.dataframe(df, width="stretch", hide_index=True,
+                     column_config={"symbol": st.column_config.LinkColumn(
+                         "symbol", display_text=r"symbol=(.+)$")})
         if any(r["src"] == "engine-only" for r in rows):
             st.caption("⚠ 'engine-only' = tracked by APEX but not yet confirmed in the Alpaca "
                        "account (order pending/unfilled).")
@@ -385,7 +393,7 @@ elif page == "Entries — Why":
     for r in reversed(rats[-30:]):
         with st.container(border=True):
             top = st.columns([2, 1, 1, 1])
-            top[0].subheader(f"{r.get('symbol')} · {r.get('trigger')}")
+            top[0].markdown(f"### [{r.get('symbol')} ↗]({tv_url(r.get('symbol'))}) · {r.get('trigger')}")
             top[1].metric("Score", r.get("composite_score"))
             top[2].metric("RS pct", r.get("rs_pct"))
             top[3].metric("RVOL", f"{r.get('rvol')}x")
@@ -425,7 +433,11 @@ elif page == "Closed Trades":
         show = ["timestamp", "symbol", "trigger", "mode", "status_at_exit", "entry", "exit",
                 "gain_pct", "peak_gain", "pnl", "health_at_exit", "reason"]
         show = [c for c in show if c in jdf.columns]
-        st.dataframe(jdf[show].iloc[::-1], width="stretch", hide_index=True)
+        tdf = jdf[show].iloc[::-1].copy()
+        tdf["symbol"] = tdf["symbol"].map(tv_url)
+        st.dataframe(tdf, width="stretch", hide_index=True,
+                     column_config={"symbol": st.column_config.LinkColumn(
+                         "symbol", display_text=r"symbol=(.+)$")})
 
 elif page == "Leaders":
     st.title(f"Today's Leaders — {leaders_doc.get('date', '—')}")
