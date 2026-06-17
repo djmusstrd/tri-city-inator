@@ -176,8 +176,10 @@ def now_ct():
 
 
 def tv_url(symbol: str) -> str:
-    """Web link into the saved APEX layout with this symbol."""
-    return f"https://www.tradingview.com/chart/{cfg.APEX_LAYOUT_ID}/?symbol={symbol}"
+    """Web link to this symbol in your last-used TV layout. (TV chart URLs use a short slug, not
+    the numeric layout id — the numeric id 404s — so we don't force a layout here; opens your
+    default/last layout. Set APEX as your default in TradingView for consistency.)"""
+    return f"https://www.tradingview.com/chart/?symbol={symbol}"
 
 
 def desktop_send(symbol: str) -> None:
