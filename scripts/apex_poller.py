@@ -264,8 +264,15 @@ def _market_open_now() -> bool:
 
 def _cadence() -> int:
     now = datetime.now(ET).time()
-    first_hour_end = dtime(10, 30)
-    return cfg.POLL_FAST if now < first_hour_end else cfg.POLL_SLOW
+    if now < dtime(10, 30):
+        return cfg.POLL_FAST
+    try:                                    # EOD window — be responsive for carry deny/keep replies
+        eh, em = (int(x) for x in cfg.EOD_CLOSE_ET.split(":"))
+        if now >= dtime(eh, em):
+            return cfg.POLL_FAST
+    except Exception:
+        pass
+    return cfg.POLL_SLOW
 
 
 def run_live(dry_run: bool) -> None:
@@ -336,6 +343,12 @@ def run_live(dry_run: bool) -> None:
             fired = run_pass(leaders, intraday, daily, regime, state, dry_run, live_quotes)
             # Layer 3 — recompute health, proactive-exit breakdowns, carry/close at EOD
             managed = manage_positions(intraday, state, regime, dry_run, live_quotes)
+            # Inbound Telegram: apply any "deny/keep SYM" carry replies from the phone
+            try:
+                import apex_telegram
+                apex_telegram.poll_replies(state)
+            except Exception as e:
+                logger.debug(f"telegram poll failed: {e}")
             save_state(state)
             logger.info(f"pass: {len(state['positions'])} open, "
                         f"{len(state['executed_today'])} done today, {fired} new, "

@@ -176,7 +176,8 @@ def telegram_carry_message(sym: str, health, gain_pct, info: str = "") -> str:
         f"<b>Health:</b> {health} · <b>Gain:</b> {gain_pct:+.1f}%{(' · ' + info) if info else ''}\n\n"
         f"🤖 <b>Decision</b>\n"
         f"HOLD overnight as a swing (default). Managed daily by swing rules.\n"
-        f"<i>Deny on the dashboard before 3:00 CT to flatten instead.</i>"
+        f"<i>Reply <b>deny {sym}</b> to flatten, or <b>keep {sym}</b> to lock — before 3:00 CT. "
+        f"(Or use the dashboard.)</i>"
     )
 
 
