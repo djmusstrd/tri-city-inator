@@ -66,7 +66,7 @@ DATA_FEED     = os.getenv("APEX_DATA_FEED", "sip")        # sip | iex
 # per-symbol if TV/CDP is down or a symbol has no live tick. See apex_tv_quotes.py.
 USE_TV_QUOTES = os.getenv("APEX_USE_TV_QUOTES", "true").lower() == "true"
 TV_QUOTE_WAIT_MS = int(os.getenv("APEX_TV_QUOTE_WAIT_MS", "3000"))
-MAX_LIVE_QUOTES = int(os.getenv("APEX_MAX_LIVE_QUOTES", "45"))   # cap real-time set (TV streams ~dozens reliably)
+MAX_LIVE_QUOTES = int(os.getenv("APEX_MAX_LIVE_QUOTES", "25"))   # cap the WARM real-time set (bounded streaming load on the TV app)
 # Basic Alpaca data plans serve SIP on a ~15-min delay and REJECT any request whose window
 # reaches into that delay ("subscription does not permit querying recent SIP data"). Cap every
 # intraday request's end at now − SIP_DELAY_MIN. Set to 0 if you upgrade to real-time SIP.

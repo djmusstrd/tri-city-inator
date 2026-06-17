@@ -32,6 +32,10 @@ CDP_PORT = 9222
 
 logger = logging.getLogger("apex.tvquotes")
 
+# symbols APEX currently keeps subscribed (warm) on the quote session — bounded to the working
+# set so coverage stays high without unbounded accumulation lagging the desktop app.
+_subscribed: set = set()
+
 # quote fields we stream (names verified against a live session)
 _FIELDS = ["last_price", "change", "change_percent", "volume", "open_price",
            "high_price", "low_price", "prev_close_price", "current_session",
@@ -85,9 +89,11 @@ def get_quote_tab() -> dict | None:
     return None
 
 
-def _read_js(symbols: list[str], wait_ms: int) -> str:
-    """Build JS that subscribes the symbols, waits for ticks, then returns their quote values."""
+def _read_js(symbols: list[str], to_unsub: list[str], wait_ms: int) -> str:
+    """Build JS that keeps `symbols` subscribed (warm), releases `to_unsub` (symbols that left the
+    set), waits for ticks, then returns the current values."""
     syms = json.dumps(symbols)
+    unsub = json.dumps(to_unsub)
     fields = json.dumps(_FIELDS)
     return f"""(function(){{
       return new Promise(function(resolve){{
@@ -118,11 +124,12 @@ def _read_js(symbols: list[str], wait_ms: int) -> str:
                 }}
               }}
             }});
-            // SELF-CLEANING: release our subscriptions so APEX doesn't keep streaming on the
-            // desktop app's quote session between reads (that load lags manual navigation /
-            // blocks running other tools on the same TV). We only hold them for the read window.
-            try {{ if (inst.setFastSymbols) inst.setFastSymbols('apex', []); }} catch(e){{}}
-            syms.forEach(function(s){{ try{{ inst.unsubscribe('apex', s); }}catch(e){{}} }});
+            // BOUNDED + WARM: keep the current working set subscribed (so reads aren't cold and
+            // coverage stays high), but release the symbols that LEFT the set since last cycle —
+            // so the streaming load stays capped at the working set (no unbounded accumulation
+            // that lagged the desktop app), while still being real-time for the symbols we need.
+            var toUnsub = {unsub};
+            toUnsub.forEach(function(s){{ try{{ inst.unsubscribe('apex', s); }}catch(e){{}} }});
             resolve(JSON.stringify(out));
           }}, {wait_ms});
         }} catch(e){{ resolve(JSON.stringify({{__error: e.message}})); }}
@@ -136,6 +143,7 @@ def get_quotes(symbols: list[str], wait_ms: int = 3000, ws_url: str | None = Non
     session, lp_time, open, high, low, prev_close}} for symbols with a live last price; symbols
     without a tick (or if TV/CDP is down) are simply absent → caller falls back to Alpaca.
     """
+    global _subscribed
     if not symbols:
         return {}
     if ws_url is None:
@@ -144,11 +152,15 @@ def get_quotes(symbols: list[str], wait_ms: int = 3000, ws_url: str | None = Non
             logger.debug("no TV quote tab — falling back to delayed feed")
             return {}
         ws_url = tab["webSocketDebuggerUrl"]
+    cur = list(dict.fromkeys(symbols))
+    to_unsub = [s for s in _subscribed if s not in cur]   # symbols that left the set → release
     try:
-        result = cdp_evaluate(ws_url, _read_js(symbols, wait_ms), timeout=int(wait_ms / 1000) + 12)
+        result = cdp_evaluate(ws_url, _read_js(cur, to_unsub, wait_ms),
+                              timeout=int(wait_ms / 1000) + 12)
     except Exception as e:
         logger.warning(f"quote read failed: {e}")
         return {}
+    _subscribed = set(cur)
     if not isinstance(result, dict):
         return {}
     if result.get("__error"):
@@ -160,6 +172,8 @@ def get_quotes(symbols: list[str], wait_ms: int = 3000, ws_url: str | None = Non
 def release_all(ws_url: str | None = None) -> bool:
     """Unsubscribe APEX from every symbol on the quote session + clear the fast set — clears any
     accumulated streaming load (call on poller startup, or manually if the desktop TV is laggy)."""
+    global _subscribed
+    _subscribed = set()
     if ws_url is None:
         tab = get_quote_tab()
         if not tab:
