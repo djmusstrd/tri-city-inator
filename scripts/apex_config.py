@@ -48,6 +48,13 @@ CARRY_HEALTH  = float(os.getenv("APEX_CARRY_HEALTH", "70"))  # min health to car
 EOD_CLOSE_ET  = os.getenv("APEX_EOD_CLOSE_ET", "15:45")      # ET wall-clock to start the conditional EOD pass
 GRAD_DAYS     = int(os.getenv("APEX_GRAD_DAYS", "5"))        # days_held to graduate swing → multi-week position
 
+# Overnight carry is GATED OFF by default — validate intraday first; flip to true to let healthy
+# runners graduate to swings and be carried overnight (then the swing manager owns them).
+ALLOW_OVERNIGHT_CARRY = os.getenv("APEX_ALLOW_OVERNIGHT_CARRY", "false").lower() == "true"
+
+# ── Swing tier (daily-bar management, runs independent of the intraday poller) ────────
+SWING_TREND_EMA = int(os.getenv("APEX_SWING_TREND_EMA", "10"))   # daily close below this EMA = trend break → exit
+
 # ── Layer 4 guardrails (bands Layer 4 may move within) ────────────────────────
 SIZE_BAND        = (0.5, 1.5)    # sizing multiplier range
 THRESH_BAND      = (60.0, 75.0)  # entry threshold range

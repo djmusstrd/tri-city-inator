@@ -290,7 +290,7 @@ with st.sidebar:
     st.title("🚀 APEX")
     st.caption(f"hybrid feed · Layer 3 · {'PAPER' if IS_PAPER else 'LIVE 💰'} account")
     page = st.radio("View", ["Live Positions", "Chart a Leader",
-                             "Entries — Why", "Closed Trades", "Leaders", "Playbook"])
+                             "Trade Journal", "Closed Trades", "Leaders", "Playbook"])
     st.radio("Ticker click →", ["Web (APEX layout)", "Desktop TV (CDP)"], key="link_mode",
              help="Web: opens the APEX layout in a browser tab. Desktop: drives your running "
                   "TradingView app to that symbol via CDP.")
@@ -402,6 +402,55 @@ def render_symbol(symbol: str, entry: float | None, stop: float | None,
         st.caption("✅ thesis intact — above entry, VWAP, EMA9; momentum/structure OK")
 
 
+def _levels_md(levels: list, fallback_label: str, fallback_price) -> str:
+    levels = [l for l in (levels or []) if l.get("price") is not None]
+    if not levels and fallback_price is not None:
+        levels = [{"label": fallback_label, "price": fallback_price}]
+    return "  \n".join(f"{l['label']} **${l['price']:g}**" for l in levels) or "—"
+
+
+def trade_card(r: dict, outcome: dict | None):
+    """Render one trade as a full thesis card (entry plan) + outcome (once closed)."""
+    sym = r.get("symbol")
+    th = r.get("thesis") or {}
+    ts = str(r.get("timestamp", ""))[:16].replace("T", " ")
+    with st.container(border=True):
+        hdr = st.columns([3, 1, 1, 1])
+        hdr[0].markdown(f"### [{sym} ↗]({tv_url(sym)}) · {r.get('trigger')} · LONG")
+        hdr[1].metric("Conviction", r.get("composite_score"))
+        hdr[2].metric("RS pct", r.get("rs_pct"))
+        hdr[3].metric("RVOL", f"{r.get('rvol')}x")
+        st.caption(f"taken {ts} CT-ET · regime {r.get('regime')}"
+                   f"{' · DRY-RUN' if r.get('dry_run') else ' · LIVE'}")
+
+        st.markdown(f"**Thesis** — {th.get('thesis') or r.get('why', '')}")
+        cat = th.get("catalyst") or []
+        if cat:
+            bits = [f"[{c['headline'][:72]}]({c['url']})" if c.get("url") else c["headline"][:72]
+                    for c in cat[:2]]
+            st.markdown("**Catalyst** — " + " · ".join(bits))
+
+        col = st.columns(3)
+        inval = th.get("invalidation", r.get("stop"))
+        col[0].markdown(
+            f"**Entry** ${r.get('entry')}  \n"
+            f"**Stop / invalidation** ${inval}  \n"
+            f"**Risk** ${r.get('risk_dollars')} · qty {r.get('qty')}")
+        col[1].markdown("**Support**  \n" + _levels_md(th.get("support"), "ORB low", r.get("orb_low")))
+        col[2].markdown("**Resistance**  \n" + _levels_md(th.get("resistance"), "ORB high", r.get("orb_high")))
+        st.caption("**Plan** — " + (th.get("planned_exit") or "Layer 3 health-managed (let winners run)."))
+
+        if outcome:
+            pnl = outcome.get("pnl", 0)
+            emoji = "🟩" if pnl >= 0 else "🟥"
+            st.markdown(
+                f"{emoji} **Outcome** — exit ${outcome.get('exit')} · "
+                f"P&L ${pnl} ({outcome.get('gain_pct', 0):+.1f}%) · peak {outcome.get('peak_gain')}% · "
+                f"health@exit {outcome.get('health_at_exit')} · _{outcome.get('reason', '')[:60]}_")
+        else:
+            st.caption("⏳ open")
+
+
 # ── pages ────────────────────────────────────────────────────────────────────
 if page == "Live Positions":
     st.title("Live Positions")
@@ -471,27 +520,26 @@ elif page == "Chart a Leader":
                 st.caption("No ORB15/VWAP_PB trigger detected yet today.")
         render_symbol(sym, entry, stop, start_tod, trig)
 
-elif page == "Entries — Why":
-    st.title("Entries — Why this stock, why now")
+elif page == "Trade Journal":
+    st.title("Trade Journal")
+    st.caption("The full thesis for every trade — setup · catalyst · entry/stop · support/"
+               "resistance · plan — plus the outcome once it closes.")
     rats = _load_json(cfg.RATIONALE_LOG, [])
-    today = datetime.now(ET).date().isoformat()
-    rats = [r for r in rats if str(r.get("timestamp", "")).startswith(day_iso)] or rats
-    if not rats:
-        st.info("No entries logged yet today.")
-    for r in reversed(rats[-30:]):
-        with st.container(border=True):
-            top = st.columns([2, 1, 1, 1])
-            top[0].markdown(f"### [{r.get('symbol')} ↗]({tv_url(r.get('symbol'))}) · {r.get('trigger')}")
-            top[1].metric("Score", r.get("composite_score"))
-            top[2].metric("RS pct", r.get("rs_pct"))
-            top[3].metric("RVOL", f"{r.get('rvol')}x")
-            st.write(f"**Why:** {r.get('why')}")
-            d = st.columns(5)
-            d[0].caption(f"Entry ${r.get('entry')}")
-            d[1].caption(f"Stop ${r.get('stop')}")
-            d[2].caption(f"Qty {r.get('qty')}")
-            d[3].caption(f"Risk ${r.get('risk_dollars')}")
-            d[4].caption(f"Regime {r.get('regime')} {'· DRY' if r.get('dry_run') else ''}")
+    journal = _load_json(cfg.APEX_JOURNAL, [])
+    out_by_oid = {j["order_id"]: j for j in journal
+                  if j.get("order_id") and j.get("order_id") != "DRY-RUN"}
+    out_by_sym = {}
+    for j in journal:
+        out_by_sym[j.get("symbol")] = j   # latest close per symbol (chronological log)
+    scope = st.radio("Show", ["Today", "All"], horizontal=True, key="tj_scope")
+    rows = rats if scope == "All" else [r for r in rats
+                                        if str(r.get("timestamp", "")).startswith(day_iso)]
+    if not rows:
+        st.info("No trades logged yet.")
+    for r in reversed(rows[-50:]):
+        oid = r.get("order_id")
+        outcome = out_by_oid.get(oid) if oid and oid != "DRY-RUN" else out_by_sym.get(r.get("symbol"))
+        trade_card(r, outcome)
 
 elif page == "Closed Trades":
     st.title("Closed Trades")

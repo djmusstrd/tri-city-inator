@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.starks-labs.apex-swing</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/georgestarks/opt/anaconda3/bin/python</string>
+        <string>-W</string>
+        <string>ignore</string>
+        <string>/Users/georgestarks/tri-city-inator/scripts/apex_swing.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/georgestarks/tri-city-inator</string>
+    <key>StandardOutPath</key>
+    <string>/Users/georgestarks/tri-city-inator/logs/apex-swing.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/georgestarks/tri-city-inator/logs/apex-swing.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/georgestarks</string>
+        <key>PATH</key>
+        <string>/Users/georgestarks/opt/anaconda3/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <!-- Daily swing-tier management at 3:10 PM CT (after the 3:00 PM CT close), weekdays.
+         Runs whether or not an intraday `apex` session is active. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>10</integer><key>Weekday</key><integer>1</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>10</integer><key>Weekday</key><integer>2</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>10</integer><key>Weekday</key><integer>3</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>10</integer><key>Weekday</key><integer>4</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>10</integer><key>Weekday</key><integer>5</integer></dict>
+    </array>
+</dict>
+</plist>

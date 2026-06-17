@@ -1,5 +1,7 @@
 #!/bin/bash
-# APEX trading-session shutdown — stop the poller, flatten open positions, print the day's summary.
+# APEX trading-session shutdown — stop the intraday poller, flatten INTRADAY positions, print the
+# day's summary. Swing / multi-week holdings are LEFT OPEN (durable — they exit on swing rules via
+# the swing manager, not on session end). Use `apex-flatten` to close everything explicitly.
 # Called when you type "end session" (or run directly via the `apex-end` shortcut).
 # TradingView is left running; close it manually if you want.
 

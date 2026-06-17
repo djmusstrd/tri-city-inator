@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import apex_config as cfg
 from apex_entry_engine import composite_score
 from apex_rationale import build_rationale, log_rationale, telegram_entry_message
+from apex_thesis import build_thesis
 
 ET = ZoneInfo("America/New_York")
 logger = logging.getLogger("apex.execute")
@@ -67,7 +68,7 @@ def _save_exec_log(rows: list) -> None:
 
 
 def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
-            dry_run: bool = False) -> bool:
+            dry_run: bool = False, daily_bars=None) -> bool:
     """Run guards → size → place entry+stop → log execution + rationale → Telegram."""
     c = cfg.effective()
     sym = signal.symbol
@@ -136,6 +137,10 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
                                 stop_price, atr, qty)
     rationale["order_id"] = order_id
     rationale["dry_run"] = dry_run
+    try:
+        rationale["thesis"] = build_thesis(signal, daily_bars, stop_price)
+    except Exception as e:
+        logger.debug(f"[{sym}] thesis build failed: {e}")
     log_rationale(rationale)
 
     # ── Execution log ──

@@ -207,6 +207,10 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
     actions = 0
     for sym in list(state.get("positions", {})):
         p = state["positions"][sym]
+        # Swing / multi-week holdings are owned by the daily swing manager (apex_swing.py) — the
+        # intraday 5-min health would whipsaw them. Leave them to swing rules.
+        if p.get("status", "intraday") != "intraday":
+            continue
         lp = lq.get(sym, {}).get("last")
         h = compute_health(p, intraday.get(sym), live_price=lp)
         if not h:
@@ -227,8 +231,8 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
 
         # 2. Conditional EOD — carry the healthy runner, force-close the weak.
         if eod:
-            runner = (h["health"] >= c["carry_health"] and h["gain_pct"] > 0
-                      and h["price"] >= h["vwap"])
+            runner = (cfg.ALLOW_OVERNIGHT_CARRY and h["health"] >= c["carry_health"]
+                      and h["gain_pct"] > 0 and h["price"] >= h["vwap"])
             if runner:
                 status = p.get("status", "intraday")
                 if status == "intraday":

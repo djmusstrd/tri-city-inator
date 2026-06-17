@@ -48,25 +48,39 @@ def _today_rows(path) -> list:
     return [r for r in rows if str(r.get("timestamp", "")).startswith(today)]
 
 
-def flatten_all() -> None:
+def flatten(scope: str = "intraday") -> None:
+    """
+    scope="intraday" (default, used by "end session"): close only intraday-tier positions and
+    LEAVE swing / multi-week holdings open — they're durable and exit on swing rules (managed by
+    apex_swing.py), not on session lifecycle.
+    scope="all": close everything (explicit `apex-flatten` / `apex-end --all`).
+    """
     state = _load_state()
     positions = state.get("positions", {})
-    if not positions:
-        print("No open APEX positions to flatten.")
+    if scope == "all":
+        targets = list(positions)
     else:
-        syms = list(positions)
-        quotes = get_quotes(syms)
-        for sym in syms:
+        targets = [s for s, p in positions.items() if p.get("status", "intraday") == "intraday"]
+    kept = [s for s in positions if s not in targets]
+
+    if not targets:
+        print("No open positions." if scope == "all" else "No intraday positions to flatten.")
+    else:
+        quotes = get_quotes(targets)
+        reason = "manual flatten-all" if scope == "all" else "session end — intraday flatten"
+        for sym in targets:
             p = positions[sym]
             price = quotes.get(sym, {}).get("last") or p.get("last_price") or p["entry"]
             price = float(price)
             h = {"price": price, "health": p.get("health", 0),
                  "gain_pct": round((price - p["entry"]) / p["entry"] * 100, 2),
                  "reasons": ["session end"]}
-            _close(sym, p, h, "session end — flatten",
-                   state, dry_run=(p.get("order_id") == "DRY-RUN"))
+            _close(sym, p, h, reason, state, dry_run=(p.get("order_id") == "DRY-RUN"))
         _save_state(state)
-        print(f"Flattened {len(syms)} position(s).")
+        print(f"Flattened {len(targets)} {scope} position(s).")
+    if kept:
+        print(f"Kept {len(kept)} swing/position holding(s) open "
+              f"(durable — managed by the swing manager): {', '.join(kept)}")
     _summary()
 
 
@@ -88,4 +102,5 @@ def _summary() -> None:
 
 
 if __name__ == "__main__":
-    flatten_all()
+    import sys
+    flatten(scope="all" if "--all" in sys.argv else "intraday")

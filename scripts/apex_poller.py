@@ -210,10 +210,12 @@ def run_pass(leaders, intraday, daily, regime, state, dry_run, live_quotes=None)
         if sig is None:
             continue
         try:
-            atr = atr_from_daily(daily.xs(sym, level="symbol"), cfg.ATR_LEN)
+            dsub = daily.xs(sym, level="symbol")
+            atr = atr_from_daily(dsub, cfg.ATR_LEN)
         except Exception:
-            atr = 0.0
-        if execute(sig, ld.get("rs_pct", 0.0), atr, regime, state, dry_run=dry_run):
+            dsub, atr = None, 0.0
+        if execute(sig, ld.get("rs_pct", 0.0), atr, regime, state,
+                   dry_run=dry_run, daily_bars=dsub):
             fired += 1
     save_state(state)
     return fired
