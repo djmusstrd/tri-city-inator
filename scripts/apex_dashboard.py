@@ -204,7 +204,7 @@ with st.sidebar:
     st.title("🚀 APEX")
     st.caption(f"hybrid feed · Layer 3 · {'PAPER' if IS_PAPER else 'LIVE 💰'} account")
     page = st.radio("View", ["Live Positions", "Chart a Leader",
-                             "Entries — Why", "Closed Trades", "Leaders"])
+                             "Entries — Why", "Closed Trades", "Leaders", "Playbook"])
     st.divider()
     if acct:
         st.metric("Equity", f"${acct['equity']:,.2f}",
@@ -265,7 +265,7 @@ def render_symbol(symbol: str, entry: float | None, stop: float | None,
                       xaxis_rangeslider_visible=False, template="plotly_dark",
                       title=f"{symbol} · 5-min" + (f" · {trigger}" if trigger else ""),
                       legend=dict(orientation="h", y=1.02, x=0))
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     # health timeline (only meaningful with an entry reference)
     if entry is not None:
@@ -283,7 +283,7 @@ def render_symbol(symbol: str, entry: float | None, stop: float | None,
             hfig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10),
                                template="plotly_dark", yaxis=dict(range=[0, 105]),
                                title="Layer 3 health", showlegend=False)
-            st.plotly_chart(hfig, width="stretch")
+            st.plotly_chart(hfig, use_container_width=True)
 
     # live read-out — health computed on the live price when available (hybrid)
     last = g.iloc[-1]
@@ -429,10 +429,21 @@ elif page == "Closed Trades":
 
 elif page == "Leaders":
     st.title(f"Today's Leaders — {leaders_doc.get('date', '—')}")
-    st.caption(f"RS≥{int(cfg.RS_MIN)} & ribbon-bull, from {leaders_doc.get('liquid_size', '—')} "
-               f"liquid names (≥${leaders_doc.get('min_dollar_vol', 0):,.0f}/day)")
+    st.caption(f"The universe APEX trades from. RS≥{int(cfg.RS_MIN)} & ribbon-bull, from "
+               f"{leaders_doc.get('liquid_size', '—')} liquid names "
+               f"(≥${leaders_doc.get('min_dollar_vol', 0):,.0f}/day). Click ↗ to open on TradingView.")
     if not leaders:
         st.info("No leaders file yet — run `apex-leaders`.")
     else:
         ldf = pd.DataFrame(leaders)
-        st.dataframe(ldf, width="stretch", hide_index=True)
+        ldf["TV"] = ldf["symbol"].map(lambda s: f"https://www.tradingview.com/chart/?symbol={s}")
+        st.dataframe(ldf, width="stretch", hide_index=True,
+                     column_config={"TV": st.column_config.LinkColumn("TV", display_text="open ↗")})
+
+elif page == "Playbook":
+    st.title("APEX Playbook")
+    pb = WORKSPACE / "docs" / "APEX_PLAYBOOK.md"
+    if pb.exists():
+        st.markdown(pb.read_text())
+    else:
+        st.info("Playbook not found at docs/APEX_PLAYBOOK.md")
