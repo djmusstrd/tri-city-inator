@@ -66,6 +66,38 @@ def load_leaders() -> dict:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def leader_prices(symbols: tuple) -> dict:
+    """Today's open + latest price per symbol from the daily bar (one batched Alpaca call,
+    cached 60s). {sym: (open, current)}. Current is ~15-min delayed on a basic plan."""
+    key, sec = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY")
+    if not key or not sec or not symbols:
+        return {}
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        dc = StockHistoricalDataClient(key, sec)
+        out = {}
+        syms = list(symbols)
+        for i in range(0, len(syms), 200):
+            batch = syms[i:i + 200]
+            df = dc.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=batch, timeframe=TimeFrame.Day,
+                start=datetime.utcnow() - timedelta(days=5), feed=cfg.DATA_FEED)).df
+            if df.empty:
+                continue
+            for s in batch:
+                try:
+                    last = df.xs(s, level="symbol").iloc[-1]
+                    out[s] = (float(last["open"]), float(last["close"]))
+                except Exception:
+                    pass
+        return out
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_bars(symbol: str, day_iso: str) -> pd.DataFrame:
     """Today's regular-session 5-min bars for one symbol (cached 60s). Empty df if none."""
     key, sec = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY")
@@ -443,14 +475,24 @@ elif page == "Leaders":
     st.title(f"Today's Leaders — {leaders_doc.get('date', '—')}")
     st.caption(f"The universe APEX trades from. RS≥{int(cfg.RS_MIN)} & ribbon-bull, from "
                f"{leaders_doc.get('liquid_size', '—')} liquid names "
-               f"(≥${leaders_doc.get('min_dollar_vol', 0):,.0f}/day). Click ↗ to open on TradingView.")
+               f"(≥${leaders_doc.get('min_dollar_vol', 0):,.0f}/day). Click a ticker to open it on TradingView.")
     if not leaders:
         st.info("No leaders file yet — run `apex-leaders`.")
     else:
         ldf = pd.DataFrame(leaders)
-        ldf["TV"] = ldf["symbol"].map(lambda s: f"https://www.tradingview.com/chart/?symbol={s}")
-        st.dataframe(ldf, width="stretch", hide_index=True,
-                     column_config={"TV": st.column_config.LinkColumn("TV", display_text="open ↗")})
+        prices = leader_prices(tuple(ldf["symbol"]))
+        ldf["open"] = ldf["symbol"].map(lambda s: prices.get(s, (None, None))[0])
+        ldf["current"] = ldf["symbol"].map(lambda s: prices.get(s, (None, None))[1])
+        ldf["chg %"] = (ldf["current"] - ldf["open"]) / ldf["open"] * 100
+        ldf["symbol"] = ldf["symbol"].map(tv_url)
+        cols = [c for c in ["symbol", "rs_pct", "open", "current", "chg %"] if c in ldf.columns]
+        st.dataframe(ldf[cols], width="stretch", hide_index=True, column_config={
+            "symbol": st.column_config.LinkColumn("symbol", display_text=r"symbol=(.+)$"),
+            "rs_pct": st.column_config.NumberColumn("RS pct", format="%.1f"),
+            "open": st.column_config.NumberColumn("open price", format="$%.2f"),
+            "current": st.column_config.NumberColumn("current price", format="$%.2f"),
+            "chg %": st.column_config.NumberColumn("chg %", format="%+.1f%%"),
+        })
 
 elif page == "Playbook":
     st.title("APEX Playbook")
