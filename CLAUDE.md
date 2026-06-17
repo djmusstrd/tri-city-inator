@@ -186,7 +186,36 @@ Entry → T1 (+10%): sell 50% → move stop to breakeven
 
 ---
 
+## APEX SESSION (System 4 — RS-leader strategy, Alpaca-native + hybrid TV real-time feed)
+
+APEX is a separate book from System 1, started with the **`apex`** terminal command. `apex` runs
+`scripts/apex_session_start.sh` (brings up TV+CDP, today's leaders, and the poller — LIVE PAPER by
+default; `apex --dry-run` for log-only) and then opens this Claude session.
+
+**When this session starts via `apex`:**
+1. Confirm the poller is alive: read `shared/apex-poller.pid` then `kill -0 PID`.
+2. Confirm TV/CDP (the real-time feed): `curl -s localhost:9222/json/list | grep -qi chart`.
+3. Report one line — mode (live-paper/dry-run), poller PID, CDP up/down, leader count — then monitor.
+Do NOT re-launch TV or rebuild leaders if the bootstrap already did it.
+
+**When the user says "end session" and an APEX session is active** (`apex-poller.pid` alive, or the
+conversation has been about APEX), run the APEX shutdown — NOT the System 1 sequence below:
+```
+bash ~/tri-city-inator/scripts/apex_session_end.sh
+```
+It stops the poller, flattens open positions (live paper liquidated via Alpaca; dry-run just
+journaled), and prints the day's summary. Show that summary. TradingView is left running.
+
+> Architecture: Alpaca = daily leader scan + intraday levels + execution; TradingView quote
+> session (CDP) = real-time trigger price + the chart. Auto-falls back to delayed Alpaca bars if
+> TV/CDP is down. Toggle `APEX_USE_TV_QUOTES`. Full design: `docs/STRATEGY_V2_DESIGN.md`.
+
+---
+
 ## END SESSION
+
+> If an **APEX** session is active (see the APEX SESSION section above), "end session" runs
+> `apex_session_end.sh` instead — the steps below are for System 1.
 
 When the user says **"end session"** (or any clear variant: "end the session", "close out", "wrap up", "shut it down"), execute this shutdown sequence immediately — no confirmation needed:
 

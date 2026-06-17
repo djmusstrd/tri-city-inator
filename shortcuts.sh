@@ -32,8 +32,13 @@ tricity-cheatsheet()  { cd "$_TC" && python -W ignore scripts/generate_cheatshee
 tricity-dash() { launchctl kickstart -k gui/$(id -u)/com.starks-labs.tricity-dashboard 2>/dev/null; echo "Tri-City → https://tricity.clawbotinator.trade  pw: meadow-harbor-ember-44"; }
 
 # ── APEX (Strategy V2 — see docs/STRATEGY_V2_DESIGN.md) ───────────────────────
-# Resume the APEX build where we left off (reads the design doc + apex memory).
-apex() { cd "$_TC" && claude 'Resume the APEX build. Read docs/STRATEGY_V2_DESIGN.md and the project_strategy_v2_apex memory, then tell me the exact resume point (the >>> RESUME HERE steps) before doing anything. Phases 0-3 are built (Layer 3 health monitor + dashboard done); next is live go-live validation + Phase 3.5 health tuning.'; }
+# Start a full APEX trading session: brings up TV+CDP, today's leaders, and the poller
+# (LIVE PAPER by default; pass --dry-run for log-only), then opens Claude to monitor.
+apex() { cd "$_TC" && bash scripts/apex_session_start.sh "$@" && claude 'APEX trading session was just launched by apex_session_start.sh. Verify the poller is alive (shared/apex-poller.pid) and TV/CDP is up (curl -s localhost:9222/json/list), give me a one-line status, then monitor. When I type "end session", run scripts/apex_session_end.sh and show me the summary.'; }
+# End the APEX session directly (stop poller, flatten positions, print summary) — no Claude.
+apex-end() { cd "$_TC" && bash scripts/apex_session_end.sh; }
+# Resume the APEX BUILD / design work (not a trading session).
+apex-build() { cd "$_TC" && claude 'Resume the APEX build. Read docs/STRATEGY_V2_DESIGN.md and the project_strategy_v2_apex memory, then tell me the exact resume point (the >>> RESUME HERE steps) before doing anything.'; }
 # Layer 1 daily filter: rank the liquid universe by RS, write shared/apex-leaders.json
 apex-leaders()  { cd "$_TC" && python -W ignore scripts/apex_daily_filter.py "$@"; }
 # Walk-forward: do RS leaders prospectively beat SPY?
@@ -56,5 +61,6 @@ echo "  Positions: tricity-status  tricity-eod"
 echo "  Reports  : tricity-report  tricity-all  tricity-recap"
 echo "  Research : tricity-backtest  tricity-walkforward  tricity-cheatsheet"
 echo "  Dashboard: tricity-dash"
-echo "  APEX     : apex (resume build)  apex-leaders  apex-validate  apex-backtest  apex-entry"
-echo "           : apex-health (Layer 3 self-test)  apex-dash (visual dashboard)"
+echo "  APEX     : apex (START trading session)  apex-end (stop+flatten+summary)  apex-build (dev)"
+echo "           : apex-leaders  apex-validate  apex-backtest  apex-entry  apex-health"
+echo "           : apex-dash (dashboard)  apex-quotes (live feed test)"
