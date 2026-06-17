@@ -53,6 +53,8 @@ apex-health()   { cd "$_TC" && python -W ignore scripts/apex_health.py --self-te
 apex-dash()     { cd "$_TC" && python3 -m streamlit run scripts/apex_dashboard.py "$@"; }
 # Test the real-time TV quote reader (hybrid feed) — needs TV running with CDP
 apex-quotes()   { cd "$_TC" && python -W ignore scripts/apex_tv_quotes.py "$@"; }
+# Open the live-paper operating playbook (full daily workflow)
+apex-playbook() { ${PAGER:-less} "$_TC/docs/APEX_PLAYBOOK.md"; }
 
 echo "Tri-City shortcuts loaded:"
 echo "  Session  : tricity  tricity-poller  tricity-health"
@@ -63,4 +65,4 @@ echo "  Research : tricity-backtest  tricity-walkforward  tricity-cheatsheet"
 echo "  Dashboard: tricity-dash"
 echo "  APEX     : apex (START trading session)  apex-end (stop+flatten+summary)  apex-build (dev)"
 echo "           : apex-leaders  apex-validate  apex-backtest  apex-entry  apex-health"
-echo "           : apex-dash (dashboard)  apex-quotes (live feed test)"
+echo "           : apex-dash (dashboard)  apex-quotes (live feed test)  apex-playbook (how-to)"
