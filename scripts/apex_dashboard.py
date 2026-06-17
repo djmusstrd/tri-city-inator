@@ -37,6 +37,7 @@ sys.path.insert(0, str(WORKSPACE / "scripts"))
 import apex_config as cfg                       # noqa: E402  (loads .env centrally)
 from apex_entry_engine import detect_entry      # noqa: E402
 from apex_health import compute_health          # noqa: E402
+import apex_tv_quotes                            # noqa: E402  (real-time TV quote, hybrid feed)
 
 ET = ZoneInfo("America/New_York")
 SESS_OPEN, SESS_CLOSE = dtime(9, 30), dtime(16, 0)
@@ -93,6 +94,17 @@ def fetch_bars(symbol: str, day_iso: str) -> pd.DataFrame:
     except Exception as e:
         st.warning(f"bar fetch failed for {symbol}: {e}")
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def live_quote(symbol: str) -> dict | None:
+    """Real-time TV quote for one symbol (cached 15s). None if TV/CDP down or no tick."""
+    if not cfg.USE_TV_QUOTES:
+        return None
+    try:
+        return apex_tv_quotes.get_quotes([symbol], wait_ms=1500).get(symbol)
+    except Exception:
+        return None
 
 
 def _vwap(g: pd.DataFrame) -> pd.Series:
@@ -179,6 +191,8 @@ def render_symbol(symbol: str, entry: float | None, stop: float | None,
     g = g.assign(vwap=_vwap(g).values)
     orb_h, orb_l = _orb_levels(g, ORB_MIN)
     x = g["et"]
+    lq = live_quote(symbol)
+    lp = lq.get("last") if lq else None
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=x, open=g["open"], high=g["high"], low=g["low"],
@@ -187,6 +201,9 @@ def render_symbol(symbol: str, entry: float | None, stop: float | None,
                                  decreasing_line_color="#ef5350"))
     fig.add_trace(go.Scatter(x=x, y=g["vwap"], name="VWAP", mode="lines",
                              line=dict(color="#ab47bc", width=1.5, dash="dot")))
+    if lp is not None:
+        fig.add_hline(y=lp, line=dict(color="#ffca28", width=1.5),
+                      annotation_text=f"● LIVE {lp:.2f}", annotation_position="right")
     if orb_h is not None:
         fig.add_hline(y=orb_h, line=dict(color="#90a4ae", width=1, dash="dash"),
                       annotation_text=f"ORB H {orb_h:.2f}", annotation_position="right")
@@ -222,15 +239,20 @@ def render_symbol(symbol: str, entry: float | None, stop: float | None,
                                title="Layer 3 health", showlegend=False)
             st.plotly_chart(hfig, width="stretch")
 
-    # live read-out
+    # live read-out — health computed on the live price when available (hybrid)
     last = g.iloc[-1]
-    h = compute_health({"entry": entry}, g) if entry is not None else {}
-    cols = st.columns(4)
-    cols[0].metric("Last", f"${float(last['close']):.2f}")
-    cols[1].metric("VWAP", f"${float(last['vwap']):.2f}")
+    bar_close = float(last["close"])
+    h = compute_health({"entry": entry}, g, live_price=lp) if entry is not None else {}
+    cols = st.columns(5)
+    if lp is not None:
+        cols[0].metric("Live", f"${lp:.2f}", f"{lp - bar_close:+.2f} vs bar")
+    else:
+        cols[0].metric("Live", "—", "TV/CDP down")
+    cols[1].metric("Bar (delayed)", f"${bar_close:.2f}")
+    cols[2].metric("VWAP", f"${float(last['vwap']):.2f}")
     if h:
-        cols[2].metric("Health", h["health"])
-        cols[3].metric("Gain", f"{h['gain_pct']:+.1f}%")
+        cols[3].metric("Health", h["health"])
+        cols[4].metric("Gain", f"{h['gain_pct']:+.1f}%")
     if h and h.get("reasons"):
         st.caption("⚠️ " + " · ".join(h["reasons"]))
     elif h:

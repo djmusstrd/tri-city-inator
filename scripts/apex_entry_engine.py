@@ -109,18 +109,37 @@ def detect_entry(symbol: str, day_bars: pd.DataFrame, orb_minutes: int = 15,
             )
 
     # ── Secondary: VWAP pullback after an early push ──
-    pushed = False
-    for _, bar in g.iterrows():
-        if bar["high"] > o * 1.01:
-            pushed = True
-        if pushed and bar["low"] <= bar["vwap"] and bar["close"] > bar["vwap"]:
+    pushed_early = bool((g["high"] > o * 1.01).any())
+
+    # Real-time path: early push happened + a recent bar pulled back to/under VWAP, and the LIVE
+    # price is now reclaiming above VWAP → enter at the live price (the reclaim, not a stale bar).
+    if live_price is not None and pushed_early and live_price > last_vwap:
+        recent = g.tail(4)
+        touched_vwap = bool((recent["low"] <= recent["vwap"]).any())
+        if touched_vwap:
+            last_bar = g.iloc[-1]
+            rvol = float(last_bar["volume"] / orb_vol) if orb_vol > 0 else 0.0
             return EntrySignal(
-                symbol=symbol, trigger="VWAP_PB", price=float(bar["close"]),
-                orb_high=orb_high, orb_low=orb_low, vwap=float(bar["vwap"]),
-                rvol=round(float(bar["volume"] / orb_vol) if orb_vol > 0 else 0.0, 2),
-                bar_time=str(bar["tod"]),
-                context={"open": o},
+                symbol=symbol, trigger="VWAP_PB", price=float(live_price),
+                orb_high=orb_high, orb_low=orb_low, vwap=last_vwap,
+                rvol=round(rvol, 2), bar_time="live",
+                context={"open": o, "live_price": float(live_price), "feed": "tv_realtime"},
             )
+
+    # Bar-based path (no live price): original single-bar dip+reclaim detection, unchanged.
+    if live_price is None:
+        pushed = False
+        for _, bar in g.iterrows():
+            if bar["high"] > o * 1.01:
+                pushed = True
+            if pushed and bar["low"] <= bar["vwap"] and bar["close"] > bar["vwap"]:
+                return EntrySignal(
+                    symbol=symbol, trigger="VWAP_PB", price=float(bar["close"]),
+                    orb_high=orb_high, orb_low=orb_low, vwap=float(bar["vwap"]),
+                    rvol=round(float(bar["volume"] / orb_vol) if orb_vol > 0 else 0.0, 2),
+                    bar_time=str(bar["tod"]),
+                    context={"open": o},
+                )
 
     return None
 
