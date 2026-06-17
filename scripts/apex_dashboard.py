@@ -155,21 +155,67 @@ def _entry_tod(p: dict):
         return None
 
 
+# ── Alpaca (live paper account: equity, day P&L, real positions) ───────────────
+def _trading_client():
+    from alpaca.trading.client import TradingClient
+    return TradingClient(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"),
+                         paper=os.getenv("ALPACA_PAPER", "true").lower() == "true")
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def alpaca_account() -> dict | None:
+    try:
+        a = _trading_client().get_account()
+        eq, last = float(a.equity), float(a.last_equity)
+        return {"equity": eq, "last_equity": last, "day_pnl": eq - last,
+                "buying_power": float(a.buying_power), "cash": float(a.cash)}
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def alpaca_positions() -> dict:
+    """{symbol: {qty, avg_entry, current, unrealized_pl, unrealized_plpc, market_value}}."""
+    try:
+        out = {}
+        for p in _trading_client().get_all_positions():
+            out[p.symbol] = {"qty": float(p.qty), "avg_entry": float(p.avg_entry_price),
+                             "current": float(p.current_price),
+                             "unrealized_pl": float(p.unrealized_pl),
+                             "unrealized_plpc": float(p.unrealized_plpc) * 100,
+                             "market_value": float(p.market_value)}
+        return out
+    except Exception:
+        return {}
+
+
+IS_PAPER = os.getenv("ALPACA_PAPER", "true").lower() == "true"
+
+
 # ── sidebar ──────────────────────────────────────────────────────────────────
 state = load_state()
 leaders_doc = load_leaders()
 leaders = leaders_doc.get("leaders", [])
 positions = state.get("positions", {})
+acct = alpaca_account()
+apos = alpaca_positions()
 
 with st.sidebar:
     st.title("🚀 APEX")
-    st.caption("Alpaca-native · headless · Layer 3 managed")
+    st.caption(f"hybrid feed · Layer 3 · {'PAPER' if IS_PAPER else 'LIVE 💰'} account")
     page = st.radio("View", ["Live Positions", "Chart a Leader",
                              "Entries — Why", "Closed Trades", "Leaders"])
     st.divider()
-    st.metric("Open positions", len(positions))
-    st.metric("Day P&L", f"${state.get('daily_pnl', 0.0):,.2f}")
-    st.caption(f"state date: {state.get('date', '—')}")
+    if acct:
+        st.metric("Equity", f"${acct['equity']:,.2f}",
+                  f"{acct['day_pnl']:+,.2f} today"
+                  + (f" ({acct['day_pnl']/acct['last_equity']*100:+.2f}%)" if acct['last_equity'] else ""))
+        st.metric("Open positions", len(apos))
+        st.caption(f"buying power ${acct['buying_power']:,.0f} · cash ${acct['cash']:,.0f}")
+    else:
+        st.metric("Open positions", len(apos) or len(positions))
+        st.caption("⚠ Alpaca account unavailable — showing engine state")
+    st.caption(f"realized day P&L (engine): ${state.get('daily_pnl', 0.0):,.2f}")
     st.caption(f"leaders: {len(leaders)} · {leaders_doc.get('date', '—')}")
     if st.button("↻ Refresh"):
         st.cache_data.clear()
@@ -262,29 +308,52 @@ def render_symbol(symbol: str, entry: float | None, stop: float | None,
 # ── pages ────────────────────────────────────────────────────────────────────
 if page == "Live Positions":
     st.title("Live Positions")
-    st.caption(f"Layer 3 manages these every poller pass · exit < {int(cfg.EXIT_HEALTH)} health · "
-               f"carry ≥ {int(cfg.CARRY_HEALTH)} · regime stub")
-    if not positions:
-        st.info("No open APEX positions yet. The poller fires ORB15 entries after the opening "
-                "range closes (~8:45 CT). Use **Chart a Leader** to eyeball today's watchlist.")
+    st.caption(f"Real Alpaca {'paper ' if IS_PAPER else ''}fills + Layer 3 health · "
+               f"exit < {int(cfg.EXIT_HEALTH)} · carry ≥ {int(cfg.CARRY_HEALTH)}")
+
+    # account strip
+    if acct:
+        a = st.columns(4)
+        a[0].metric("Equity", f"${acct['equity']:,.2f}")
+        a[1].metric("Day P&L", f"${acct['day_pnl']:+,.2f}",
+                    f"{acct['day_pnl']/acct['last_equity']*100:+.2f}%" if acct['last_equity'] else None)
+        a[2].metric("Buying power", f"${acct['buying_power']:,.0f}")
+        a[3].metric("Open positions", len(apos))
+        st.divider()
+
+    # union of what Alpaca actually holds and what the engine tracks
+    syms = list(dict.fromkeys(list(apos.keys()) + list(positions.keys())))
+    if not syms:
+        st.info("No open positions yet. The poller places entries when a leader triggers "
+                "ORB15/VWAP_PB and clears the guards. Use **Chart a Leader** to watch the board.")
     else:
         rows = []
-        for sym, p in positions.items():
+        for sym in syms:
+            ap = apos.get(sym, {})
+            p = positions.get(sym, {})
             rows.append({
                 "symbol": sym, "status": p.get("status", "intraday"),
                 "trigger": p.get("trigger"), "health": p.get("health"),
-                "gain %": p.get("gain_pct"), "peak %": p.get("peak_gain"),
-                "entry": p.get("entry"), "last": p.get("last_price"),
-                "stop": p.get("stop"), "qty": p.get("qty"),
-                "days": p.get("days_held", 0),
+                "qty": ap.get("qty", p.get("qty")),
+                "avg entry": ap.get("avg_entry", p.get("entry")),
+                "current": ap.get("current", p.get("last_price")),
+                "unreal $": ap.get("unrealized_pl"),
+                "unreal %": ap.get("unrealized_plpc", p.get("gain_pct")),
+                "peak %": p.get("peak_gain"),
+                "mkt value": ap.get("market_value"),
+                "stop": p.get("stop"),
+                "src": "alpaca" if sym in apos else "engine-only",
             })
         df = pd.DataFrame(rows).set_index("symbol")
         st.dataframe(df, width="stretch")
+        if any(r["src"] == "engine-only" for r in rows):
+            st.caption("⚠ 'engine-only' = tracked by APEX but not yet confirmed in the Alpaca "
+                       "account (order pending/unfilled).")
         st.divider()
-        sym = st.selectbox("Inspect position", list(positions.keys()))
-        p = positions[sym]
-        render_symbol(sym, p.get("entry"), p.get("stop"),
-                      _entry_tod(p), p.get("trigger"))
+        sym = st.selectbox("Inspect position", syms)
+        p = positions.get(sym, {})
+        entry = apos.get(sym, {}).get("avg_entry", p.get("entry"))
+        render_symbol(sym, entry, p.get("stop"), _entry_tod(p), p.get("trigger"))
 
 elif page == "Chart a Leader":
     st.title("Chart a Leader")
@@ -336,13 +405,24 @@ elif page == "Closed Trades":
                 "(logs/apex-journal.json).")
     else:
         jdf = pd.DataFrame(journal)
+        if "dry_run" not in jdf.columns:
+            jdf["dry_run"] = False
+        scope = st.radio("Show", ["Live paper", "Dry-run", "All"], horizontal=True)
+        if scope == "Live paper":
+            jdf = jdf[~jdf["dry_run"].fillna(False)]
+        elif scope == "Dry-run":
+            jdf = jdf[jdf["dry_run"].fillna(False)]
+        if jdf.empty:
+            st.info(f"No {scope.lower()} trades yet.")
+            st.stop()
+        jdf = jdf.assign(mode=jdf["dry_run"].map(lambda d: "DRY" if d else "LIVE"))
         wins = (jdf["pnl"] > 0).sum()
         k = st.columns(4)
         k[0].metric("Trades", len(jdf))
         k[1].metric("Net P&L", f"${jdf['pnl'].sum():,.2f}")
         k[2].metric("Win rate", f"{wins / len(jdf) * 100:.0f}%")
         k[3].metric("Avg gain", f"{jdf['gain_pct'].mean():+.1f}%")
-        show = ["timestamp", "symbol", "trigger", "status_at_exit", "entry", "exit",
+        show = ["timestamp", "symbol", "trigger", "mode", "status_at_exit", "entry", "exit",
                 "gain_pct", "peak_gain", "pnl", "health_at_exit", "reason"]
         show = [c for c in show if c in jdf.columns]
         st.dataframe(jdf[show].iloc[::-1], width="stretch", hide_index=True)
