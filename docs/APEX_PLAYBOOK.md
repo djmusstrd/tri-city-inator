@@ -79,11 +79,18 @@ want). No-Claude alternative: `apex-end`.
 | Channel | How | Shows |
 |---|---|---|
 | **Telegram** | your phone | Real-time entry / exit / health-decay / carry alerts with the "why" |
-| **Dashboard** | `apex-dash` → http://localhost:8533 | Live positions + health, per-symbol candlestick with the **live price line**, entry rationale, closed-trade journal, today's leaders |
+| **Dashboard** | `apex-dash` → http://localhost:8533 | The real **Alpaca paper account** (equity, day P&L, buying power) + everything below |
 | **Log** | `tail -f ~/tri-city-inator/logs/apex-poller.log` | Each pass: `live quotes N/45`, `K open, M done, X new, Y managed`, every ENTRY/EXIT |
 
-Dashboard pages: **Live Positions** (manage from here), **Chart a Leader** (eyeball any name +
-what APEX would do), **Entries — Why**, **Closed Trades**, **Leaders**.
+**Dashboard pages** (every ticker is a clickable link → its TradingView chart):
+- **Live Positions** — real Alpaca fills + unrealized P&L merged with Layer 3 health/status/stop;
+  account strip up top. Inspect any position: candlestick with entry/stop/VWAP/ORB + the **live
+  price line** + a health-score timeline.
+- **Chart a Leader** — pick any leader → its chart + what APEX *would* do (hypothetical entry + health).
+- **Entries — Why** — the Layer 6 rationale card for each fill ("why this stock, why now").
+- **Closed Trades** — journal with a **Live paper / Dry-run / All** filter (keeps the live record clean).
+- **Leaders** — the universe APEX trades from, with **open / current / chg %** per name to spot movers.
+- **Playbook** — this document, in-app.
 
 ---
 
