@@ -56,6 +56,10 @@ ALLOW_OVERNIGHT_CARRY = os.getenv("APEX_ALLOW_OVERNIGHT_CARRY", "false").lower()
 # ── Swing tier (daily-bar management, runs independent of the intraday poller) ────────
 SWING_TREND_EMA = int(os.getenv("APEX_SWING_TREND_EMA", "10"))   # daily close below this EMA = trend break → exit
 
+# Entries at/after this ET time are tagged "late" (last hour before the 16:00 ET close) — tracked
+# for evaluation (intraday-fade vs overnight-runner), not blocked yet.
+LATE_ENTRY_ET = os.getenv("APEX_LATE_ENTRY_ET", "15:00")
+
 # ── Layer 4 guardrails (bands Layer 4 may move within) ────────────────────────
 SIZE_BAND        = (0.5, 1.5)    # sizing multiplier range
 THRESH_BAND      = (60.0, 75.0)  # entry threshold range

@@ -168,6 +168,7 @@ def _close(sym: str, p: dict, h: dict, reason: str, state: dict, dry_run: bool) 
         "gain_pct": h["gain_pct"], "health_at_exit": h["health"],
         "peak_gain": round(p.get("peak_gain", h["gain_pct"]), 2),
         "status_at_exit": p.get("status", "intraday"), "days_held": p.get("days_held", 0),
+        "entry_window": p.get("entry_window", "normal"),
         "reason": reason, "dry_run": dry_run, "entry_time": p.get("entry_time"),
         "order_id": p.get("order_id"),
     }

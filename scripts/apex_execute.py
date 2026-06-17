@@ -148,6 +148,13 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
     rationale["dry_run"] = dry_run
     if prioritized:
         rationale["flag"] = "⭐ prioritized"
+    # Tag the entry window (last hour before the close = "late") for performance evaluation.
+    try:
+        _hh, _mm = (int(x) for x in cfg.LATE_ENTRY_ET.split(":"))
+        now_et = datetime.now(ET).time()
+        rationale["entry_window"] = "late" if now_et >= __import__("datetime").time(_hh, _mm) else "normal"
+    except Exception:
+        rationale["entry_window"] = "normal"
     try:
         rationale["thesis"] = build_thesis(signal, daily_bars, stop_price)
     except Exception as e:
@@ -161,6 +168,7 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
         "trigger": signal.trigger, "score": score, "rs_pct": round(rs_pct, 1),
         "entry": round(entry_price, 4), "stop": round(stop_price, 4),
         "qty": qty, "atr": round(atr, 4), "regime": regime,
+        "entry_window": rationale.get("entry_window", "normal"),
         "order_id": order_id, "dry_run": dry_run,
     })
     _save_exec_log(rows)
@@ -170,6 +178,7 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
         "entry": entry_price, "stop": stop_price, "qty": qty,
         "trigger": signal.trigger, "entry_time": datetime.now(ET).isoformat(),
         "order_id": order_id, "health": 100,
+        "entry_window": rationale.get("entry_window", "normal"),
     }
     state.setdefault("executed_today", []).append(sym)
 

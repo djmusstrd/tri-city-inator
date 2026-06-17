@@ -439,8 +439,9 @@ def trade_card(r: dict, outcome: dict | None):
         hdr[1].metric("Conviction", r.get("composite_score"))
         hdr[2].metric("RS pct", r.get("rs_pct"))
         hdr[3].metric("RVOL", f"{r.get('rvol')}x")
+        late = " · ⏰ LATE entry (last hour)" if r.get("entry_window") == "late" else ""
         st.caption(f"taken {ts} CT-ET · regime {r.get('regime')}"
-                   f"{' · DRY-RUN' if r.get('dry_run') else ' · LIVE'}")
+                   f"{' · DRY-RUN' if r.get('dry_run') else ' · LIVE'}{late}")
 
         st.markdown(f"**Thesis** — {th.get('thesis') or r.get('why', '')}")
         cat = th.get("catalyst") or []
@@ -585,8 +586,19 @@ elif page == "Closed Trades":
         k[1].metric("Net P&L", f"${jdf['pnl'].sum():,.2f}")
         k[2].metric("Win rate", f"{wins / len(jdf) * 100:.0f}%")
         k[3].metric("Avg gain", f"{jdf['gain_pct'].mean():+.1f}%")
-        show = ["timestamp", "symbol", "trigger", "mode", "status_at_exit", "entry", "exit",
-                "gain_pct", "peak_gain", "pnl", "health_at_exit", "reason"]
+
+        # Late-entry evaluation (last-hour entries vs the rest) — informs the future gate
+        if "entry_window" in jdf.columns:
+            ew = jdf.groupby(jdf["entry_window"].fillna("normal")).agg(
+                trades=("pnl", "size"), net=("pnl", "sum"),
+                win_rate=("pnl", lambda s: (s > 0).mean() * 100), avg_gain=("gain_pct", "mean"))
+            with st.expander("⏰ Late-entry evaluation (last-hour entries vs normal)", expanded=False):
+                st.dataframe(ew.style.format({"net": "${:,.2f}", "win_rate": "{:.0f}%",
+                                              "avg_gain": "{:+.1f}%"}), width="stretch")
+                st.caption("Tracking whether last-hour entries fade intraday or become overnight "
+                           "runners — to design a smart gate rather than a blunt cutoff.")
+        show = ["timestamp", "symbol", "trigger", "mode", "entry_window", "status_at_exit",
+                "entry", "exit", "gain_pct", "peak_gain", "pnl", "health_at_exit", "reason"]
         show = [c for c in show if c in jdf.columns]
         tdf = jdf[show].iloc[::-1].copy()
         symbol_table(tdf, "symbol", key="closed_table")
