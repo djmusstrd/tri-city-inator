@@ -159,4 +159,12 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
 
     _send_telegram(telegram_entry_message(rationale))
     logger.info(f"[{sym}] ORDER PLACED qty={qty} stop={stop_price:.2f} order={order_id}")
+
+    # On a real buy, add the symbol to the APEX TradingView watchlist (best-effort).
+    if not dry_run:
+        try:
+            from apex_tv_control import watchlist_add
+            watchlist_add(sym)
+        except Exception as e:
+            logger.debug(f"[{sym}] watchlist_add skipped: {e}")
     return True

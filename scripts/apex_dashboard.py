@@ -38,6 +38,7 @@ import apex_config as cfg                       # noqa: E402  (loads .env centra
 from apex_entry_engine import detect_entry      # noqa: E402
 from apex_health import compute_health          # noqa: E402
 import apex_tv_quotes                            # noqa: E402  (real-time TV quote, hybrid feed)
+import apex_tv_control                           # noqa: E402  (drive desktop chart + watchlist add)
 
 ET = ZoneInfo("America/New_York")
 SESS_OPEN, SESS_CLOSE = dtime(9, 30), dtime(16, 0)
@@ -175,7 +176,56 @@ def now_ct():
 
 
 def tv_url(symbol: str) -> str:
-    return f"https://www.tradingview.com/chart/?symbol={symbol}"
+    """Web link into the saved APEX layout with this symbol."""
+    return f"https://www.tradingview.com/chart/{cfg.APEX_LAYOUT_ID}/?symbol={symbol}"
+
+
+def desktop_send(symbol: str) -> None:
+    """Drive the running desktop TV to `symbol` (deduped per session so it fires once)."""
+    if st.session_state.get("_last_sent") == symbol:
+        return
+    st.session_state["_last_sent"] = symbol
+    if apex_tv_control.set_chart_symbol(symbol):
+        st.toast(f"📺 Sent {symbol} to desktop TV")
+    else:
+        st.toast(f"⚠ Couldn't reach desktop TV (CDP down?)")
+
+
+def add_to_watchlist(symbols: list[str]) -> None:
+    added = [s for s in symbols if apex_tv_control.watchlist_add(s)]
+    if added:
+        st.success(f"Added to APEX watchlist: {', '.join(added)}")
+    else:
+        st.warning("Nothing added (TV/CDP down, or already present).")
+
+
+def is_desktop_mode() -> bool:
+    return st.session_state.get("link_mode", "Web (APEX layout)").startswith("Desktop")
+
+
+def symbol_table(df: pd.DataFrame, symcol: str, key: str, column_config: dict | None = None):
+    """Render a table whose ticker honors the link toggle: web = clickable TV link;
+    desktop = select a row to drive the running desktop TV chart to that symbol."""
+    column_config = dict(column_config or {})
+    if is_desktop_mode():
+        event = st.dataframe(df, width="stretch", hide_index=True, column_config=column_config,
+                             on_select="rerun", selection_mode="single-row", key=key)
+        rows = []
+        try:
+            rows = event.selection.rows
+        except Exception:
+            try:
+                rows = event["selection"]["rows"]
+            except Exception:
+                rows = []
+        if rows:
+            desktop_send(str(df.iloc[rows[0]][symcol]))
+        st.caption("🖱️ select a row → sent to your desktop TV")
+    else:
+        d = df.copy()
+        d[symcol] = d[symcol].map(tv_url)
+        column_config[symcol] = st.column_config.LinkColumn(symcol, display_text=r"symbol=(.+)$")
+        st.dataframe(d, width="stretch", hide_index=True, column_config=column_config)
 
 
 def _entry_tod(p: dict):
@@ -241,6 +291,9 @@ with st.sidebar:
     st.caption(f"hybrid feed · Layer 3 · {'PAPER' if IS_PAPER else 'LIVE 💰'} account")
     page = st.radio("View", ["Live Positions", "Chart a Leader",
                              "Entries — Why", "Closed Trades", "Leaders", "Playbook"])
+    st.radio("Ticker click →", ["Web (APEX layout)", "Desktop TV (CDP)"], key="link_mode",
+             help="Web: opens the APEX layout in a browser tab. Desktop: drives your running "
+                  "TradingView app to that symbol via CDP.")
     st.divider()
     if acct:
         st.metric("Equity", f"${acct['equity']:,.2f}",
@@ -265,7 +318,14 @@ ORB_MIN = cfg.ORB_MINUTES
 # ── shared chart builder ─────────────────────────────────────────────────────
 def render_symbol(symbol: str, entry: float | None, stop: float | None,
                   start_tod: str | None, trigger: str | None):
-    st.markdown(f"### [{symbol} ↗]({tv_url(symbol)})", help="Open on TradingView")
+    if is_desktop_mode():
+        c1, c2 = st.columns([1, 6])
+        c1.markdown(f"### {symbol}")
+        if c2.button(f"📺 Open {symbol} on desktop TV", key=f"send_{symbol}"):
+            st.session_state["_last_sent"] = None
+            desktop_send(symbol)
+    else:
+        st.markdown(f"### [{symbol} ↗]({tv_url(symbol)})", help="Open in the APEX layout")
     bars = fetch_bars(symbol, day_iso)
     if bars.empty:
         st.info(f"No intraday bars for {symbol} yet (market may be pre-open).")
@@ -381,11 +441,7 @@ if page == "Live Positions":
                 "stop": p.get("stop"),
                 "src": "alpaca" if sym in apos else "engine-only",
             })
-        df = pd.DataFrame(rows)
-        df["symbol"] = df["symbol"].map(tv_url)
-        st.dataframe(df, width="stretch", hide_index=True,
-                     column_config={"symbol": st.column_config.LinkColumn(
-                         "symbol", display_text=r"symbol=(.+)$")})
+        symbol_table(pd.DataFrame(rows), "symbol", key="pos_table")
         if any(r["src"] == "engine-only" for r in rows):
             st.caption("⚠ 'engine-only' = tracked by APEX but not yet confirmed in the Alpaca "
                        "account (order pending/unfilled).")
@@ -466,33 +522,41 @@ elif page == "Closed Trades":
                 "gain_pct", "peak_gain", "pnl", "health_at_exit", "reason"]
         show = [c for c in show if c in jdf.columns]
         tdf = jdf[show].iloc[::-1].copy()
-        tdf["symbol"] = tdf["symbol"].map(tv_url)
-        st.dataframe(tdf, width="stretch", hide_index=True,
-                     column_config={"symbol": st.column_config.LinkColumn(
-                         "symbol", display_text=r"symbol=(.+)$")})
+        symbol_table(tdf, "symbol", key="closed_table")
 
 elif page == "Leaders":
     st.title(f"Today's Leaders — {leaders_doc.get('date', '—')}")
     st.caption(f"The universe APEX trades from. RS≥{int(cfg.RS_MIN)} & ribbon-bull, from "
                f"{leaders_doc.get('liquid_size', '—')} liquid names "
                f"(≥${leaders_doc.get('min_dollar_vol', 0):,.0f}/day). Click a ticker to open it on TradingView.")
+    st.caption("Check **➕ watch** on any names and click the button to add them to your APEX "
+               "TradingView watchlist. (Bought stocks are added automatically.)")
     if not leaders:
         st.info("No leaders file yet — run `apex-leaders`.")
     else:
         ldf = pd.DataFrame(leaders)
         prices = leader_prices(tuple(ldf["symbol"]))
+        bare = ldf["symbol"].tolist()
         ldf["open"] = ldf["symbol"].map(lambda s: prices.get(s, (None, None))[0])
         ldf["current"] = ldf["symbol"].map(lambda s: prices.get(s, (None, None))[1])
         ldf["chg %"] = (ldf["current"] - ldf["open"]) / ldf["open"] * 100
+        ldf.insert(0, "➕ watch", False)
         ldf["symbol"] = ldf["symbol"].map(tv_url)
-        cols = [c for c in ["symbol", "rs_pct", "open", "current", "chg %"] if c in ldf.columns]
-        st.dataframe(ldf[cols], width="stretch", hide_index=True, column_config={
-            "symbol": st.column_config.LinkColumn("symbol", display_text=r"symbol=(.+)$"),
-            "rs_pct": st.column_config.NumberColumn("RS pct", format="%.1f"),
-            "open": st.column_config.NumberColumn("open price", format="$%.2f"),
-            "current": st.column_config.NumberColumn("current price", format="$%.2f"),
-            "chg %": st.column_config.NumberColumn("chg %", format="%+.1f%%"),
-        })
+        cols = [c for c in ["➕ watch", "symbol", "rs_pct", "open", "current", "chg %"] if c in ldf.columns]
+        edited = st.data_editor(
+            ldf[cols], width="stretch", hide_index=True,
+            disabled=[c for c in cols if c != "➕ watch"], key="leaders_editor",
+            column_config={
+                "➕ watch": st.column_config.CheckboxColumn("➕ watch", default=False),
+                "symbol": st.column_config.LinkColumn("symbol", display_text=r"symbol=(.+)$"),
+                "rs_pct": st.column_config.NumberColumn("RS pct", format="%.1f"),
+                "open": st.column_config.NumberColumn("open price", format="$%.2f"),
+                "current": st.column_config.NumberColumn("current price", format="$%.2f"),
+                "chg %": st.column_config.NumberColumn("chg %", format="%+.1f%%"),
+            })
+        checked = [bare[i] for i, v in enumerate(edited["➕ watch"].tolist()) if v]
+        if st.button(f"➕ Add {len(checked)} to APEX watchlist", disabled=not checked):
+            add_to_watchlist(checked)
 
 elif page == "Playbook":
     st.title("APEX Playbook")

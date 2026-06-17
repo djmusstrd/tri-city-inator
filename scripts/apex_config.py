@@ -69,6 +69,10 @@ SIP_DELAY_MIN = int(os.getenv("APEX_SIP_DELAY_MIN", "16"))
 POLL_FAST = int(os.getenv("APEX_POLL_FAST", "60"))    # first hour after open
 POLL_SLOW = int(os.getenv("APEX_POLL_SLOW", "300"))   # rest of day
 
+# ── TradingView (hybrid feed already uses CDP; these drive the chart + watchlist) ─────
+APEX_LAYOUT_ID    = os.getenv("APEX_LAYOUT_ID", "131204932")        # the saved "APEX" layout
+APEX_WATCHLIST_ID = int(os.getenv("APEX_WATCHLIST_ID", "336036336"))  # the "APEX" watchlist
+
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
