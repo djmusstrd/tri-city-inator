@@ -481,7 +481,7 @@ def _levels_md(levels: list, fallback_label: str, fallback_price) -> str:
     levels = [l for l in (levels or []) if l.get("price") is not None]
     if not levels and fallback_price is not None:
         levels = [{"label": fallback_label, "price": fallback_price}]
-    return "  \n".join(f"{l['label']} **${l['price']:g}**" for l in levels) or "—"
+    return "  \n".join(f"{l['label']} **\\${l['price']:g}**" for l in levels) or "—"
 
 
 def trade_card(r: dict, outcome: dict | None):
@@ -509,9 +509,9 @@ def trade_card(r: dict, outcome: dict | None):
         col = st.columns(3)
         inval = th.get("invalidation", r.get("stop"))
         col[0].markdown(
-            f"**Entry** ${r.get('entry')}  \n"
-            f"**Stop / invalidation** ${inval}  \n"
-            f"**Risk** ${r.get('risk_dollars')} · qty {r.get('qty')}")
+            f"**Entry** \\${r.get('entry')}  \n"
+            f"**Stop / invalidation** \\${inval}  \n"
+            f"**Risk** \\${r.get('risk_dollars')} · qty {r.get('qty')}")
         col[1].markdown("**Support**  \n" + _levels_md(th.get("support"), "ORB low", r.get("orb_low")))
         col[2].markdown("**Resistance**  \n" + _levels_md(th.get("resistance"), "ORB high", r.get("orb_high")))
 
@@ -520,7 +520,7 @@ def trade_card(r: dict, outcome: dict | None):
         if sc:
             v = sc.get("vol")
             vol_s = (f"{v/1e6:.1f}M" if v and v >= 1e6 else f"{v/1e3:.0f}K") if v else "—"
-            line1 = (f"📊 **Session** — open ${sc.get('open','—')} · close ${sc.get('close','—')} "
+            line1 = (f"📊 **Session** — open \\${sc.get('open','—')} · close \\${sc.get('close','—')} "
                      f"· vol {vol_s}")
             pre = []
             if sc.get("premkt_high_pct") is not None:
@@ -528,8 +528,8 @@ def trade_card(r: dict, outcome: dict | None):
             if sc.get("gap_pct") is not None:
                 pre.append(f"gap {sc['gap_pct']:+.1f}%")
             if sc.get("premkt_last") is not None:
-                pre.append(f"(last ${sc['premkt_last']})")
-            ah = (f"after-hrs: {sc['afterhrs_pct']:+.1f}% → ${sc['afterhrs_last']}"
+                pre.append(f"(last \\${sc['premkt_last']})")
+            ah = (f"after-hrs: {sc['afterhrs_pct']:+.1f}% → \\${sc['afterhrs_last']}"
                   if sc.get("afterhrs_pct") is not None else "")
             md = line1
             if pre:
@@ -544,8 +544,8 @@ def trade_card(r: dict, outcome: dict | None):
             pnl = outcome.get("pnl", 0)
             emoji = "🟩" if pnl >= 0 else "🟥"
             st.markdown(
-                f"{emoji} **Outcome** — exit ${outcome.get('exit')} · "
-                f"P&L ${pnl} ({outcome.get('gain_pct', 0):+.1f}%) · peak {outcome.get('peak_gain')}% · "
+                f"{emoji} **Outcome** — exit \\${outcome.get('exit')} · "
+                f"P&L \\${pnl} ({outcome.get('gain_pct', 0):+.1f}%) · peak {outcome.get('peak_gain')}% · "
                 f"health@exit {outcome.get('health_at_exit')} · _{outcome.get('reason', '')[:60]}_")
         else:
             st.caption("⏳ open")
