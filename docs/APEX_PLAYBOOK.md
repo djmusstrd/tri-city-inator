@@ -93,7 +93,8 @@ Set `APEX_ALLOW_OVERNIGHT_CARRY=false` to flatten everything at EOD (intraday-on
   **live price line** + health timeline).
 - **Chart a Leader** — any leader + the hypothetical entry/health APEX would assign.
 - **Trade Journal** — full thesis card per trade (setup · catalyst · entry/stop · support/
-  resistance · plan) + outcome once closed; ⏰ badge on late entries.
+  resistance · plan) + a **📊 Session** block (day open/close/vol · pre-market high/gap/last ·
+  after-hours move→price) + outcome once closed; ⏰ badge on late entries.
 - **Closed Trades** — journal with Live/Dry/All filter + a **late-vs-normal** performance eval.
 - **Leaders** — the universe with **open/current/chg %** + the 🚫/⭐/➕ flag checkboxes.
 - **Playbook** — this document, in-app.
