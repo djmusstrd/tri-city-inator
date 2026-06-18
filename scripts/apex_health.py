@@ -103,7 +103,8 @@ def compute_health(position: dict, bars: pd.DataFrame, live_price: float | None 
 
     health = max(0.0, min(100.0, health))
     return {"health": int(round(health)), "price": price, "vwap": vwap,
-            "ema9": ema9, "gain_pct": round(gain_pct, 2), "reasons": reasons}
+            "ema9": ema9, "gain_pct": round(gain_pct, 2), "reasons": reasons,
+            "stale": live_price is None}   # price came from the delayed bar, not a live tick
 
 
 # ── exit plumbing ────────────────────────────────────────────────────────────────
@@ -216,6 +217,19 @@ def _eod_now() -> bool:
     return datetime.now(ET).time() >= dtime(hh, mm)
 
 
+def _position_age_sec(p: dict) -> float | None:
+    """Seconds since this position was entered, or None if entry_time is missing/unparseable."""
+    ts = p.get("entry_time")
+    if not ts:
+        return None
+    try:
+        et = datetime.fromisoformat(ts)
+        now = datetime.now(et.tzinfo) if et.tzinfo else datetime.now()
+        return (now - et).total_seconds()
+    except Exception:
+        return None
+
+
 def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
                      live_quotes: dict | None = None) -> int:
     """
@@ -261,10 +275,22 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
 
         # 1. Proactive exit — thesis/health broke down; don't ride it to the hard stop.
         if h["health"] < c["exit_health"]:
-            _close(sym, p, h,
-                   f"health {h['health']} < {int(c['exit_health'])} ({'; '.join(h['reasons'])})",
-                   state, dry_run)
-            actions += 1
+            # Fresh-entry phantom-churn guard: a just-entered symbol isn't warm in the live quote
+            # feed yet, so health may be computed off a stale (delayed) bar. Don't dump a position
+            # on a price that doesn't reflect the market, nor within the entry grace window — the
+            # broker hard stop still protects, and the next pass re-checks on live data.
+            stale = c["exit_require_live"] and h.get("stale", False)
+            age = _position_age_sec(p)
+            fresh = age is not None and age < c["entry_grace_sec"]
+            if stale or fresh:
+                logger.info(f"[{sym}] health {h['health']} < {int(c['exit_health'])} but HELD "
+                            f"({'stale price' if stale else f'fresh entry {int(age)}s'}) — "
+                            f"broker hard stop still protects")
+            else:
+                _close(sym, p, h,
+                       f"health {h['health']} < {int(c['exit_health'])} ({'; '.join(h['reasons'])})",
+                       state, dry_run)
+                actions += 1
             continue
 
         # 2. Conditional EOD — PROPOSE the healthy runner as an overnight carry (default carry,

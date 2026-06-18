@@ -50,6 +50,12 @@ PRICE_MAX            = float(os.getenv("APEX_PRICE_MAX", "100"))
 
 # ── Layer 3 (health monitor / exit) ──────────────────────────────────────────
 EXIT_HEALTH   = float(os.getenv("APEX_EXIT_HEALTH", "40"))   # proactive exit below this score
+# Fresh-entry phantom-churn guard: a just-entered symbol isn't warm in the live quote feed yet, so
+# health can be computed off a stale (delayed) bar and read a phantom loss → instant exit seconds
+# after entry (e.g. INTW/AMDL). Don't let a PROACTIVE health exit fire on a stale price, nor within
+# ENTRY_GRACE_SEC of entry. The broker hard stop still protects either way.
+EXIT_REQUIRE_LIVE = os.getenv("APEX_EXIT_REQUIRE_LIVE", "true").lower() == "true"
+ENTRY_GRACE_SEC   = int(os.getenv("APEX_ENTRY_GRACE_SEC", "90"))
 CARRY_HEALTH  = float(os.getenv("APEX_CARRY_HEALTH", "70"))  # min health to carry overnight
 EOD_CLOSE_ET  = os.getenv("APEX_EOD_CLOSE_ET", "15:45")      # ET wall-clock to start the conditional EOD pass
 GRAD_DAYS     = int(os.getenv("APEX_GRAD_DAYS", "5"))        # days_held to graduate swing → multi-week position
@@ -137,6 +143,8 @@ def effective() -> dict:
         "price_min": PRICE_MIN,
         "price_max": PRICE_MAX,
         "exit_health": ov.get("exit_health", EXIT_HEALTH),
+        "exit_require_live": EXIT_REQUIRE_LIVE,
+        "entry_grace_sec": ENTRY_GRACE_SEC,
         "carry_health": ov.get("carry_health", CARRY_HEALTH),
         "grad_days": GRAD_DAYS,
         "disabled_setups": ov.get("disabled_setups", []),
