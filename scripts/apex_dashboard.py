@@ -520,8 +520,8 @@ def trade_card(r: dict, outcome: dict | None):
         if sc:
             v = sc.get("vol")
             vol_s = (f"{v/1e6:.1f}M" if v and v >= 1e6 else f"{v/1e3:.0f}K") if v else "—"
-            line1 = (f"📊 **Session** — open \\${sc.get('open','—')} · close \\${sc.get('close','—')} "
-                     f"· vol {vol_s}")
+            st.markdown(f"📊 **Session** — open \\${sc.get('open','—')} · "
+                        f"close \\${sc.get('close','—')} · vol {vol_s}")
             pre = []
             if sc.get("premkt_high_pct") is not None:
                 pre.append(f"high {sc['premkt_high_pct']:+.1f}%")
@@ -529,14 +529,13 @@ def trade_card(r: dict, outcome: dict | None):
                 pre.append(f"gap {sc['gap_pct']:+.1f}%")
             if sc.get("premkt_last") is not None:
                 pre.append(f"(last \\${sc['premkt_last']})")
-            ah = (f"after-hrs: {sc['afterhrs_pct']:+.1f}% → \\${sc['afterhrs_last']}"
-                  if sc.get("afterhrs_pct") is not None else "")
-            md = line1
+            detail = []
             if pre:
-                md += "  \npre-mkt: " + " · ".join(pre)
-            if ah:
-                md += "  \n" + ah
-            st.markdown(md)
+                detail.append("pre-mkt: " + " · ".join(pre))
+            if sc.get("afterhrs_pct") is not None:
+                detail.append(f"after-hrs: {sc['afterhrs_pct']:+.1f}% → \\${sc['afterhrs_last']}")
+            if detail:
+                st.caption("  \n".join(detail))
 
         st.caption("**Plan** — " + (th.get("planned_exit") or "Layer 3 health-managed (let winners run)."))
 
