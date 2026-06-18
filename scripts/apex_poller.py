@@ -236,22 +236,30 @@ def self_test(day_str: str | None, dry_run=True) -> None:
     if not leaders:
         print("No leaders file — run apex_daily_filter.py first.")
         return
-    syms = [l["symbol"] for l in leaders]
-    if day_str:
-        day = datetime.strptime(day_str, "%Y-%m-%d").date()
-    else:
-        day = (datetime.now(ET) - timedelta(days=1)).date()
-    print(f"APEX self-test | {len(syms)} leaders | session {day} | dry_run={dry_run}")
-    daily = fetch_daily(syms + ["SPY"])
-    regime = classify_regime(daily)
-    intraday = fetch_intraday(syms, day)
-    print(f"  intraday sessions returned for {len(intraday)} leaders | regime={regime}")
-    state = {"date": str(day), "daily_pnl": 0.0, "positions": {}, "executed_today": []}
-    fired = run_pass(leaders, intraday, daily, regime, state, dry_run=True)
-    print(f"\n  {fired} entries detected:")
-    for sym, p in state["positions"].items():
-        print(f"    {sym:6s} {p['trigger']:7s} entry ${p['entry']:.2f} stop ${p['stop']:.2f} qty {p['qty']}")
-    print(f"\n  rationale -> {cfg.RATIONALE_LOG}")
+    # Sandbox: run_pass() persists via save_state(cfg.STATE_FILE); redirect it to a throwaway file
+    # for the duration of the replay so a self-test can never overwrite the live apex-state.json.
+    orig_state_file = cfg.STATE_FILE
+    cfg.STATE_FILE = orig_state_file.parent / "apex-state-selftest.json"
+    try:
+        syms = [l["symbol"] for l in leaders]
+        if day_str:
+            day = datetime.strptime(day_str, "%Y-%m-%d").date()
+        else:
+            day = (datetime.now(ET) - timedelta(days=1)).date()
+        print(f"APEX self-test | {len(syms)} leaders | session {day} | dry_run={dry_run}")
+        daily = fetch_daily(syms + ["SPY"])
+        regime = classify_regime(daily)
+        intraday = fetch_intraday(syms, day)
+        print(f"  intraday sessions returned for {len(intraday)} leaders | regime={regime}")
+        state = {"date": str(day), "daily_pnl": 0.0, "positions": {}, "executed_today": []}
+        fired = run_pass(leaders, intraday, daily, regime, state, dry_run=True)
+        print(f"\n  {fired} entries detected:")
+        for sym, p in state["positions"].items():
+            print(f"    {sym:6s} {p['trigger']:7s} entry ${p['entry']:.2f} stop ${p['stop']:.2f} qty {p['qty']}")
+        print(f"\n  rationale -> {cfg.RATIONALE_LOG}")
+        print(f"  (state sandboxed to {cfg.STATE_FILE.name} — live apex-state.json untouched)")
+    finally:
+        cfg.STATE_FILE = orig_state_file
 
 
 # ── live loop ──────────────────────────────────────────────────────────────────
