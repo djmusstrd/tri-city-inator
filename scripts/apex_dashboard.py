@@ -533,9 +533,9 @@ def trade_card(r: dict, outcome: dict | None):
                   if sc.get("afterhrs_pct") is not None else "")
             md = line1
             if pre:
-                md += "  \n&nbsp;&nbsp;pre-mkt: " + " · ".join(pre)
+                md += "  \npre-mkt: " + " · ".join(pre)
             if ah:
-                md += "  \n&nbsp;&nbsp;" + ah
+                md += "  \n" + ah
             st.markdown(md)
 
         st.caption("**Plan** — " + (th.get("planned_exit") or "Layer 3 health-managed (let winners run)."))
