@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 
 import requests
@@ -46,8 +47,16 @@ _PROBE_QSI = "(function(){return typeof window.getQuoteSessionInstance==='functi
 
 def _tabs() -> list:
     r = requests.get(f"http://{CDP_HOST}:{CDP_PORT}/json/list", timeout=5).json()
-    return [t for t in r if t.get("type") == "page"
+    tabs = [t for t in r if t.get("type") == "page"
             and "tradingview.com/chart" in t.get("url", "").lower()]
+    # Prefer the pinned dedicated quote tab (APEX_QUOTE_CHART_ID, e.g. the "APEX Feed" layout) so
+    # the streaming load stays off the user's interactive chart. Isolation verified by
+    # apex_quote_tab_test.py (streaming 100 syms on a separate tab kept the user tab at ~3ms).
+    # Falls back to any other chart tab if the pinned one isn't open, so it degrades gracefully.
+    pin = os.getenv("APEX_QUOTE_CHART_ID", "").strip()
+    if pin:
+        tabs.sort(key=lambda t: 0 if pin in t.get("url", "") else 1)
+    return tabs
 
 
 def cdp_evaluate(ws_url: str, expression: str, timeout: int = 20):
