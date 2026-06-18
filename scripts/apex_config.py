@@ -42,6 +42,11 @@ ORB_MINUTES          = int(os.getenv("APEX_ORB_MINUTES", "15"))
 ATR_LEN              = 14
 ATR_STOP_MULT        = float(os.getenv("APEX_ATR_STOP", "2.0"))
 MAX_STOP_PCT         = float(os.getenv("APEX_MAX_STOP_PCT", "0.10"))  # cap stop distance at 10% of entry
+# Price band — apex_band_backtest.py (30d/1174 entries) showed the $2-30 zone carries ~4x the
+# per-trade R and ~3x the $/trade of >$30 names, while $100+ is ~zero-edge / forced-1-share.
+# Bias the book to the compoundable band. Tunable; raise PRICE_MAX to re-include a hot theme.
+PRICE_MIN            = float(os.getenv("APEX_PRICE_MIN", "2"))
+PRICE_MAX            = float(os.getenv("APEX_PRICE_MAX", "100"))
 
 # ── Layer 3 (health monitor / exit) ──────────────────────────────────────────
 EXIT_HEALTH   = float(os.getenv("APEX_EXIT_HEALTH", "40"))   # proactive exit below this score
@@ -129,6 +134,8 @@ def effective() -> dict:
         "orb_minutes": ORB_MINUTES,
         "atr_stop_mult": ATR_STOP_MULT,
         "max_stop_pct": MAX_STOP_PCT,
+        "price_min": PRICE_MIN,
+        "price_max": PRICE_MAX,
         "exit_health": ov.get("exit_health", EXIT_HEALTH),
         "carry_health": ov.get("carry_health", CARRY_HEALTH),
         "grad_days": GRAD_DAYS,

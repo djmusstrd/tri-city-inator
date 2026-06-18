@@ -141,8 +141,10 @@ def ribbon_bull(close: pd.Series) -> bool:
     return bool(c > m1 > m2 > m3 > m4 > m5)
 
 
-def build_leaders(min_dollar_vol: float, top_pct: float) -> dict:
-    print(f"APEX Daily Filter | min $vol ${min_dollar_vol:,.0f} | top {top_pct:.0f}th pct")
+def build_leaders(min_dollar_vol: float, top_pct: float,
+                  price_min: float = 2.0, price_max: float = 100.0) -> dict:
+    print(f"APEX Daily Filter | min $vol ${min_dollar_vol:,.0f} | top {top_pct:.0f}th pct "
+          f"| price ${price_min:.0f}-${price_max:.0f}")
     universe = get_universe()
     print(f"  universe: {len(universe)} tradable non-OTC names")
 
@@ -175,8 +177,10 @@ def build_leaders(min_dollar_vol: float, top_pct: float) -> dict:
     df["rs_pct"] = (df["rs_raw"].rank(pct=True) * 100).round(1)
     df = df.sort_values("rs_pct", ascending=False)
 
-    leaders = df[(df["rs_pct"] >= top_pct) & (df["ribbon_bull"])]
-    print(f"  ranked {len(df)} names | leaders (RS≥{top_pct} & ribbon bull): {len(leaders)}")
+    leaders = df[(df["rs_pct"] >= top_pct) & (df["ribbon_bull"])
+                 & (df["price"] >= price_min) & (df["price"] <= price_max)]
+    print(f"  ranked {len(df)} names | leaders (RS≥{top_pct} & ribbon bull & "
+          f"${price_min:.0f}-${price_max:.0f}): {len(leaders)}")
 
     out = {
         "date": datetime.now().strftime("%Y-%m-%d"),
@@ -292,6 +296,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--min-dollar-vol", type=float, default=10_000_000)
     ap.add_argument("--top-pct", type=float, default=90.0)
+    ap.add_argument("--price-min", type=float, default=float(os.getenv("APEX_PRICE_MIN", "2")))
+    ap.add_argument("--price-max", type=float, default=float(os.getenv("APEX_PRICE_MAX", "100")))
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--horizon", type=int, default=20)
     ap.add_argument("--step", type=int, default=21)
@@ -305,7 +311,7 @@ def main() -> None:
         validate(args.min_dollar_vol, args.top_pct, args.horizon, args.step)
         return
 
-    out = build_leaders(args.min_dollar_vol, args.top_pct)
+    out = build_leaders(args.min_dollar_vol, args.top_pct, args.price_min, args.price_max)
     if out.get("error"):
         print(f"ERROR: {out['error']}")
         sys.exit(1)

@@ -67,6 +67,26 @@ def _save_exec_log(rows: list) -> None:
     cfg.EXEC_LOG.write_text(json.dumps(rows, indent=2))
 
 
+def _await_fill_price(client, order_id, tries: int = 6, delay: float = 0.4):
+    """Poll the order until it reports a filled average price (market OTO fills in ~1-2s).
+
+    The recorded entry must be the REAL fill, not the signal/quote price — a stale TV quote
+    above the actual fill otherwise makes the Layer 3 health monitor read a phantom loss and
+    churn the position out within seconds of entering.
+    """
+    import time as _t
+    for _ in range(tries):
+        try:
+            o = client.get_order_by_id(order_id)
+            fap = getattr(o, "filled_avg_price", None)
+            if fap:
+                return float(fap)
+        except Exception:
+            pass
+        _t.sleep(delay)
+    return None
+
+
 def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
             dry_run: bool = False, daily_bars=None, prioritized: bool = False) -> bool:
     """Run guards → size → place entry+stop → log execution + rationale → Telegram."""
@@ -109,13 +129,26 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
 
     # ── Sizing (risk-based, no leverage) ──
     entry_price = float(signal.price)
+    # Price band: bias the book to the compoundable $2-30 zone and skip dead / un-sizable
+    # high-priced names (band backtest: $100+ ≈ zero edge / forced-1-share). Tunable via
+    # APEX_PRICE_MIN/MAX. Existing positions are unaffected (guarded out above).
+    if not (c["price_min"] <= entry_price <= c["price_max"]):
+        logger.info(f"[{sym}] BLOCKED: price ${entry_price:.2f} outside band "
+                    f"${c['price_min']:.0f}-${c['price_max']:.0f}")
+        return False
     # ATR stop, capped so volatile/high-priced leaders don't get absurd (e.g. 60%) stops
     stop_dist = min(atr * c["atr_stop_mult"], entry_price * c["max_stop_pct"])
     stop_price = entry_price - stop_dist
     risk_dollars = min(c["equity"] * (c["risk_pct"] / 100.0), c["max_risk"])
     raw_qty = math.floor(risk_dollars / stop_dist) if stop_dist > 0 else 0
     cash_qty = math.floor(c["equity"] / entry_price)
-    qty = max(1, min(raw_qty, cash_qty))
+    qty = min(raw_qty, cash_qty)
+    # Never force a share over budget: if one share's stop distance already busts the risk
+    # cap, skip the trade (the old max(1,…) silently over-risked high-priced names).
+    if qty < 1:
+        logger.info(f"[{sym}] BLOCKED: 1 share risks ${stop_dist:.2f} > cap ${risk_dollars:.0f} "
+                    f"(price ${entry_price:.2f} too high to size within risk)")
+        return False
 
     logger.info(f"[{sym}] ENTRY {signal.trigger} score={score} px={entry_price:.2f} "
                 f"stop={stop_price:.2f} qty={qty} {'(DRY)' if dry_run else ''}")
@@ -137,6 +170,14 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
             )
             resp = client.submit_order(order)
             order_id = str(resp.id)
+            # Reconcile entry to the ACTUAL fill (not the signal/quote price) so Layer 3
+            # health compares against what we really paid — kills the phantom-loss churn.
+            fill_price = _await_fill_price(client, resp.id)
+            if fill_price and fill_price > 0:
+                if abs(fill_price - entry_price) / entry_price > 0.005:
+                    logger.info(f"[{sym}] entry reconciled: signal ${entry_price:.2f} → "
+                                f"fill ${fill_price:.2f}")
+                entry_price = fill_price
         except Exception as e:
             logger.error(f"[{sym}] order failed: {e}")
             return False
