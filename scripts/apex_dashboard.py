@@ -130,6 +130,62 @@ def fetch_bars(symbol: str, day_iso: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def session_context(symbol: str, date_iso: str) -> dict:
+    """Day open/close + volume, plus pre-market (high/gap/last) and after-hours (% → price) for a
+    trade's date. {} on failure; in-progress days return what exists (close/after-hrs blank)."""
+    key, sec = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY")
+    if not key or not sec or not date_iso:
+        return {}
+    try:
+        from datetime import date as _date
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        day = _date.fromisoformat(date_iso[:10])
+        dc = StockHistoricalDataClient(key, sec)
+        # daily bars → today's open/close/vol + prior close
+        dd = dc.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=[symbol], timeframe=TimeFrame.Day,
+            start=datetime.combine(day - timedelta(days=8), dtime(0, 0)),
+            end=datetime.combine(day + timedelta(days=1), dtime(0, 0)), feed=cfg.DATA_FEED)).df
+        if dd.empty:
+            return {}
+        ds = dd.xs(symbol, level="symbol").sort_index()
+        ds = ds.assign(d=[ts.date() for ts in ds.index.tz_convert(ET)])
+        rows = ds[ds["d"] <= day]
+        if rows.empty:
+            return {}
+        today = rows.iloc[-1]
+        prior_close = float(rows.iloc[-2]["close"]) if len(rows) >= 2 else None
+        out = {"open": round(float(today["open"]), 2), "close": round(float(today["close"]), 2),
+               "vol": int(today["volume"])}
+        if prior_close:
+            out["gap_pct"] = round((out["open"] - prior_close) / prior_close * 100, 1)
+        # extended-hours 5-min bars → pre-market + after-hours
+        end = min(datetime.combine(day + timedelta(days=1), dtime(0, 0)),
+                  datetime.utcnow() - timedelta(minutes=cfg.SIP_DELAY_MIN))
+        m = dc.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=[symbol], timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=datetime.combine(day, dtime(0, 0)), end=end,
+            feed=cfg.DATA_FEED, adjustment="raw")).df
+        if not m.empty:
+            ms = m.xs(symbol, level="symbol").copy()
+            ms["tod"] = [t.time() for t in ms.index.tz_convert(ET)]
+            pre = ms[(ms["tod"] >= dtime(4, 0)) & (ms["tod"] < dtime(9, 30))]
+            post = ms[(ms["tod"] >= dtime(16, 0)) & (ms["tod"] < dtime(20, 0))]
+            if not pre.empty and prior_close:
+                out["premkt_high_pct"] = round((float(pre["high"].max()) - prior_close) / prior_close * 100, 1)
+                out["premkt_last"] = round(float(pre.iloc[-1]["close"]), 2)
+            if not post.empty:
+                ah = float(post.iloc[-1]["close"])
+                out["afterhrs_last"] = round(ah, 2)
+                out["afterhrs_pct"] = round((ah - out["close"]) / out["close"] * 100, 1)
+        return out
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=15, show_spinner=False)
 def live_quote(symbol: str) -> dict | None:
     """Real-time TV quote for one symbol (cached 15s). None if TV/CDP down or no tick."""
@@ -458,6 +514,30 @@ def trade_card(r: dict, outcome: dict | None):
             f"**Risk** ${r.get('risk_dollars')} · qty {r.get('qty')}")
         col[1].markdown("**Support**  \n" + _levels_md(th.get("support"), "ORB low", r.get("orb_low")))
         col[2].markdown("**Resistance**  \n" + _levels_md(th.get("resistance"), "ORB high", r.get("orb_high")))
+
+        # Session context — day open/close + volume, pre-market & after-hours moves
+        sc = session_context(sym, str(r.get("timestamp", "")))
+        if sc:
+            v = sc.get("vol")
+            vol_s = (f"{v/1e6:.1f}M" if v and v >= 1e6 else f"{v/1e3:.0f}K") if v else "—"
+            line1 = (f"📊 **Session** — open ${sc.get('open','—')} · close ${sc.get('close','—')} "
+                     f"· vol {vol_s}")
+            pre = []
+            if sc.get("premkt_high_pct") is not None:
+                pre.append(f"high {sc['premkt_high_pct']:+.1f}%")
+            if sc.get("gap_pct") is not None:
+                pre.append(f"gap {sc['gap_pct']:+.1f}%")
+            if sc.get("premkt_last") is not None:
+                pre.append(f"(last ${sc['premkt_last']})")
+            ah = (f"after-hrs: {sc['afterhrs_pct']:+.1f}% → ${sc['afterhrs_last']}"
+                  if sc.get("afterhrs_pct") is not None else "")
+            md = line1
+            if pre:
+                md += "  \n&nbsp;&nbsp;pre-mkt: " + " · ".join(pre)
+            if ah:
+                md += "  \n&nbsp;&nbsp;" + ah
+            st.markdown(md)
+
         st.caption("**Plan** — " + (th.get("planned_exit") or "Layer 3 health-managed (let winners run)."))
 
         if outcome:
