@@ -85,5 +85,30 @@ st = {"daily_pnl": 0.0, "positions": {"KEEPX": {"entry": 10.0, "stop": 9.5, "qty
 n = H.manage_positions({}, st, "risk_on", dry_run=True, live_quotes=None, force_eod=False)
 check("no-bars kept when not EOD", "KEEPX" in st["positions"])
 
+# ── G. _ensure_gtc_stop: places GTC when missing, idempotent when one exists ──────
+print("G. _ensure_gtc_stop (GTC-on-carry)")
+class GOrder:
+    def __init__(s, tif="day", otype="stop"): s.time_in_force=tif; s.order_type=otype; s.id="x"
+class GClient:
+    def __init__(s, opens): s._opens=opens; s.submitted=[]; s.cancelled=[]
+    def get_orders(s, req): return s._opens
+    def cancel_order_by_id(s, oid): s.cancelled.append(oid)
+    def submit_order(s, req): s.submitted.append(req)
+# no stop -> cancels nothing, places a GTC stop
+gc = GClient([]); H._trading_client = lambda: gc
+ok = H._ensure_gtc_stop("NEW", {"qty": 10, "stop": 9.0}, dry_run=False)
+check("placed GTC when none existed", ok and len(gc.submitted) == 1 and "gtc" in str(getattr(gc.submitted[0], "time_in_force", "")).lower())
+# existing DAY stop -> cancel it then place GTC
+gc = GClient([GOrder(tif="day", otype="stop")]); H._trading_client = lambda: gc
+H._ensure_gtc_stop("DAYX", {"qty": 10, "stop": 9.0}, dry_run=False)
+check("DAY stop replaced (cancel+submit GTC)", len(gc.cancelled) == 1 and len(gc.submitted) == 1)
+# already GTC -> idempotent, no cancel/submit
+gc = GClient([GOrder(tif="gtc", otype="stop")]); H._trading_client = lambda: gc
+H._ensure_gtc_stop("GTCX", {"qty": 10, "stop": 9.0}, dry_run=False)
+check("idempotent when GTC already present", len(gc.cancelled) == 0 and len(gc.submitted) == 0)
+# dry_run -> no-op
+gc = GClient([]); H._trading_client = lambda: gc
+check("dry_run no-op", H._ensure_gtc_stop("DRYX", {"qty": 10, "stop": 9.0}, dry_run=True) and not gc.submitted)
+
 print("\nRESULT:", "ALL PASS" if fails == 0 else f"{fails} FAILED")
 sys.exit(1 if fails else 0)

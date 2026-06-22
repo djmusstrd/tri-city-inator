@@ -14,12 +14,18 @@ class FakeOrder:
 class FakeClient:
     def __init__(self, pos, open_orders, closed_orders):
         self._pos, self._open, self._closed = pos, open_orders, closed_orders
+        self.submitted = []
     def get_all_positions(self): return self._pos
     def get_orders(self, req):
         status = str(getattr(req, "status", "")).lower()
         if "open" in status: return self._open
         syms = getattr(req, "symbols", None)
         return [o for o in self._closed if (not syms or o.symbol in syms)]
+    def cancel_order_by_id(self, oid): pass
+    def submit_order(self, req):
+        self.submitted.append(req)
+        class _R: id = "newstop"
+        return _R()
 
 ALERTS = []
 JOURNAL = []
@@ -50,13 +56,14 @@ print("B. phantom/stop-out"); check("1 fix", n == 1); check("removed from state"
 check("daily_pnl debited -50", st["daily_pnl"] == -50.0); check("journaled", len(JOURNAL) == 1 and JOURNAL[0]["pnl"] == -50.0)
 check("alert fired", any("reconciled" in a.lower() for a in ALERTS))
 
-# C. orphan: at broker, missing from state
-reset(); install(FakeClient([FakePos("ORPH", 50, 4.0)], [], []))
+# C. orphan: at broker, missing from state -> adopt + place a GTC protective stop
+reset(); fc = FakeClient([FakePos("ORPH", 50, 4.0)], [], []); install(fc)
 st = {"daily_pnl": 0.0, "positions": {}}
 n = H.reconcile_with_broker(st, dry_run=False)
 print("C. orphan"); check("1 fix", n == 1); check("adopted", "ORPH" in st["positions"])
 check("qty/entry adopted", st["positions"].get("ORPH", {}).get("qty") == 50 and st["positions"]["ORPH"]["entry"] == 4.0)
 check("stop below entry", 0 < st["positions"]["ORPH"]["stop"] < 4.0); check("orphan alert", any("ORPHAN" in a for a in ALERTS))
+check("GTC stop placed on adopt", any("gtc" in str(getattr(r, "time_in_force", "")).lower() for r in fc.submitted))
 
 # D. qty drift: state 100, broker 60
 reset(); install(FakeClient([FakePos("DRIFT", 60, 5.0)], [FakeOrder("DRIFT")], []))

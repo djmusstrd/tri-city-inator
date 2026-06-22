@@ -234,10 +234,14 @@ def reconcile_with_broker(state: dict, dry_run: bool) -> int:
             "entry_time": datetime.now(ET).isoformat(), "order_id": "RECONCILED",
             "health": 100, "entry_window": "normal", "adopted": True,
         }
+        # An adopted orphan is a position we're keeping — give it a real GTC stop now, not just
+        # an alert (it may be naked, as the unprotected check below would otherwise only flag).
+        protected = _ensure_gtc_stop(sym, state["positions"][sym], dry_run)
         fixes += 1
         alert_fault(f"reconcile_orphan_{sym}",
                     f"⚠️ APEX adopted ORPHAN <b>{sym}</b> ({qty}@${entry:.2f}) — held at broker but "
-                    f"missing from state. Now managed + EOD-protected (stop ${stop:.2f}).", throttle=0)
+                    f"missing from state. {'GTC stop placed' if protected else 'STOP PLACE FAILED — protect manually'} "
+                    f"@ ${stop:.2f}; now managed.", throttle=0)
 
     # 3. qty drift (partial fill / partial close) -> sync to broker truth
     for sym, p in state.get("positions", {}).items():
@@ -338,6 +342,42 @@ def _reprotect(sym: str, p: dict) -> bool:
         return True
     except Exception as e:
         logger.error(f"[{sym}] re-protect failed: {e}")
+        return False
+
+
+def _ensure_gtc_stop(sym: str, p: dict, dry_run: bool = False) -> bool:
+    """Guarantee exactly ONE GTC protective stop for a position that will be HELD past the close.
+    Entry stops are DAY-tif and expire at 3pm CT, so an overnight carry would otherwise go naked
+    (this bit us 2026-06-22: 5 forced carries, all unprotected). Idempotent — if a GTC stop
+    already exists it's left alone; otherwise cancel any open (DAY) stops for the symbol and place
+    one GTC stop at p['stop']. No-op in dry_run."""
+    if dry_run:
+        return True
+    client = _trading_client()
+    if client is None:
+        return False
+    try:
+        from alpaca.trading.requests import GetOrdersRequest, StopOrderRequest
+        from alpaca.trading.enums import QueryOrderStatus, OrderSide, TimeInForce
+        import time as _t
+        existing = list(client.get_orders(GetOrdersRequest(
+            status=QueryOrderStatus.OPEN, symbols=[sym])))
+        if any(str(getattr(o, "time_in_force", "")).lower() == "gtc"
+               and "stop" in str(getattr(o, "order_type", "")).lower() for o in existing):
+            return True                        # already protected overnight — leave it
+        for o in existing:
+            try:
+                client.cancel_order_by_id(o.id)
+            except Exception as e:
+                logger.debug(f"[{sym}] cancel {o.id} failed: {e}")
+        _t.sleep(0.5)                          # let the cancel free the held shares
+        client.submit_order(StopOrderRequest(
+            symbol=sym, qty=int(p["qty"]), side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC, stop_price=round(float(p["stop"]), 2)))
+        logger.info(f"[{sym}] carry stop → GTC @ ${float(p['stop']):.2f} ({int(p['qty'])} sh)")
+        return True
+    except Exception as e:
+        logger.error(f"[{sym}] GTC stop placement failed: {e}")
         return False
 
 
@@ -479,6 +519,9 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
                 if not p.get("pending_deny"):     # propose once
                     p["status"] = "swing"
                     p["pending_deny"] = True       # carries by default; deniable until close
+                    # The intraday DAY stop expires at the close — convert to GTC so the carry
+                    # is protected overnight / into tomorrow's open.
+                    _ensure_gtc_stop(sym, p, dry_run)
                     send_telegram(telegram_carry_message(sym, h["health"], h["gain_pct"],
                                                          "holding above VWAP"))
                     logger.info(f"[{sym}] CARRY PROPOSED (default carry; deny on dashboard) "
