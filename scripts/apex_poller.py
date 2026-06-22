@@ -34,7 +34,7 @@ sys.path.insert(0, str(WORKSPACE / "scripts"))
 import apex_config as cfg
 from apex_entry_engine import detect_entry
 from apex_execute import execute
-from apex_health import manage_positions
+from apex_health import manage_positions, reconcile_with_broker, alert_fault
 import apex_tv_quotes
 
 import numpy as np
@@ -313,6 +313,13 @@ def run_live(dry_run: bool) -> None:
             time.sleep(1)
 
     state = load_state()
+    # Heal any state↔broker divergence left by a crash/restart BEFORE the loop trusts state
+    # (e.g. a position that stopped out while the poller was down).
+    try:
+        if reconcile_with_broker(state, dry_run):
+            save_state(state)
+    except Exception as e:
+        logger.error(f"startup reconcile failed: {e}", exc_info=True)
     daily = None
     regime = "unknown"
     last_daily_day = None
@@ -337,14 +344,18 @@ def run_live(dry_run: bool) -> None:
         leaders = load_leaders()
         syms = [l["symbol"] for l in leaders]
         if not syms:
-            logger.warning("no leaders — is apex_daily_filter.py run for today?")
+            alert_fault("no_leaders", "⚠️ APEX has NO leaders for today — did apex_daily_filter.py run? Entries impossible.")
             _sleep(cfg.POLL_SLOW)
             continue
 
         try:
+            reconciled = reconcile_with_broker(state, dry_run)
             if last_daily_day != today:
                 daily = fetch_daily(syms + ["SPY"])
                 regime = classify_regime(daily)
+                if regime == "unknown":
+                    alert_fault("regime_unknown",
+                                "⚠️ APEX regime=unknown — SPY history insufficient/unreadable; longs gated.")
                 last_daily_day = today
             intraday = fetch_intraday(syms, today)
             # Hybrid feed: real-time TV prices for positions + prioritized + breakout candidates
@@ -365,9 +376,10 @@ def run_live(dry_run: bool) -> None:
             save_state(state)
             logger.info(f"pass: {len(state['positions'])} open, "
                         f"{len(state['executed_today'])} done today, {fired} new, "
-                        f"{managed} managed | regime {regime}")
+                        f"{managed} managed, {reconciled} reconciled | regime {regime}")
         except Exception as e:
             logger.error(f"pass error: {e}", exc_info=True)
+            alert_fault("pass_error", f"🚨 APEX pass error: {e}")
 
         _sleep(_cadence())
 

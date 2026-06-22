@@ -137,6 +137,140 @@ def _journal_exit(record: dict) -> None:
     cfg.APEX_JOURNAL.write_text(json.dumps(rows, indent=2))
 
 
+# ── fault alerting (the keystone: every system fault must REACH the operator) ──────
+_FAULT_LAST: dict = {}
+
+
+def alert_fault(key: str, msg: str, throttle: float = 600.0) -> None:
+    """Loud system-fault alert: ERROR log + Telegram, throttled per key so a persistent
+    fault doesn't spam every cycle (throttle=0 forces send). Without this the 'fail loud'
+    guards never reach the human — exactly how the regime-stuck bug ran silently for sessions."""
+    import time as _t
+    logger.error(msg)
+    now = _t.time()
+    if throttle and (now - _FAULT_LAST.get(key, 0.0)) < throttle:
+        return
+    _FAULT_LAST[key] = now
+    try:
+        send_telegram(msg)
+    except Exception as e:
+        logger.debug(f"fault telegram failed: {e}")
+
+
+# ── broker reconciliation (heal local state vs the broker's ACTUAL truth) ──────────
+def _last_exit_fill(client, sym: str):
+    """Best-effort exit price: the most recent FILLED sell order for the symbol."""
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        for o in client.get_orders(GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED, symbols=[sym], limit=10)):
+            if "sell" in str(getattr(o, "side", "")).lower() and getattr(o, "filled_avg_price", None):
+                return float(o.filled_avg_price)
+    except Exception as e:
+        logger.debug(f"[{sym}] exit-fill lookup failed: {e}")
+    return None
+
+
+def reconcile_with_broker(state: dict, dry_run: bool) -> int:
+    """Heal divergence between local state and the broker's actual positions/orders — the
+    fix for the dangerous silent failures the audit found:
+      - phantom / external close (incl. a hard STOP-OUT the manager never saw): in state,
+        gone at broker -> journal the exit + debit daily_pnl so the loss limit SEES stop-outs.
+      - orphan: held at broker, missing from state -> adopt so it gets managed + EOD-closed.
+      - qty drift (partial fill / partial close) -> sync to broker truth.
+      - unprotected: held at broker with NO open stop order -> alert loudly (manual re-place).
+    Live-only (dry-run has no broker truth). Returns the number of corrections made."""
+    if dry_run:
+        return 0
+    client = _trading_client()
+    if client is None:
+        return 0
+    try:
+        broker_pos = {p.symbol: p for p in client.get_all_positions()}
+    except Exception as e:
+        alert_fault("reconcile_fetch", f"⚠️ APEX reconcile could not read broker positions: {e}")
+        return 0
+
+    fixes = 0
+    # 1. Phantom / external close — most importantly a hard stop-out the manager never journaled
+    for sym in list(state.get("positions", {})):
+        if sym in broker_pos:
+            continue
+        p = state["positions"][sym]
+        entry = float(p["entry"])
+        exit_px = float(_last_exit_fill(client, sym) or p.get("last_price") or p.get("stop") or entry)
+        pnl = round((exit_px - entry) * int(p["qty"]), 2)
+        _journal_exit({
+            "timestamp": datetime.now(ET).isoformat(), "symbol": sym,
+            "trigger": p.get("trigger"), "entry": round(entry, 4), "exit": round(exit_px, 4),
+            "qty": int(p["qty"]), "pnl": pnl,
+            "gain_pct": round((exit_px - entry) / entry * 100, 2) if entry else 0.0,
+            "health_at_exit": p.get("health"),
+            "reason": "broker-side close (stop-out/external) — reconciled",
+            "dry_run": False, "entry_time": p.get("entry_time"), "order_id": p.get("order_id"),
+        })
+        state["daily_pnl"] = round(state.get("daily_pnl", 0.0) + pnl, 2)
+        state["positions"].pop(sym, None)
+        fixes += 1
+        alert_fault(f"reconcile_phantom_{sym}",
+                    f"🩹 APEX reconciled <b>{sym}</b>: closed at broker (exit ${exit_px:.2f}, "
+                    f"pnl ${pnl}). daily_pnl now ${state['daily_pnl']}.", throttle=0)
+
+    # 2. Orphan — at broker, missing from state -> adopt so it's managed + EOD-protected
+    for sym, bp in broker_pos.items():
+        if sym in state.get("positions", {}):
+            continue
+        try:
+            entry = float(getattr(bp, "avg_entry_price", 0) or 0)
+            qty = int(float(getattr(bp, "qty", 0) or 0))
+        except Exception:
+            continue
+        if entry <= 0 or qty <= 0:
+            continue
+        stop = round(entry * (1 - cfg.effective()["max_stop_pct"]), 2)
+        state.setdefault("positions", {})[sym] = {
+            "entry": entry, "stop": stop, "qty": qty, "trigger": "RECONCILED",
+            "entry_time": datetime.now(ET).isoformat(), "order_id": "RECONCILED",
+            "health": 100, "entry_window": "normal", "adopted": True,
+        }
+        fixes += 1
+        alert_fault(f"reconcile_orphan_{sym}",
+                    f"⚠️ APEX adopted ORPHAN <b>{sym}</b> ({qty}@${entry:.2f}) — held at broker but "
+                    f"missing from state. Now managed + EOD-protected (stop ${stop:.2f}).", throttle=0)
+
+    # 3. qty drift (partial fill / partial close) -> sync to broker truth
+    for sym, p in state.get("positions", {}).items():
+        if sym not in broker_pos:
+            continue
+        try:
+            bqty = int(float(getattr(broker_pos[sym], "qty", p["qty"])))
+        except Exception:
+            continue
+        if bqty > 0 and bqty != int(p["qty"]):
+            alert_fault(f"reconcile_qty_{sym}",
+                        f"⚠️ APEX <b>{sym}</b> qty drift: state {p['qty']} → broker {bqty}; syncing.",
+                        throttle=0)
+            p["qty"] = bqty
+            fixes += 1
+
+    # 4. Unprotected — held at broker with NO open stop order. Alert-only in v1: auto-replacing
+    #    risks a double-stop (oversell) if the OTO leg is merely momentarily absent. Operator acts.
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        protected = {o.symbol for o in client.get_orders(
+            GetOrdersRequest(status=QueryOrderStatus.OPEN))}
+        for sym, p in state.get("positions", {}).items():
+            if sym in broker_pos and sym not in protected:
+                alert_fault(f"reconcile_unprot_{sym}",
+                            f"🚨 APEX <b>{sym}</b> is UNPROTECTED — held at broker with no open stop. "
+                            f"Place a stop @ ${float(p['stop']):.2f} ({int(p['qty'])} sh) NOW.", throttle=300)
+    except Exception as e:
+        logger.debug(f"reconcile: open-order check failed: {e}")
+    return fixes
+
+
 def load_carry_decisions() -> dict:
     """Dashboard-written approve/deny for pending overnight carries (today only)."""
     today = datetime.now(ET).date().isoformat()
