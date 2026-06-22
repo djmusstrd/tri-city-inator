@@ -298,12 +298,13 @@ def record_carry_decision(symbol: str, decision: str) -> None:
     cfg.CARRY_DECISIONS.write_text(json.dumps(d, indent=2))
 
 
-def _liquidate(sym: str) -> None:
-    """Live close: cancel the symbol's open (protective stop) orders first, then market-sell."""
+def _liquidate(sym: str) -> str:
+    """Live close: cancel the symbol's open (protective stop) orders, then market-sell.
+    Returns 'ok' (closed), 'gone' (broker had no such position — already flat), or 'fail'."""
     client = _trading_client()
     if client is None:
         logger.error(f"[{sym}] no Alpaca client — cannot close")
-        return
+        return "fail"
     try:
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
@@ -313,8 +314,31 @@ def _liquidate(sym: str) -> None:
             except Exception as e:
                 logger.debug(f"[{sym}] cancel {o.id} failed: {e}")
         client.close_position(sym)
+        return "ok"
     except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ("not exist", "no position", "404", "not found")):
+            return "gone"           # already flat at the broker — safe to mark closed
         logger.error(f"[{sym}] liquidate failed: {e}")
+        return "fail"
+
+
+def _reprotect(sym: str, p: dict) -> bool:
+    """Re-place a protective stop for a position whose close FAILED after its stop was cancelled,
+    so it's never left naked while we wait to retry."""
+    client = _trading_client()
+    if client is None:
+        return False
+    try:
+        from alpaca.trading.requests import StopOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        client.submit_order(StopOrderRequest(
+            symbol=sym, qty=int(p["qty"]), side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY, stop_price=round(float(p["stop"]), 2)))
+        return True
+    except Exception as e:
+        logger.error(f"[{sym}] re-protect failed: {e}")
+        return False
 
 
 def _close(sym: str, p: dict, h: dict, reason: str, state: dict, dry_run: bool) -> None:
@@ -322,7 +346,16 @@ def _close(sym: str, p: dict, h: dict, reason: str, state: dict, dry_run: bool) 
     price = h["price"]
     pnl = round((price - p["entry"]) * p["qty"], 2)
     if not dry_run:
-        _liquidate(sym)
+        status = _liquidate(sym)
+        if status == "fail":
+            # Close failed AFTER the protective stop was cancelled. Re-protect, KEEP the position
+            # so the next pass / reconcile retries, and page the operator. Never journal a phantom
+            # close that abandons a still-open (now unprotected) position.
+            reprotected = _reprotect(sym, p)
+            alert_fault(f"close_fail_{sym}",
+                        f"🚨 APEX FAILED to close <b>{sym}</b> ({int(p['qty'])} sh). Position kept; "
+                        f"stop {('re-placed @ $%.2f' % float(p['stop'])) if reprotected else 'RE-PLACE FAILED — MANUAL ACTION NOW'}. Will retry.")
+            return
     record = {
         "timestamp": datetime.now(ET).isoformat(), "symbol": sym,
         "trigger": p.get("trigger"), "entry": round(float(p["entry"]), 4),
@@ -365,7 +398,7 @@ def _position_age_sec(p: dict) -> float | None:
 
 
 def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
-                     live_quotes: dict | None = None) -> int:
+                     live_quotes: dict | None = None, force_eod: bool = False) -> int:
     """
     Recompute health for every open position, then act:
       proactive exit on breakdown · conditional EOD carry/close · health-decay warning.
@@ -373,7 +406,7 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
     Returns the number of positions that took an action (exit / carry-graduation).
     """
     c = cfg.effective()
-    eod = _eod_now()
+    eod = _eod_now() or force_eod          # force_eod: real session close reached (incl. half-days)
     lq = live_quotes or {}
     dec = load_carry_decisions()
     actions = 0
@@ -400,6 +433,16 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
         lp = lq.get(sym, {}).get("last")
         h = compute_health(p, intraday.get(sym), live_price=lp)
         if not h:
+            if force_eod:
+                # Session closed with no fresh bars to score — flatten on the last known price
+                # so a half-day close never silently carries a position the operator expected out.
+                lastpx = float(lp or p.get("last_price") or p["entry"])
+                entry = float(p["entry"])
+                hh = {"price": lastpx, "health": p.get("health", 0), "vwap": lastpx,
+                      "gain_pct": round((lastpx - entry) / entry * 100, 2) if entry else 0.0,
+                      "reasons": ["session closed — final EOD flatten"]}
+                _close(sym, p, hh, "final EOD flatten (no live bars)", state, dry_run)
+                actions += 1
             continue
         prev = p.get("health", 100)
         p["health"] = h["health"]

@@ -182,13 +182,27 @@ def load_state() -> dict:
     if cfg.STATE_FILE.exists():
         try:
             return json.loads(cfg.STATE_FILE.read_text())
-        except Exception:
-            pass
+        except Exception as e:
+            # A corrupt state must NOT be silently discarded (that would forget every open
+            # position + zero daily_pnl). Preserve it for diagnosis and alert loudly; the
+            # startup reconcile then re-adopts any open broker positions as orphans.
+            try:
+                bad = cfg.STATE_FILE.with_name(cfg.STATE_FILE.name + ".corrupt")
+                cfg.STATE_FILE.replace(bad)
+                alert_fault("state_corrupt",
+                            f"⚠️ APEX state file was corrupt ({e}); preserved as {bad.name}. "
+                            f"Reconcile will recover open positions from the broker.")
+            except Exception:
+                pass
     return {"date": "", "daily_pnl": 0.0, "positions": {}, "executed_today": []}
 
 
 def save_state(s: dict) -> None:
-    cfg.STATE_FILE.write_text(json.dumps(s, indent=2))
+    # Atomic write: a kill mid-write must never truncate apex-state.json. Write a sibling temp
+    # then os.replace (atomic on the same filesystem) so the live file is always complete JSON.
+    tmp = cfg.STATE_FILE.with_name(cfg.STATE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(s, indent=2))
+    os.replace(tmp, cfg.STATE_FILE)
 
 
 def load_leaders() -> list:
@@ -268,11 +282,29 @@ def self_test(day_str: str | None, dry_run=True) -> None:
 
 
 # ── live loop ──────────────────────────────────────────────────────────────────
+_CLOCK_CACHE = {"ts": 0.0, "open": None}
+
+
 def _market_open_now() -> bool:
-    now = datetime.now(ET)
-    if now.weekday() >= 5:
-        return False
-    return SESS_OPEN <= now.time() < SESS_CLOSE
+    # Authoritative: the Alpaca clock — it knows holidays AND half-days, which the old
+    # weekday+time heuristic did not (it ran on Juneteenth 6/19). Cached ~60s to avoid
+    # hammering the API; falls back to the local heuristic only if the clock is unreachable.
+    now_l = datetime.now(ET)
+    if now_l.weekday() >= 5:
+        return False                       # weekend: skip the API call entirely
+    nowt = time.time()
+    if _CLOCK_CACHE["open"] is not None and (nowt - _CLOCK_CACHE["ts"]) < 60:
+        return _CLOCK_CACHE["open"]
+    try:
+        from apex_health import _trading_client
+        client = _trading_client()
+        if client is not None:
+            is_open = bool(client.get_clock().is_open)
+            _CLOCK_CACHE.update(ts=nowt, open=is_open)
+            return is_open
+    except Exception as e:
+        logger.debug(f"clock check failed, using local heuristic: {e}")
+    return SESS_OPEN <= now_l.time() < SESS_CLOSE
 
 
 def _cadence() -> int:
@@ -323,6 +355,9 @@ def run_live(dry_run: bool) -> None:
     daily = None
     regime = "unknown"
     last_daily_day = None
+    intraday = None
+    live_quotes = None
+    was_open = False
 
     while running[0]:
         today = datetime.now(ET).date()
@@ -338,8 +373,23 @@ def run_live(dry_run: bool) -> None:
             save_state(state)
 
         if not _market_open_now():
+            if was_open:
+                # Session just closed (incl. an early half-day close). Run ONE final EOD pass so
+                # open positions get their carry/close decision even though the local EOD wall
+                # time may not have been reached. Broker stops still protect throughout.
+                was_open = False
+                try:
+                    final = manage_positions(intraday or {}, state, regime, dry_run,
+                                             live_quotes, force_eod=True)
+                    if final:
+                        save_state(state)
+                        logger.info(f"final EOD pass: {final} positions actioned")
+                except Exception as e:
+                    logger.error(f"final EOD pass failed: {e}", exc_info=True)
+                    alert_fault("final_eod", f"🚨 APEX final EOD pass failed: {e}")
             _sleep(cfg.POLL_SLOW)
             continue
+        was_open = True
 
         leaders = load_leaders()
         syms = [l["symbol"] for l in leaders]

@@ -67,24 +67,33 @@ def _save_exec_log(rows: list) -> None:
     cfg.EXEC_LOG.write_text(json.dumps(rows, indent=2))
 
 
-def _await_fill_price(client, order_id, tries: int = 6, delay: float = 0.4):
-    """Poll the order until it reports a filled average price (market OTO fills in ~1-2s).
-
-    The recorded entry must be the REAL fill, not the signal/quote price — a stale TV quote
-    above the actual fill otherwise makes the Layer 3 health monitor read a phantom loss and
-    churn the position out within seconds of entering.
+def _confirm_order(client, order_id, tries: int = 8, delay: float = 0.4):
+    """Poll the order until terminal/usable: return (filled_avg_price|None, filled_qty|None,
+    status). Confirms the entry actually filled BEFORE we record a position — a rejected/expired
+    order must not write a phantom full-size position into state, and a partial fill records the
+    REAL qty. The fill price (not the signal/quote price) also feeds Layer 3 health so a stale TV
+    quote can't read a phantom loss and churn the position out seconds after entering.
     """
     import time as _t
+    status, fap, fqty = "", None, None
     for _ in range(tries):
         try:
             o = client.get_order_by_id(order_id)
+            status = str(getattr(o, "status", "")).lower()
             fap = getattr(o, "filled_avg_price", None)
-            if fap:
-                return float(fap)
+            fqty = getattr(o, "filled_qty", None)
+            if status in ("filled", "rejected", "canceled", "cancelled", "expired"):
+                break
+            if fap:                      # partially_filled with a usable average price
+                break
         except Exception:
             pass
         _t.sleep(delay)
-    return None
+    try:
+        fqty = int(float(fqty)) if fqty not in (None, "") else None
+    except Exception:
+        fqty = None
+    return (float(fap) if fap else None), fqty, status
 
 
 def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
@@ -170,14 +179,24 @@ def execute(signal, rs_pct: float, atr: float, regime: str, state: dict,
             )
             resp = client.submit_order(order)
             order_id = str(resp.id)
-            # Reconcile entry to the ACTUAL fill (not the signal/quote price) so Layer 3
-            # health compares against what we really paid — kills the phantom-loss churn.
-            fill_price = _await_fill_price(client, resp.id)
+            # Confirm the order actually filled BEFORE recording a position.
+            fill_price, filled_qty, status = _confirm_order(client, resp.id)
+            if status in ("rejected", "canceled", "cancelled", "expired"):
+                from apex_health import alert_fault
+                alert_fault(f"order_{sym}",
+                            f"🚨 APEX <b>{sym}</b> entry order {status} — no position recorded.")
+                return False
+            # Reconcile entry to the ACTUAL fill (not the signal/quote price) so Layer 3 health
+            # compares against what we really paid — kills the phantom-loss churn.
             if fill_price and fill_price > 0:
                 if abs(fill_price - entry_price) / entry_price > 0.005:
                     logger.info(f"[{sym}] entry reconciled: signal ${entry_price:.2f} → "
                                 f"fill ${fill_price:.2f}")
                 entry_price = fill_price
+            # Honor a partial fill: record the real position size, not the requested qty.
+            if filled_qty and 0 < filled_qty < qty:
+                logger.info(f"[{sym}] PARTIAL fill {filled_qty}/{qty} — recording actual qty")
+                qty = filled_qty
         except Exception as e:
             logger.error(f"[{sym}] order failed: {e}")
             return False
