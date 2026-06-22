@@ -92,7 +92,9 @@ def fetch_intraday(symbols, the_day: ddate) -> dict:
     return out
 
 
-def fetch_daily(symbols, days=40) -> pd.DataFrame:
+def fetch_daily(symbols, days=70) -> pd.DataFrame:
+    # NOTE: must stay >= 50 trading days so classify_regime's 50-day SMA is
+    # real, not NaN. days=70 calendar -> start now-90 cal -> ~64 trading days.
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
     dc = _data_client()
@@ -167,7 +169,10 @@ def classify_regime(daily: pd.DataFrame) -> str:
     """Layer 5 STUB: SPY vs 50-day SMA. Refined in Phase 4 (VIX, breadth)."""
     try:
         spy = daily.xs("SPY", level="symbol")["close"]
-        return "risk_on" if spy.iloc[-1] > spy.rolling(50).mean().iloc[-1] else "risk_off"
+        # min_periods=30 is a safety net: if the window is ever short, degrade to
+        # an SMA of available bars instead of silently NaN-ing into risk_off.
+        sma = spy.rolling(50, min_periods=30).mean().iloc[-1]
+        return "risk_on" if spy.iloc[-1] > sma else "risk_off"
     except Exception:
         return "unknown"
 
