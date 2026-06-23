@@ -67,12 +67,17 @@ def _save_exec_log(rows: list) -> None:
     cfg.EXEC_LOG.write_text(json.dumps(rows, indent=2))
 
 
-def _confirm_order(client, order_id, tries: int = 8, delay: float = 0.4):
-    """Poll the order until terminal/usable: return (filled_avg_price|None, filled_qty|None,
-    status). Confirms the entry actually filled BEFORE we record a position — a rejected/expired
-    order must not write a phantom full-size position into state, and a partial fill records the
-    REAL qty. The fill price (not the signal/quote price) also feeds Layer 3 health so a stale TV
-    quote can't read a phantom loss and churn the position out seconds after entering.
+def _confirm_order(client, order_id, tries: int = 12, delay: float = 0.4):
+    """Poll the order until TERMINAL: return (filled_avg_price|None, filled_qty|None, status).
+    Confirms the entry actually filled BEFORE we record a position — a rejected/expired order must
+    not write a phantom full-size position into state, and a partial fill records the REAL qty. The
+    fill price (not the signal/quote price) also feeds Layer 3 health so a stale TV quote can't read
+    a phantom loss and churn the position out seconds after entering.
+
+    We poll to a terminal status (do NOT break on the first partial: a market order fills in
+    several prints, and breaking on the first one under-recorded the size — e.g. ARMG booked 2 of
+    10 shares, 2026-06-23). Only if it's still mid-fill after the whole window do we accept the
+    partial we've seen so far.
     """
     import time as _t
     status, fap, fqty = "", None, None
@@ -83,8 +88,6 @@ def _confirm_order(client, order_id, tries: int = 8, delay: float = 0.4):
             fap = getattr(o, "filled_avg_price", None)
             fqty = getattr(o, "filled_qty", None)
             if status in ("filled", "rejected", "canceled", "cancelled", "expired"):
-                break
-            if fap:                      # partially_filled with a usable average price
                 break
         except Exception:
             pass

@@ -302,13 +302,34 @@ def record_carry_decision(symbol: str, decision: str) -> None:
     cfg.CARRY_DECISIONS.write_text(json.dumps(d, indent=2))
 
 
-def _liquidate(sym: str) -> str:
+def _confirm_exit_fill(client, order_id, sym, tries: int = 8, delay: float = 0.4):
+    """Poll the close (market-sell) order until it reports a realized average fill price; fall
+    back to the most-recent filled sell. Returns the exit price, or None if unconfirmable in time.
+    This is what lets the journal/P&L use what we ACTUALLY got, not the pre-close health snapshot."""
+    import time as _t
+    for _ in range(tries):
+        try:
+            if order_id:
+                o = client.get_order_by_id(order_id)
+                if getattr(o, "filled_avg_price", None):
+                    return float(o.filled_avg_price)
+                if str(getattr(o, "status", "")).lower() in (
+                        "rejected", "canceled", "cancelled", "expired"):
+                    break
+        except Exception:
+            pass
+        _t.sleep(delay)
+    return _last_exit_fill(client, sym)
+
+
+def _liquidate(sym: str) -> tuple[str, float | None]:
     """Live close: cancel the symbol's open (protective stop) orders, then market-sell.
-    Returns 'ok' (closed), 'gone' (broker had no such position — already flat), or 'fail'."""
+    Returns (status, fill_price): status is 'ok' (closed), 'gone' (broker had no such position —
+    already flat), or 'fail'; fill_price is the realized average exit price when known."""
     client = _trading_client()
     if client is None:
         logger.error(f"[{sym}] no Alpaca client — cannot close")
-        return "fail"
+        return "fail", None
     try:
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
@@ -317,14 +338,15 @@ def _liquidate(sym: str) -> str:
                 client.cancel_order_by_id(o.id)
             except Exception as e:
                 logger.debug(f"[{sym}] cancel {o.id} failed: {e}")
-        client.close_position(sym)
-        return "ok"
+        resp = client.close_position(sym)
+        fill_px = _confirm_exit_fill(client, getattr(resp, "id", None), sym)
+        return "ok", fill_px
     except Exception as e:
         msg = str(e).lower()
         if any(k in msg for k in ("not exist", "no position", "404", "not found")):
-            return "gone"           # already flat at the broker — safe to mark closed
+            return "gone", None     # already flat at the broker — safe to mark closed
         logger.error(f"[{sym}] liquidate failed: {e}")
-        return "fail"
+        return "fail", None
 
 
 def _reprotect(sym: str, p: dict) -> bool:
@@ -384,9 +406,8 @@ def _ensure_gtc_stop(sym: str, p: dict, dry_run: bool = False) -> bool:
 def _close(sym: str, p: dict, h: dict, reason: str, state: dict, dry_run: bool) -> None:
     """Exit a position: (live) liquidate, then journal + state P&L + Telegram, regardless of mode."""
     price = h["price"]
-    pnl = round((price - p["entry"]) * p["qty"], 2)
     if not dry_run:
-        status = _liquidate(sym)
+        status, fill_px = _liquidate(sym)
         if status == "fail":
             # Close failed AFTER the protective stop was cancelled. Re-protect, KEEP the position
             # so the next pass / reconcile retries, and page the operator. Never journal a phantom
@@ -396,11 +417,18 @@ def _close(sym: str, p: dict, h: dict, reason: str, state: dict, dry_run: bool) 
                         f"🚨 APEX FAILED to close <b>{sym}</b> ({int(p['qty'])} sh). Position kept; "
                         f"stop {('re-placed @ $%.2f' % float(p['stop'])) if reprotected else 'RE-PLACE FAILED — MANUAL ACTION NOW'}. Will retry.")
             return
+        # Book the REALIZED exit fill, not the pre-close health snapshot, so journal/P&L/loss-limit
+        # reflect what we actually got (the snapshot understated fades, e.g. QH -37→-43).
+        if fill_px and fill_px > 0:
+            price = fill_px
+    entry = float(p["entry"])
+    pnl = round((price - entry) * p["qty"], 2)
+    gain_pct = round((price - entry) / entry * 100, 2) if entry else h["gain_pct"]
     record = {
         "timestamp": datetime.now(ET).isoformat(), "symbol": sym,
-        "trigger": p.get("trigger"), "entry": round(float(p["entry"]), 4),
+        "trigger": p.get("trigger"), "entry": round(entry, 4),
         "exit": round(price, 4), "qty": p["qty"], "pnl": pnl,
-        "gain_pct": h["gain_pct"], "health_at_exit": h["health"],
+        "gain_pct": gain_pct, "health_at_exit": h["health"],
         "peak_gain": round(p.get("peak_gain", h["gain_pct"]), 2),
         "status_at_exit": p.get("status", "intraday"), "days_held": p.get("days_held", 0),
         "entry_window": p.get("entry_window", "normal"),

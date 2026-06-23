@@ -21,7 +21,9 @@ def patch_health(liquidate_ret=None, reprotect_ret=True):
     H.send_telegram = lambda m: ALERTS.append(m)
     H._journal_exit = lambda r: JOURNAL.append(r)
     if liquidate_ret is not None:
-        H._liquidate = lambda s: liquidate_ret
+        # _liquidate now returns (status, fill_price); accept a bare status for convenience.
+        ret = liquidate_ret if isinstance(liquidate_ret, tuple) else (liquidate_ret, None)
+        H._liquidate = lambda s: ret
     H._reprotect = lambda s, p: reprotect_ret
 
 # ── A. _close honors liquidation result ───────────────────────────────────────────
@@ -40,6 +42,12 @@ st = {"daily_pnl": 0.0, "positions": {"OKX": {"entry": 10.0, "stop": 9.5, "qty":
 H._close("OKX", st["positions"]["OKX"], {"price": 11.0, "health": 30, "gain_pct": 10.0}, "test", st, dry_run=False)
 check("position closed on ok", "OKX" not in st["positions"])
 check("journaled on ok", len(JOURNAL) == 1 and JOURNAL[0]["pnl"] == 100.0)
+# ok WITH a realized fill price -> P&L/exit booked on the fill, not the health snapshot
+patch_health(liquidate_ret=("ok", 10.80))
+st = {"daily_pnl": 0.0, "positions": {"FILLX": {"entry": 10.0, "stop": 9.5, "qty": 100, "health": 30}}}
+H._close("FILLX", st["positions"]["FILLX"], {"price": 11.0, "health": 30, "gain_pct": 10.0}, "test", st, dry_run=False)
+check("exit booked on realized fill (not snapshot)",
+      JOURNAL[0]["exit"] == 10.8 and JOURNAL[0]["pnl"] == 80.0 and st["daily_pnl"] == 80.0)
 # gone -> treat as closed
 patch_health(liquidate_ret="gone")
 st = {"daily_pnl": 0.0, "positions": {"GONEX": {"entry": 10.0, "stop": 9.5, "qty": 100, "health": 30}}}
