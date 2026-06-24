@@ -421,34 +421,6 @@ if page == "Positions":
         hide_index=True,
     )
 
-    # ── Manual override — close / trim a live position (same close_now() as the Telegram buttons) ──
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).parent))
-    try:
-        import apex_actions as _AA
-        _override_on = _AA.manual_override_enabled()
-    except Exception as _e:
-        _AA, _override_on = None, False
-
-    with st.expander("⚡ Manual actions — close / trim", expanded=False):
-        if _AA is None:
-            st.caption("apex_actions unavailable.")
-        elif not _override_on:
-            st.caption("Manual override is OFF — set APEX_MANUAL_OVERRIDE=true to enable.")
-        else:
-            for _r in rows:
-                _sym = _r["_sym"]
-                cA, cB, cC, cD = st.columns([2, 1, 1, 1.3])
-                cA.write(f"**{_sym}** · {_r['Shares']} sh · {_r['P&L %']}")
-                if cB.button("❌ Close", key=f"mo_close_{_sym}"):
-                    st.session_state[f"mo_res_{_sym}"] = _AA.close_now(_sym, 1.0)
-                if cC.button("✂️ Trim ½", key=f"mo_trim_{_sym}"):
-                    st.session_state[f"mo_res_{_sym}"] = _AA.close_now(_sym, 0.5)
-                if cD.button("🚫 Close+block", key=f"mo_block_{_sym}"):
-                    st.session_state[f"mo_res_{_sym}"] = _AA.close_now(_sym, 1.0, block=True)
-                if st.session_state.get(f"mo_res_{_sym}"):
-                    st.success(str(st.session_state[f"mo_res_{_sym}"]))
-
     st.divider()
 
     # Per-position detail cards

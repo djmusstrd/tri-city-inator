@@ -77,6 +77,20 @@ overnight swing — it **carries by default** unless you deny it before the 3:00
 Carried positions become swings, managed daily by the swing manager (not the intraday engine).
 Set `APEX_ALLOW_OVERNIGHT_CARRY=false` to flatten everything at EOD (intraday-only validation).
 
+### Manual override — close / trim from the alert
+The mechanized give-back exit didn't beat the baseline (see `docs/PRD_APEX_DYNAMIC_EXIT.md`), so
+profit-protection is a **fast human override**, not another rule. The health-decay alert shows the
+give-back at a glance (`peak +8.6% (gave back 86%)`) and carries action buttons; if you don't tap,
+the existing rules run unchanged (safe-by-default).
+- **Phone (Telegram)** — on a health alert, or send **`/positions`** to list open trades:
+  - **📈 Chart** — open the TradingView chart · **❌ Close** — full close now
+  - **✂️ Trim ½** — sell half, re-stop the runner · **🚫 Close+block** — close + blacklist re-entry today
+- **Dashboard** → Live Positions → **⚡ Manual actions** expander — same Close / Trim ½ / Close+block.
+- Acts at **current market** when tapped (~30s via the poller's inner Telegram poll, off the
+  equity-market gate). Idempotent: a name already flat is a no-op.
+- Gated by `APEX_MANUAL_OVERRIDE` (and a live `manual_override` kill-switch in `apex-flags.json`);
+  `APEX_OVERRIDE_CONFIRM=true` requires a 2nd confirming tap.
+
 ---
 
 ## How to monitor (3 channels)

@@ -614,6 +614,31 @@ if page == "Live Positions":
             st.caption("⚠ 'engine-only' = tracked by APEX but not yet confirmed in the Alpaca "
                        "account (order pending/unfilled).")
         st.divider()
+
+        # ── Manual override — close / trim (same close_now() as the Telegram buttons) ──
+        try:
+            import apex_actions as _AA
+            _ov = _AA.manual_override_enabled()
+        except Exception:
+            _AA, _ov = None, False
+        with st.expander("⚡ Manual actions — close / trim", expanded=False):
+            if _AA is None:
+                st.caption("apex_actions unavailable.")
+            elif not _ov:
+                st.caption("Manual override is OFF — set APEX_MANUAL_OVERRIDE=true to enable.")
+            else:
+                for _r in rows:
+                    _sym = _r["symbol"]
+                    cc = st.columns([2, 1, 1, 1.3])
+                    cc[0].write(f"**{_sym}** · {_r.get('qty')} sh")
+                    if cc[1].button("❌ Close", key=f"mo_close_{_sym}"):
+                        st.session_state[f"mo_res_{_sym}"] = str(_AA.close_now(_sym, 1.0)); st.rerun()
+                    if cc[2].button("✂️ Trim ½", key=f"mo_trim_{_sym}"):
+                        st.session_state[f"mo_res_{_sym}"] = str(_AA.close_now(_sym, 0.5)); st.rerun()
+                    if cc[3].button("🚫 Close+block", key=f"mo_block_{_sym}"):
+                        st.session_state[f"mo_res_{_sym}"] = str(_AA.close_now(_sym, 1.0, block=True)); st.rerun()
+                    if st.session_state.get(f"mo_res_{_sym}"):
+                        st.success(st.session_state[f"mo_res_{_sym}"])
         sym = st.selectbox("Inspect position", syms)
         p = positions.get(sym, {})
         entry = apos.get(sym, {}).get("avg_entry", p.get("entry"))
