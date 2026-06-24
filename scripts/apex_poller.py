@@ -339,9 +339,19 @@ def run_live(dry_run: bool) -> None:
     def _sleep(secs: int) -> None:
         # Interruptible sleep: SIGTERM/SIGINT doesn't break time.sleep (PEP 475 retries it),
         # so poll running[] in 1s steps → prompt shutdown, no lingering duplicate poller.
-        for _ in range(max(1, int(secs))):
+        # When manual-override is enabled, ALSO poll Telegram for button taps every ~30s during the
+        # sleep, so a tap is actioned in ~30s REGARDLESS of the equity-market gate (works off-hours /
+        # crypto / extended hours). Single getUpdates consumer — this poller. No-op when override off.
+        for i in range(max(1, int(secs))):
             if not running[0]:
                 return
+            if i and i % 30 == 0:
+                try:
+                    import apex_actions, apex_telegram
+                    if apex_actions.manual_override_enabled():
+                        apex_telegram.poll_replies(state)
+                except Exception as e:
+                    logger.debug(f"override poll failed: {e}")
             time.sleep(1)
 
     state = load_state()
