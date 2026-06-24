@@ -67,6 +67,28 @@ def _handle_callback_update(cb: dict) -> int:
     return 1
 
 
+def _send_positions() -> int:
+    """`/positions` — list open trades, each with the override buttons, so the operator can act on a
+    name that didn't alert. Gated on manual-override (the buttons are the point)."""
+    if not apex_actions.manual_override_enabled():
+        send_telegram("Manual override is OFF — /positions buttons disabled.")
+        return 1
+    try:
+        positions = json.loads(cfg.STATE_FILE.read_text()).get("positions", {})
+    except Exception:
+        positions = {}
+    if not positions:
+        send_telegram("📋 No open APEX positions.")
+        return 1
+    for sym, p in positions.items():
+        gain, peak = p.get("gain_pct"), p.get("peak_gain")
+        msg = (f"📋 <b>{sym}</b> · {p.get('qty')} sh @ ${p.get('entry')}"
+               + (f" · {gain:+.1f}%" if gain is not None else "")
+               + (f" (peak {peak:+.1f}%)" if peak else ""))
+        send_telegram(msg, reply_markup=apex_actions.override_keyboard(sym))
+    return 1
+
+
 def poll_replies(state: dict | None = None) -> int:
     """Fetch new Telegram updates: apply deny/keep text commands AND manual-override button taps.
     Returns # of actions handled."""
@@ -95,6 +117,9 @@ def poll_replies(state: dict | None = None) -> int:
         msg = upd.get("message") or {}
         chat_id = str((msg.get("chat") or {}).get("id", ""))
         if cfg.TELEGRAM_CHAT_ID and chat_id != str(cfg.TELEGRAM_CHAT_ID):
+            continue
+        if (msg.get("text") or "").strip().lower() in ("/positions", "positions"):
+            recorded += _send_positions()
             continue
         parts = (msg.get("text") or "").strip().split()
         if len(parts) < 2 or parts[0].lower() not in ("deny", "keep", "approve"):
