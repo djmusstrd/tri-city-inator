@@ -106,11 +106,14 @@ Enrich the health-decay alert so the give-back is visible before opening the cha
 - ✅ Idempotent no-op on a flat/already-closed name (`gone`).
 - ✅ Callback dispatch logic: default-OFF, keyboard structure, bad-action, 2-tap confirm guard.
 - ✅ **LIVE round-trip: real Telegram button tap → poll_replies → close_now → position flat** (~22s).
+- ✅ Health-decay alert: give-back line (`peak X% (gave back Y%)`) + override buttons attached (flag-gated).
+- ✅ Always-on ~30s inner poll (`_sleep` polls Telegram off the equity-market gate; no-op when off).
+- ✅ `/positions` command — lists open trades with buttons (off / flat / with-position all verified).
+- ✅ Dashboard: flag-gated "Manual actions" expander on the Positions page (same `close_now`).
 - ⏳ Equity-only, still to verify with a market-open position: cancel-protective-stop-first under
   share reservation; the trim remainder re-stop (`StopOrderRequest`). Both reuse primitives proven
   on equities 2026-06-24.
-- ⏳ Not yet built: health-alert button attach + give-back line; always-on ~30s inner poll
-  (decouple from the equity-market gate); `/positions`; dashboard buttons.
+- ⏳ Dashboard buttons need one browser click-test; then flip `APEX_MANUAL_OVERRIDE=true` to go live.
 
 ## 5. Validation / rollout
 1. Paper: exercise each button on a live-paper position; verify §4 checklist.
