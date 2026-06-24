@@ -183,11 +183,16 @@ def telegram_carry_message(sym: str, health, gain_pct, info: str = "") -> str:
     )
 
 
-def telegram_health_message(sym: str, health, reasons: list, gain_pct) -> str:
-    """Momentum-decay warning — Decision = still holding, watching."""
+def telegram_health_message(sym: str, health, reasons: list, gain_pct, peak_gain=None) -> str:
+    """Momentum-decay warning — Decision = still holding, watching. Shows give-back from peak at a
+    glance so the operator can judge a manual exit (the override buttons ride on this alert)."""
+    gb = ""
+    if peak_gain is not None and peak_gain > 0:
+        pct_back = max(0.0, peak_gain - gain_pct) / peak_gain * 100
+        gb = f" · peak {peak_gain:+.1f}% (gave back {pct_back:.0f}%)"
     return (
         f"⚠️ <b>APEX HEALTH — {sym}</b>\n\n"
-        f"<b>Health:</b> {health} ({'; '.join(reasons)}) · {gain_pct:+.1f}%\n\n"
+        f"<b>Health:</b> {health} ({'; '.join(reasons)}) · {gain_pct:+.1f}%{gb}\n\n"
         f"🤖 <b>Decision</b>\nHOLDING — watching; proactive exit if health &lt; 40."
     )
 

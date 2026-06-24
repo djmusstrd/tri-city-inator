@@ -561,9 +561,13 @@ def manage_positions(intraday: dict, state: dict, regime: str, dry_run: bool,
                 actions += 1
             continue
 
-        # 3. Health-decay warning — crossed below 60 from a healthier reading.
+        # 3. Health-decay warning — crossed below 60 from a healthier reading. Attach the manual-
+        #    override buttons (Chart/Close/Trim/Close+block) when enabled so the operator can react.
         if prev >= 60 and h["health"] < 60:
-            send_telegram(telegram_health_message(sym, h["health"], h["reasons"], h["gain_pct"]))
+            import apex_actions
+            kb = apex_actions.override_keyboard(sym) if apex_actions.manual_override_enabled() else None
+            send_telegram(telegram_health_message(sym, h["health"], h["reasons"], h["gain_pct"],
+                                                  p.get("peak_gain")), reply_markup=kb)
             logger.info(f"[{sym}] health decay {prev}->{h['health']} ({'; '.join(h['reasons'])})")
     return actions
 
