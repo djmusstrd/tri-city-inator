@@ -99,6 +99,19 @@ Enrich the health-decay alert so the give-back is visible before opening the cha
 - [ ] Only one `getUpdates` consumer; trade-pass cadence unaffected by the inner poll.
 - [ ] TV link opens the correct symbol+exchange at the ORB interval.
 
+## 4b. Validation log (2026-06-24, paper crypto — 24/7 lets us test off-hours)
+- ✅ `close_now` FULL close on a live position (BTC) — closed, no journal (reconcile owns it).
+- ✅ `close_now` PARTIAL trim on a live position (DOGE 192u) — sold 96, 96 left, one partial journal
+  entry with correct fields; trim-too-small (fractional BTC) safely fell back to full close.
+- ✅ Idempotent no-op on a flat/already-closed name (`gone`).
+- ✅ Callback dispatch logic: default-OFF, keyboard structure, bad-action, 2-tap confirm guard.
+- ✅ **LIVE round-trip: real Telegram button tap → poll_replies → close_now → position flat** (~22s).
+- ⏳ Equity-only, still to verify with a market-open position: cancel-protective-stop-first under
+  share reservation; the trim remainder re-stop (`StopOrderRequest`). Both reuse primitives proven
+  on equities 2026-06-24.
+- ⏳ Not yet built: health-alert button attach + give-back line; always-on ~30s inner poll
+  (decouple from the equity-market gate); `/positions`; dashboard buttons.
+
 ## 5. Validation / rollout
 1. Paper: exercise each button on a live-paper position; verify §4 checklist.
 2. Run a session with it enabled; confirm taps action in ~30s and non-taps change nothing.
