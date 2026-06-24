@@ -64,6 +64,10 @@ GRAD_DAYS     = int(os.getenv("APEX_GRAD_DAYS", "5"))        # days_held to grad
 # (Telegram + dashboard) and carries them BY DEFAULT unless you deny in the close window; the
 # swing manager then owns them. When false, everything flattens at EOD (intraday-only validation).
 ALLOW_OVERNIGHT_CARRY = os.getenv("APEX_ALLOW_OVERNIGHT_CARRY", "true").lower() == "true"
+
+# ── Manual override (Telegram/dashboard close buttons) ── default OFF until validated live ──
+MANUAL_OVERRIDE  = os.getenv("APEX_MANUAL_OVERRIDE", "false").lower() == "true"
+OVERRIDE_CONFIRM = os.getenv("APEX_OVERRIDE_CONFIRM", "false").lower() == "true"   # require a 2nd tap
 CARRY_DECISIONS = SHARED / "apex-carry-decisions.json"   # dashboard approve/deny for pending carries
 
 # ── Swing tier (daily-bar management, runs independent of the intraday poller) ────────

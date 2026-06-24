@@ -53,17 +53,19 @@ def build_rationale(signal, rs_pct, score, regime, entry_price, stop, atr, qty) 
     }
 
 
-def send_telegram(msg: str) -> None:
-    """Shared HTML Telegram sender (entry, exit, health, carry alerts). No-op if unconfigured."""
+def send_telegram(msg: str, reply_markup: dict | None = None) -> None:
+    """Shared HTML Telegram sender (entry, exit, health, carry alerts). No-op if unconfigured.
+    `reply_markup` (optional) attaches an inline keyboard (e.g. the manual-override buttons)."""
     from apex_config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         import urllib.parse, urllib.request as _ur
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = urllib.parse.urlencode(
-            {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
-        ).encode()
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        data = urllib.parse.urlencode(payload).encode()
         _ur.urlopen(_ur.Request(url, data=data), timeout=5)
     except Exception:
         pass

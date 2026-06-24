@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.parse
 import urllib.request
 
 import apex_config as cfg
+import apex_actions
 from apex_health import record_carry_decision
 from apex_rationale import send_telegram
 
@@ -41,13 +43,39 @@ def _set_offset(o: int) -> None:
         pass
 
 
+def _answer_callback(cb_id: str | None, text: str = "") -> None:
+    """Acknowledge a button tap so Telegram clears the spinner."""
+    if not cb_id or not cfg.TELEGRAM_BOT_TOKEN:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{cfg.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+        data = urllib.parse.urlencode({"callback_query_id": cb_id, "text": text[:190]}).encode()
+        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=5)
+    except Exception as e:
+        logger.debug(f"answerCallbackQuery failed: {e}")
+
+
+def _handle_callback_update(cb: dict) -> int:
+    """A manual-override button tap → close_now via apex_actions, ack, and confirm back."""
+    cb_chat = str(((cb.get("message") or {}).get("chat") or {}).get("id", ""))
+    if cfg.TELEGRAM_CHAT_ID and cb_chat != str(cfg.TELEGRAM_CHAT_ID):
+        return 0
+    result = apex_actions.handle_callback(cb.get("data", ""))
+    _answer_callback(cb.get("id"))
+    send_telegram(result)
+    logger.info(f"telegram callback: {cb.get('data')} → {result}")
+    return 1
+
+
 def poll_replies(state: dict | None = None) -> int:
-    """Fetch new Telegram messages, apply any deny/keep commands. Returns # decisions recorded."""
+    """Fetch new Telegram updates: apply deny/keep text commands AND manual-override button taps.
+    Returns # of actions handled."""
     if not cfg.TELEGRAM_BOT_TOKEN:
         return 0
     offset = _get_offset()
+    allowed = urllib.parse.quote(json.dumps(["message", "callback_query"]))
     url = (f"https://api.telegram.org/bot{cfg.TELEGRAM_BOT_TOKEN}/getUpdates"
-           f"?timeout=0&offset={offset + 1}&allowed_updates=%5B%22message%22%5D")
+           f"?timeout=0&offset={offset + 1}&allowed_updates={allowed}")
     try:
         with urllib.request.urlopen(url, timeout=8) as r:
             data = json.loads(r.read())
@@ -60,6 +88,10 @@ def poll_replies(state: dict | None = None) -> int:
     recorded = 0
     for upd in data.get("result", []):
         _set_offset(upd["update_id"])
+        cb = upd.get("callback_query")
+        if cb:
+            recorded += _handle_callback_update(cb)
+            continue
         msg = upd.get("message") or {}
         chat_id = str((msg.get("chat") or {}).get("id", ""))
         if cfg.TELEGRAM_CHAT_ID and chat_id != str(cfg.TELEGRAM_CHAT_ID):

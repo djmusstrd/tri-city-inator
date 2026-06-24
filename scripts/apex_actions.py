@@ -141,6 +141,71 @@ def close_now(symbol: str, fraction: float = 1.0, block: bool = False) -> dict:
         return {"symbol": symbol, "action": "trim", "status": "fail", "reason": str(e)}
 
 
+# ── Telegram/dashboard manual-override surface ─────────────────────────────────────
+_PENDING_CONFIRM: dict = {}                # callback_data -> expiry ts (2-tap confirm guard)
+_CONFIRM_WINDOW = 30.0
+_ACTIONS = {"close": (1.0, False), "trim": (0.5, False), "closeblock": (1.0, True)}
+
+
+def manual_override_enabled() -> bool:
+    """True only if the env flag is on AND the live kill-switch in apex-flags.json isn't false.
+    The flags check is read each call, so it can be disabled mid-session with no restart."""
+    if not cfg.MANUAL_OVERRIDE:
+        return False
+    try:
+        return bool(apex_flags.load_flags().get("manual_override", True))
+    except Exception:
+        return True
+
+
+def override_keyboard(symbol: str, exchange: str | None = None) -> dict:
+    """Inline keyboard for an alert: a chart link + the three action buttons."""
+    sym = symbol.upper()
+    return {"inline_keyboard": [
+        [{"text": "📈 Chart", "url": tv_chart_url(symbol, exchange)}],
+        [{"text": "❌ Close", "callback_data": f"close:{sym}"},
+         {"text": "✂️ Trim ½", "callback_data": f"trim:{sym}"},
+         {"text": "🚫 Close+block", "callback_data": f"closeblock:{sym}"}],
+    ]}
+
+
+def _fmt_result(r: dict) -> str:
+    s, sym = r.get("status"), r.get("symbol")
+    if s == "gone":
+        return f"{sym}: already flat — no action."
+    if s == "fail":
+        return f"⚠️ {sym}: action FAILED ({r.get('reason', '?')}). Check the broker."
+    if r.get("action") == "trim" and s == "ok":
+        tail = " (re-stopped)" if r.get("restopped") else " (NO stop — verify!)"
+        return (f"✂️ {sym}: trimmed {r.get('sold')} sh @ ${r.get('fill')}, "
+                f"{r.get('remaining')} left{tail}.")
+    blk = " · re-entry blocked today" if r.get("blocked") else ""
+    return f"❌ {sym}: closed @ ${r.get('fill')}{blk}."
+
+
+def handle_callback(data: str) -> str:
+    """Dispatch a button tap ('action:SYM') to close_now, honoring the 2-tap confirm guard when
+    APEX_OVERRIDE_CONFIRM is on. Returns a short human result for the Telegram confirmation."""
+    if not manual_override_enabled():
+        return "Manual override is OFF."
+    try:
+        action, sym = data.split(":", 1)
+    except ValueError:
+        return "Unrecognized button."
+    if action not in _ACTIONS:
+        return f"Unknown action: {action}."
+    fraction, block = _ACTIONS[action]
+    if cfg.OVERRIDE_CONFIRM:
+        import time
+        now = time.time()
+        if now > _PENDING_CONFIRM.get(data, 0):
+            _PENDING_CONFIRM[data] = now + _CONFIRM_WINDOW
+            verb = {"close": "CLOSE", "trim": "TRIM ½", "closeblock": "CLOSE + BLOCK"}[action]
+            return f"⚠️ Tap again within {int(_CONFIRM_WINDOW)}s to confirm {verb} {sym}."
+        _PENDING_CONFIRM.pop(data, None)
+    return _fmt_result(close_now(sym, fraction=fraction, block=block))
+
+
 if __name__ == "__main__":   # quick manual check (safe on a flat account → 'gone')
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     print("tv_chart_url:", tv_chart_url("RXT", "NASDAQ"))
