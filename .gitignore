@@ -39,3 +39,4 @@ logs/reports/
 .vscode/
 .idea/
 *.swp
+.gstack/
