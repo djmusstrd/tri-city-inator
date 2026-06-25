@@ -68,4 +68,50 @@ fi
 echo "• starting APEX poller…"
 bash "$TC/scripts/start_apex_poller.sh" $DRY
 
-echo "════════ APEX ready to trade ════════"
+# ── 4. Verify the system actually came up — heal once, else alert LOUD ───────────
+# Why: a silent half-up bootstrap (TV without CDP, a poller that started then crashed, stale
+# leaders) used to look like success and need a manual re-run. This block re-checks each piece,
+# heals once, and if anything is still down it fails loud (stderr banner + macOS notification)
+# instead of pretending it's ready.
+echo "──────── verifying bootstrap ────────"
+FAIL=""
+
+# CDP / real-time feed — one retry if it never came up
+if ! cdp_up && [ -x "$TV_BIN" ]; then
+    echo "⚠ CDP down after launch — retrying TradingView once…"
+    kill "$(pgrep -x TradingView)" 2>/dev/null; sleep 2
+    nohup "$TV_BIN" --remote-debugging-port=$CDP_PORT >/dev/null 2>&1 &
+    for _ in $(seq 1 12); do sleep 4; cdp_up && break; done
+fi
+if cdp_up; then echo "✓ CDP up"
+else echo "✗ CDP DOWN — poller falls back to delayed Alpaca bars"; FAIL="$FAIL CDP"; fi
+
+# Leaders — rebuild once if not today's
+LEAD_DATE=$("$PYTHON" -c "import json;print(json.load(open('$TC/shared/apex-leaders.json'))['date'])" 2>/dev/null)
+if [ "$LEAD_DATE" != "$TODAY" ]; then
+    echo "⚠ leaders stale ($LEAD_DATE) — rebuilding…"
+    "$PYTHON" -W ignore "$TC/scripts/apex_daily_filter.py" 2>&1 | tail -1
+    LEAD_DATE=$("$PYTHON" -c "import json;print(json.load(open('$TC/shared/apex-leaders.json'))['date'])" 2>/dev/null)
+fi
+if [ "$LEAD_DATE" = "$TODAY" ]; then
+    N=$("$PYTHON" -c "import json;print(len(json.load(open('$TC/shared/apex-leaders.json'))['leaders']))" 2>/dev/null)
+    echo "✓ leaders fresh ($N for $TODAY)"
+else echo "✗ leaders NOT built for today — entries impossible"; FAIL="$FAIL leaders"; fi
+
+# Poller — must be alive; restart once if dead, then confirm it stayed up (catches start-then-crash)
+poller_alive() { local p; p=$(cat "$TC/shared/apex-poller.pid" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+if ! poller_alive; then
+    echo "⚠ poller not alive — (re)starting…"
+    bash "$TC/scripts/start_apex_poller.sh" $DRY
+    sleep 3
+fi
+if poller_alive; then echo "✓ poller alive (PID $(cat "$TC/shared/apex-poller.pid"))"
+else echo "✗ poller DEAD — no trading"; FAIL="$FAIL poller"; fi
+
+# Verdict
+if [ -z "$FAIL" ]; then
+    echo "════════ APEX ready to trade ✓ ════════"
+else
+    echo "════════ ⚠ APEX BOOTSTRAP INCOMPLETE —$FAIL — needs attention ════════" >&2
+    osascript -e "display notification \"down:$FAIL\" with title \"⚠ APEX bootstrap incomplete\"" 2>/dev/null || true
+fi
