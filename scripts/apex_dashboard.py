@@ -48,6 +48,45 @@ st.set_page_config(page_title="APEX", page_icon="🚀", layout="wide",
                    initial_sidebar_state="expanded")
 
 
+# ── Access gate (shared password; bookmarkable via ?k=<pw>). Set DASH_PASSWORD in .env. ──
+def _require_password():
+    import hmac
+    pw = os.getenv("DASH_PASSWORD", "")
+    if not pw:
+        return
+    try:
+        tok = st.query_params.get("k", "")
+    except Exception:
+        try:
+            tok = st.experimental_get_query_params().get("k", [""])[0]
+        except Exception:
+            tok = ""
+    if tok and hmac.compare_digest(tok, pw):
+        st.session_state["_auth_ok"] = True
+    if st.session_state.get("_auth_ok"):
+        try:
+            if st.query_params.get("k", "") != pw:
+                st.query_params["k"] = pw
+        except Exception:
+            pass
+        return
+
+    def _verify():
+        if hmac.compare_digest(st.session_state.get("_pw_input", ""), pw):
+            st.session_state["_auth_ok"] = True
+            st.session_state.pop("_pw_input", None)
+        else:
+            st.session_state["_auth_ok"] = False
+
+    st.text_input("🔒 Password", type="password", key="_pw_input", on_change=_verify)
+    if st.session_state.get("_auth_ok") is False:
+        st.error("Incorrect password")
+    st.stop()
+
+
+_require_password()
+
+
 # ── data loaders ─────────────────────────────────────────────────────────────
 def _load_json(path: Path, default):
     if path.exists():
