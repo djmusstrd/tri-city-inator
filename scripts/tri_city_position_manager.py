@@ -1462,6 +1462,21 @@ def reconcile_bracket_stops(today: str, open_tickers: set) -> list[str]:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def _owned_positions(today: str) -> list:
+    """Open positions Tri-City actually entered TODAY.
+
+    Tri-City may share an Alpaca account with other strategies (e.g. Compounder's Gap-and-Go
+    Momentum on the same keys). This manager must ONLY manage — and especially only EOD-flatten —
+    positions it opened itself, never another strategy's. Ownership = a Tri-City execution record
+    for today. (Caveat: if two strategies enter the SAME symbol the same day on one account,
+    Alpaca aggregates them into one position and attribution is ambiguous — the real fix is a
+    dedicated Alpaca account per strategy.)
+    """
+    owned = {e.get("symbol") for e in load_executions()
+             if e.get("date") == today and e.get("success") and e.get("symbol")}
+    return [p for p in get_open_positions() if p.get("ticker") in owned]
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Tri-City position manager")
@@ -1478,7 +1493,7 @@ def main():
     if not args.status and (now < market_open or now > market_close):
         return  # Silent outside market hours
 
-    positions = get_open_positions()
+    positions = _owned_positions(today)
     open_tickers = {p["ticker"] for p in positions}
 
     # Reconcile any bracket stops that fired via Alpaca without our manager seeing them
@@ -1497,21 +1512,21 @@ def main():
 
     if not args.eod:
         all_actions += check_supertrend_exit(positions, today)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_failed_pullback(positions, today, now)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_quick_lock(positions, today, now)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_free_ride(positions, today)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_targets(positions, today)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_rvol_collapse(positions, today)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_idle_timeout(positions, today, now)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_trailing(positions, today)
-        positions = get_open_positions()
+        positions = _owned_positions(today)
         all_actions += check_ema20_reclaim_advisory(positions, today)
         all_actions += check_ema8_exit(positions, today)
 
