@@ -923,7 +923,7 @@ def _evaluate_and_execute(
 
     # All guards passed — delegate to tri_city_execute.py
     cmd = [
-        "python", "-W", "ignore",
+        sys.executable, "-W", "ignore",
         str(SCRIPTS / "tri_city_execute.py"),
         "--symbol",  symbol,
         "--price",   str(round(price,   4)),

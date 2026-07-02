@@ -46,7 +46,7 @@ def main():
           f"stop=${entry.get('stop', 'N/A')} {entry.get('shares', 0)}sh")
 
     cmd = [
-        "python", "-W", "ignore",
+        sys.executable, "-W", "ignore",
         str(SCRIPTS / "tri_city_execute.py"),
         "--symbol",  symbol,
         "--price",   str(entry["price"]),

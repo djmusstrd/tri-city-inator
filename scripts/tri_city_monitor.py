@@ -148,7 +148,7 @@ def parse_execute_output(output: str, sig: dict) -> dict | None:
 
 def build_execute_cmd(sig: dict) -> list[str]:
     cmd = [
-        "python", "-W", "ignore",
+        sys.executable, "-W", "ignore",
         str(SCRIPTS / "tri_city_execute.py"),
         "--symbol",  sig["symbol"],
         "--price",   str(sig["price"]),
@@ -184,7 +184,7 @@ def main() -> None:
 
     if not table_is_fresh():
         # Table stale — skip signal detection but still run position management
-        rc, pm_out = run(["python", "-W", "ignore",
+        rc, pm_out = run([sys.executable, "-W", "ignore",
                            str(SCRIPTS / "tri_city_position_manager.py")])
         logger.info(f"PosMgr (no table): {pm_out[:200] or '(silent)'}")
         pos_events = [ln.strip() for ln in pm_out.splitlines() if ln.strip()] if pm_out else []
@@ -192,7 +192,7 @@ def main() -> None:
         return
 
     # Step 1: signal detector
-    rc, det_out = run(["python", "-W", "ignore",
+    rc, det_out = run([sys.executable, "-W", "ignore",
                         str(SCRIPTS / "tri_city_signal_detector.py")])
     if rc != 0:
         logger.error(f"Detector rc={rc}: {det_out[:300]}")
@@ -226,7 +226,7 @@ def main() -> None:
             events.append({"type": "resistance", "symbol": sig["symbol"]})
 
     # Step 4: position manager
-    rc, pm_out = run(["python", "-W", "ignore",
+    rc, pm_out = run([sys.executable, "-W", "ignore",
                        str(SCRIPTS / "tri_city_position_manager.py")])
     logger.info(f"PosMgr: {pm_out[:200] or '(silent)'}")
     pos_events = [ln.strip() for ln in pm_out.splitlines() if ln.strip()] if pm_out else []
