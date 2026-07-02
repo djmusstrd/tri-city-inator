@@ -92,16 +92,39 @@ for _lib in ("urllib3", "requests", "websocket"):
 # ── CDP helpers ───────────────────────────────────────────────────────────────
 
 def find_tv_target() -> dict | None:
-    """Return the TradingView chart CDP target, or None."""
+    """Return the TradingView chart CDP target that hosts the Tri-City (Kbzkkm) scanner.
+
+    One chart tab → return it directly (cheap hot path). Multiple chart tabs open →
+    probe each and return the one whose Pine table is the Inator scanner, so a stray
+    or extra chart tab can't make the poller read the wrong indicator's table (the
+    silent wrong-table bug). Falls back to the first chart tab if none probe positive.
+    """
     try:
         resp = requests.get(f"http://{CDP_HOST}:{CDP_PORT}/json/list", timeout=5)
         targets = resp.json()
-        for t in targets:
-            if t.get("type") == "page" and "tradingview.com/chart" in t.get("url", "").lower():
-                return t
     except Exception as e:
         logger.warning(f"CDP target list failed: {e}")
-    return None
+        return None
+    charts = [t for t in targets
+              if t.get("type") == "page"
+              and "tradingview.com/chart" in t.get("url", "").lower()]
+    if not charts:
+        return None
+    if len(charts) == 1:
+        return charts[0]
+    # More than one chart tab — pick the one that actually hosts the Inator scanner.
+    for t in charts:
+        ws = t.get("webSocketDebuggerUrl")
+        if not ws:
+            continue
+        try:
+            raw = cdp_evaluate(ws, _PINE_TABLE_JS)
+            if is_scanner_table(process_pine_tables(raw) if raw else None):
+                return t
+        except Exception:
+            continue
+    logger.warning(f"{len(charts)} chart tabs open, none host the Inator scanner — using first")
+    return charts[0]
 
 
 def cdp_evaluate(ws_url: str, expression: str, timeout: int = 20) -> object:
