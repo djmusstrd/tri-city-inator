@@ -153,8 +153,57 @@ def cdp_evaluate(ws_url: str, expression: str, timeout: int = 15) -> object:
         ws.close()
 
 
+def validate_symbols(symbols: list[str]) -> tuple[list[str], list[str]]:
+    """Drop symbols Alpaca doesn't list as active + tradable before pushing.
+
+    Critical: ONE invalid symbol (a delisted/SPAC ticker or wrong exchange prefix that
+    TradingView rejects, e.g. NASDAQ:RAAQ) makes the ENTIRE Pine scanner throw a runtime
+    error and blank the table — the poller then reads nothing and level-lock fails. So we
+    pre-validate against Alpaca and only push symbols that resolve. Best-effort: if Alpaca
+    isn't reachable, push as-is rather than block.
+    """
+    import os
+    env = WORKSPACE / ".env"
+    if env.exists():
+        for line in env.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k, v.strip())
+    key = os.environ.get("ALPACA_API_KEY"); sec = os.environ.get("ALPACA_SECRET_KEY")
+    if not key or not sec:
+        return symbols, []
+    try:
+        from alpaca.trading.client import TradingClient
+        tc = TradingClient(key, sec, paper=True)
+    except Exception:
+        return symbols, []
+    valid, dropped = [], []
+    for s in symbols:
+        tkr = s.split(":")[-1]
+        try:
+            a = tc.get_asset(tkr)
+            if getattr(a, "tradable", False) and str(getattr(a, "status", "")) == "AssetStatus.ACTIVE":
+                valid.append(s)
+            else:
+                dropped.append(s)
+        except Exception:
+            dropped.append(s)
+    return valid, dropped
+
+
 def push_symbols(symbols: list[str]) -> dict:
     """Push up to 20 symbols into the Tri-City Inator scanner (in_7 through in_26)."""
+    # TradingView only RECOMPUTES the Pine scanner when it is the foreground app (headless/
+    # mini defers it). Activate TradingView first so the pushed change hits the rendered table.
+    try:
+        import subprocess
+        subprocess.run(["osascript", "-e", 'tell application "TradingView" to activate'],
+                       capture_output=True, timeout=8)
+        time.sleep(1.0)
+    except Exception:
+        pass
+
     tab = get_tv_tab()
     if not tab:
         return {"error": "No TradingView chart tab found via CDP"}
@@ -191,6 +240,13 @@ def main():
     symbols = data.get("tv_symbols", [])[:20]
     if not symbols:
         logger.error("No tv_symbols in candidates file")
+        sys.exit(1)
+
+    symbols, dropped = validate_symbols(symbols)
+    if dropped:
+        logger.warning(f"Dropped {len(dropped)} invalid/non-tradable symbol(s): {dropped}")
+    if not symbols:
+        logger.error("No valid tv_symbols left after validation")
         sys.exit(1)
 
     logger.info(f"Pushing {len(symbols)} symbols: {symbols}")
