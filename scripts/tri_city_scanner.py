@@ -101,7 +101,7 @@ def compute_parkinson_trending(symbols: list[str]) -> dict[str, bool]:
     if not symbols:
         return {}
     try:
-        import yfinance as yf
+        import market_data as yf
         import math
         df = yf.download(
             symbols, period=f"{PARK_VOL_LOOKBACK * 2}d", interval="1d",
@@ -172,7 +172,7 @@ def compute_bb_squeeze(symbols: list[str]) -> dict[str, bool]:
         import math
         import random
         import time
-        import yfinance as yf
+        import market_data as yf
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def _fetch_one(sym: str) -> tuple:
@@ -228,7 +228,7 @@ def compute_earnings_flags(symbols: list[str]) -> dict[str, bool]:
     if not symbols:
         return {}
     try:
-        import yfinance as yf
+        import market_data as yf
         import random
         import time
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -349,7 +349,7 @@ def fetch_gappers() -> list[dict]:
                 _YF_TO_TV = {"NYSE": "NYSE", "NMS": "NASDAQ", "NCM": "NASDAQ",
                              "NGM": "NASDAQ", "PCX": "AMEX", "AMEX": "AMEX"}
                 try:
-                    import yfinance as yf
+                    import market_data as yf
                     _exch = yf.Ticker(ticker).fast_info.exchange or "NMS"
                     tv_prefix = _YF_TO_TV.get(_exch, "NASDAQ")
                 except Exception:
@@ -511,7 +511,7 @@ def fetch_news(symbols: list[str]) -> dict[str, dict]:
     if not symbols:
         return {}
     try:
-        import yfinance as yf
+        import market_data as yf
         import random
         import time
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -561,7 +561,7 @@ def fetch_short_interest(symbols: list[str]) -> dict[str, dict]:
     if not symbols:
         return {}
     try:
-        import yfinance as yf
+        import market_data as yf
         import random
         import time
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -596,7 +596,7 @@ def fetch_sector_etf_momentum() -> dict[str, float]:
     """
     SECTOR_ETFS = ["XLK", "XBI", "XLY", "XLE", "XLF", "IWM", "QQQ", "ARKK", "XLV", "XLI"]
     try:
-        import yfinance as yf
+        import market_data as yf
         tickers = yf.download(SECTOR_ETFS, period="2d", interval="1d",
                               progress=False, auto_adjust=True)
         if tickers.empty:
@@ -634,7 +634,7 @@ def fetch_watchlist_candidates(seed_symbols: list[str]) -> list[dict]:
     if not seed_symbols:
         return []
     try:
-        import yfinance as yf
+        import market_data as yf
         import random
         import time
 
@@ -872,7 +872,7 @@ def main():
 
     tv_symbols = []
     try:
-        import yfinance as yf
+        import market_data as yf
         for tv_sym in candidate_tv:
             bare = tv_sym.split(":")[-1]
             try:

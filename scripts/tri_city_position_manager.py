@@ -106,7 +106,7 @@ def get_intraday_ema_vwap(symbol: str) -> tuple[float | None, float | None]:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return None, None
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockSnapshotRequest, StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         from datetime import timedelta
@@ -114,7 +114,7 @@ def get_intraday_ema_vwap(symbol: str) -> tuple[float | None, float | None]:
         client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
         # VWAP from snapshot (IEX feed — no SIP required)
-        snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol, feed="iex"))
+        snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol, feed=DATA_FEED))
         s = snap.get(symbol)
         vwap = float(s.daily_bar.vwap) if s and s.daily_bar else None
 
@@ -125,7 +125,7 @@ def get_intraday_ema_vwap(symbol: str) -> tuple[float | None, float | None]:
             timeframe=TimeFrame.Minute,
             start=now - timedelta(minutes=60),
             end=now,
-            feed="iex",
+            feed=DATA_FEED,
         )
         bars = client.get_stock_bars(req)
         df = bars.df
@@ -152,7 +152,7 @@ def get_rvol(symbol: str) -> float | None:
     Same logic as tri_city_execute.py — duplicated here to keep imports simple.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         now = datetime.now(CT)
         df = yf.download(symbol, period=f"{RVOL_LOOKBACK * 2}d", interval="1d",
                          progress=False, auto_adjust=True)
@@ -197,7 +197,7 @@ def get_last_bar_close(symbol: str) -> float | None:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return None
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         from datetime import timedelta
@@ -209,7 +209,7 @@ def get_last_bar_close(symbol: str) -> float | None:
             timeframe=TimeFrame.Minute,
             start=now - timedelta(minutes=45),
             end=now,
-            feed="iex",
+            feed=DATA_FEED,
         )
         bars = client.get_stock_bars(req)
         df   = bars.df
@@ -280,7 +280,7 @@ def fetch_bars_for_supertrend(symbol: str) -> list[dict]:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return []
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         from datetime import timedelta
@@ -292,7 +292,7 @@ def fetch_bars_for_supertrend(symbol: str) -> list[dict]:
             timeframe=TimeFrame.Minute,
             start=now - timedelta(hours=2),
             end=now,
-            feed="iex",
+            feed=DATA_FEED,
         )
         df = client.get_stock_bars(req).df
         if df.empty:
@@ -1198,7 +1198,7 @@ def check_ema8_exit(positions: list, today: str) -> list[str]:
     entries = load_executions()
 
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         from datetime import timedelta
@@ -1222,7 +1222,7 @@ def check_ema8_exit(positions: list, today: str) -> list[str]:
                     timeframe=TimeFrame.Minute,
                     start=now - timedelta(minutes=60),
                     end=now,
-                    feed="iex",
+                    feed=DATA_FEED,
                 )
                 bars = client.get_stock_bars(req)
                 df   = bars.df

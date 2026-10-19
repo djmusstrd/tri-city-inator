@@ -328,7 +328,7 @@ def macd_is_bullish(symbol: str, now: datetime) -> bool | None:
         return None  # too early — skip filter
 
     try:
-        import yfinance as yf
+        import market_data as yf
         df = yf.download(symbol, period="1d", interval="2m", progress=False, auto_adjust=True)
         if df.empty or len(df) < 35:
             _macd_cache[symbol] = (now, None)
@@ -382,7 +382,7 @@ def ema_ribbon_trend(symbol: str, now: datetime) -> str | None:
             return cached
 
     try:
-        import yfinance as yf
+        import market_data as yf
         df = yf.download(symbol, period="2d", interval="2m", progress=False, auto_adjust=True)
         if df.empty or len(df) < 22:
             _ribbon_cache[symbol] = (now, None)
@@ -441,7 +441,7 @@ def fetch_vwap_data(symbol: str, now: datetime) -> dict | None:
     Returns None on any failure — callers must never block on missing data.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         import pandas as pd
 
         df = yf.download(symbol, period="1d", interval="2m", progress=False, auto_adjust=True)
@@ -533,7 +533,7 @@ def fetch_premarket_bars(symbol: str, now: datetime) -> list[dict]:
     callers must never block on missing data.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         import pandas as pd
 
         df = yf.download(symbol, period="2d", interval="2m", prepost=True,
@@ -1417,7 +1417,7 @@ def main():
     )
     if _extra_syms:
         try:
-            import yfinance as yf
+            import market_data as yf
             import pandas as pd
             _df_batch = yf.download(
                 _extra_syms, period="1d", interval="2m",

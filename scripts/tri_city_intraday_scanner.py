@@ -143,7 +143,7 @@ def fetch_intraday_movers() -> list[dict]:
                 _YF_TO_TV = {"NYSE": "NYSE", "NMS": "NASDAQ", "NCM": "NASDAQ",
                              "NGM": "NASDAQ", "PCX": "AMEX", "AMEX": "AMEX"}
                 try:
-                    import yfinance as yf
+                    import market_data as yf
                     _exch = yf.Ticker(ticker).fast_info.exchange or "NMS"
                     tv_prefix = _YF_TO_TV.get(_exch, "NASDAQ")
                 except Exception:

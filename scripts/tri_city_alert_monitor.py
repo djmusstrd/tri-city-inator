@@ -396,7 +396,7 @@ def get_alpaca_snapshot(symbol: str) -> dict | None:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return None
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockSnapshotRequest
         client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol))
@@ -435,7 +435,7 @@ def get_batch_alpaca_snapshots(symbols: list[str]) -> dict[str, dict]:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY or not symbols:
         return {}
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockSnapshotRequest
         client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         result: dict[str, dict] = {}
@@ -493,7 +493,7 @@ def compute_rsi_ema_dev(symbol: str, price: float) -> tuple[float, float]:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return 0.0, 0.0
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
@@ -545,7 +545,7 @@ def compute_rvol(symbol: str) -> float | None:
     Returns None on failure -- callers never block on missing RVOL.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         now = datetime.now(CT)
         df  = yf.download(symbol, period="30d", interval="1d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 5:
@@ -640,7 +640,7 @@ def guard_daily_loss() -> tuple[bool, str]:
 def guard_market_regime() -> tuple[bool, str]:
     """Fail open on data error -- never block on missing data."""
     try:
-        import yfinance as yf
+        import market_data as yf
         df = yf.download("SPY", period="5d", interval="1d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 2:
             return False, ""

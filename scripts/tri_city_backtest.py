@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 def fetch_daily_bars_df(symbol: str, start: datetime, end: datetime):
     """Return pandas DataFrame of daily bars using yfinance (free, no API key)."""
     try:
-        import yfinance as yf
+        import market_data as yf
         fetch_start = start - timedelta(days=80)  # Buffer for SMA50 warm-up
         df = yf.download(
             symbol,

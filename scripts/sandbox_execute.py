@@ -110,7 +110,7 @@ def _get_alpaca_client():
 def _compute_atr(symbol: str) -> float | None:
     """Compute 14-bar ATR from Alpaca 5-min bars."""
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
         from datetime import timedelta
@@ -156,11 +156,11 @@ def _compute_atr(symbol: str) -> float | None:
 def _get_quote(client, symbol: str) -> float | None:
     """Get latest ask price for entry."""
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockLatestQuoteRequest
 
         data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-        req = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed="iex")
+        req = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DATA_FEED)
         quote = data_client.get_stock_latest_quote(req)
         if symbol in quote:
             q = quote[symbol]

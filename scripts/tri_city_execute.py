@@ -490,7 +490,7 @@ def get_spy_regime() -> tuple[str, float | None]:
     Uses yfinance for prev close (free tier safe), Alpaca snapshot for today's price.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         df = yf.download("SPY", period="5d", interval="1d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 2:
             return "UNKNOWN", None
@@ -503,7 +503,7 @@ def get_spy_regime() -> tuple[str, float | None]:
         curr = None
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             try:
-                from alpaca.data.historical import StockHistoricalDataClient
+                from market_data import StockHistoricalDataClient, DATA_FEED
                 from alpaca.data.requests import StockSnapshotRequest
                 client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
                 snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols="SPY"))
@@ -534,7 +534,7 @@ def get_rvol(symbol: str) -> float | None:
     Uses yfinance for historical avg (free tier); Alpaca snapshot for today's volume.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         now = datetime.now(CT)
         df = yf.download(symbol, period=f"{RVOL_LOOKBACK * 2}d", interval="1d",
                          progress=False, auto_adjust=True)
@@ -589,7 +589,7 @@ def var_position_size(symbol: str, price: float, max_risk_dollars: float) -> int
     if not _NUMPY_AVAILABLE:
         return None
     try:
-        import yfinance as yf
+        import market_data as yf
         df = yf.download(symbol, period=f"{VAR_LOOKBACK * 2}d", interval="1d",
                          progress=False, auto_adjust=True)
         if df.empty or len(df) < 20:
@@ -634,7 +634,7 @@ def get_adr(symbol: str, period: int = 10) -> float | None:
     Returns None on any failure — caller falls back to structural stop as-is.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         df = yf.download(symbol, period=f"{period * 3}d", interval="1d",
                          progress=False, auto_adjust=True)
         if df.empty or len(df) < period:
@@ -657,7 +657,7 @@ def get_atr(symbol: str, period: int = 14) -> float | None:
     Returns None on any failure — caller falls back to existing stop logic.
     """
     try:
-        import yfinance as yf
+        import market_data as yf
         df = yf.download(symbol, period=f"{period * 3}d", interval="1d",
                          progress=False, auto_adjust=True)
         if df.empty or len(df) < period + 1:
@@ -734,7 +734,7 @@ def check_correlation_warning(symbol: str) -> list[str]:
         return []
     warnings = []
     try:
-        import yfinance as yf
+        import market_data as yf
         all_syms  = [symbol] + open_tickers
         df        = yf.download(all_syms, period=f"{CORR_LOOKBACK * 2}d",
                                 interval="1d", progress=False, auto_adjust=True)
@@ -806,7 +806,7 @@ def get_candle_type(symbol: str) -> str:
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         return "UNKNOWN"
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
+        from market_data import StockHistoricalDataClient, DATA_FEED
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         from datetime import timedelta
