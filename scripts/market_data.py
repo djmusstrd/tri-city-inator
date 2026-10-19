@@ -24,6 +24,24 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 log = logging.getLogger("market_data")
+_OWN_SETTINGS = ("FEED_DATA_URL", "FEED_CLIENT_NAME", "ALPACA_DATA_FEED")
+
+
+def _load_own_settings() -> None:
+    """Read just this module's settings from the bot's .env (scripts/../.env), so they apply even in
+    scripts that never load .env themselves. Never overrides the environment or touches other keys."""
+    env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    try:
+        with open(env) as f:
+            for line in f:
+                key, sep, value = line.strip().partition("=")
+                if sep and key.strip() in _OWN_SETTINGS:
+                    os.environ.setdefault(key.strip(), value.split("#")[0].strip().strip("'\""))
+    except OSError:
+        pass
+
+
+_load_own_settings()
 ET = ZoneInfo("America/New_York")
 ALPACA_DATA = "https://data.alpaca.markets"
 DATA_FEED = os.getenv("ALPACA_DATA_FEED", "sip")
