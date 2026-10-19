@@ -44,7 +44,9 @@ def _load_own_settings() -> None:
 _load_own_settings()
 ET = ZoneInfo("America/New_York")
 ALPACA_DATA = "https://data.alpaca.markets"
-DATA_FEED = os.getenv("ALPACA_DATA_FEED", "sip")
+# SIP needs the paid plan: default to it only through feed-inator (or set ALPACA_DATA_FEED=sip on a paid key);
+# a copy shipped to someone on Alpaca's free tier keeps IEX and keeps working.
+DATA_FEED = os.getenv("ALPACA_DATA_FEED") or ("sip" if os.getenv("FEED_DATA_URL") else "iex")
 FIELDS = ["Close", "High", "Low", "Open", "Volume"]  # yfinance 1.x download() column order
 HISTORY_FIELDS = ["Open", "High", "Low", "Close", "Volume"]  # Ticker.history() column order
 _TIMEFRAMES = {"1m": "1Min", "2m": "2Min", "5m": "5Min", "15m": "15Min", "30m": "30Min",
